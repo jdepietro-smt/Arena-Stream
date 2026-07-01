@@ -67,6 +67,35 @@ export default function App() {
   // different channel and came back.
   const [captureFormats, setCaptureFormats] = useState<Record<string, string>>({})
   const [audioCaptures,  setAudioCaptures]  = useState<Record<string, number | null>>({})
+
+  // Custom per-device display names (e.g. "Corvid44 #0 SDI 1" -> "Main Camera"),
+  // set via right-click rename on the source card. Persisted to localStorage
+  // so they survive app restarts without needing a backend settings store.
+  const [customNames, setCustomNames] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem('arenaStream.customDeviceNames') || '{}') }
+    catch { return {} }
+  })
+  function renameDevice(id: string, name: string) {
+    setCustomNames(prev => {
+      const next = { ...prev }
+      if (name.trim()) next[id] = name.trim()
+      else delete next[id]   // empty name clears the override, reverting to the raw device name
+      localStorage.setItem('arenaStream.customDeviceNames', JSON.stringify(next))
+      return next
+    })
+    // Renaming the source you're currently viewing also updates the stream
+    // name field — otherwise the rename is purely cosmetic in the sidebar and
+    // the dashboard still shows the generic auto-generated name (e.g. "sdi-0")
+    // until the stream name field is separately typed in below the preview.
+    if (id === selected?.id && name.trim()) {
+      setOpts(o => ({ ...o, streamName: name.trim() }))
+    }
+  }
+  // Electron's renderer doesn't implement window.prompt() (only alert/confirm
+  // have native support), so renaming uses an inline text input instead of a
+  // prompt() dialog. renamingId tracks which source card is mid-rename.
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const logRef    = useRef<HTMLDivElement>(null)
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const glStateRef   = useRef<{
@@ -260,28 +289,51 @@ export default function App() {
 
   async function selectDevice(dev: Device) {
     if (streaming || capturingRef.current) return
-    capturingRef.current = true
-    setSelected(dev)   // this channel becomes the preview source
-    try {
-      // Toggle: clicking an active channel stops it; clicking an inactive one starts it
-      const wasActive = activeIds.has(dev.id)
-      if (wasActive) {
-        await sdi.stopCapture()
+
+    const wasActive   = activeIds.has(dev.id)
+    const wasSelected = selected?.id === dev.id
+
+    // Clicking the channel you're currently viewing stops it.
+    if (wasActive && wasSelected) {
+      capturingRef.current = true
+      try {
+        await sdi.stopCapture(dev.id)
         setActiveIds(prev => { const s = new Set(prev); s.delete(dev.id); return s })
-      } else {
-        const fmts = await sdi.queryFormats(dev.name)
-        setFormats(fmts)
-        if (fmts.length > 0) {
-          const best = fmts[0]
-          setSelFormat(`${best.width}x${best.height}@${best.fps}`)
-          const newOpts = { ...opts, width: best.width, height: best.height, fps: best.fps }
-          setOpts(newOpts)
-          await sdi.startCapture(dev, newOpts)
-        } else {
-          await sdi.startCapture(dev, opts)
-        }
-        setActiveIds(prev => new Set([...prev, dev.id]))
+        setSelected(null)
+      } finally {
+        capturingRef.current = false
       }
+      return
+    }
+
+    // Clicking a DIFFERENT channel that's already running in the background —
+    // just switch the preview to it. No restart, so its capture never drops
+    // a frame and other viewers of it (e.g. if it's also live) see no glitch.
+    if (wasActive && !wasSelected) {
+      setSelected(dev)
+      if (customNames[dev.id]) setOpts(o => ({ ...o, streamName: customNames[dev.id] }))
+      await sdi.selectPreview(dev.id)
+      return
+    }
+
+    // Not active yet — start it fresh (it becomes the preview automatically).
+    capturingRef.current = true
+    setSelected(dev)
+    const baseOpts = customNames[dev.id] ? { ...opts, streamName: customNames[dev.id] } : opts
+    try {
+      const fmts = await sdi.queryFormats(dev.name)
+      setFormats(fmts)
+      if (fmts.length > 0) {
+        const best = fmts[0]
+        setSelFormat(`${best.width}x${best.height}@${best.fps}`)
+        const newOpts = { ...baseOpts, width: best.width, height: best.height, fps: best.fps }
+        setOpts(newOpts)
+        await sdi.startCapture(dev, newOpts)
+      } else {
+        setOpts(baseOpts)
+        await sdi.startCapture(dev, baseOpts)
+      }
+      setActiveIds(prev => new Set([...prev, dev.id]))
     } finally {
       capturingRef.current = false
     }
@@ -422,12 +474,33 @@ export default function App() {
                   key={dev.id}
                   className={`source-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''} ${dev.type}`}
                   onClick={() => selectDevice(dev)}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setRenamingId(dev.id)
+                    setRenameDraft(customNames[dev.id] || dev.name)
+                  }}
                   disabled={streaming}
-                  title={isActive ? 'Click to stop this channel' : 'Click to start this channel'}
+                  title={isActive ? 'Click to stop this channel' : 'Click to start this channel — right-click to rename'}
                 >
                   <span className={`dot ${dotState}`} />
                   <div className="source-info">
-                    <div className="source-name">{dev.name}</div>
+                    {renamingId === dev.id ? (
+                      <input
+                        autoFocus
+                        className="source-name-input"
+                        value={renameDraft}
+                        onChange={e => setRenameDraft(e.target.value)}
+                        onClick={e => e.stopPropagation()}
+                        onMouseDown={e => e.stopPropagation()}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { renameDevice(dev.id, renameDraft); setRenamingId(null) }
+                          else if (e.key === 'Escape') setRenamingId(null)
+                        }}
+                        onBlur={() => { renameDevice(dev.id, renameDraft); setRenamingId(null) }}
+                      />
+                    ) : (
+                      <div className="source-name">{customNames[dev.id] || dev.name}</div>
+                    )}
                     <div className="source-type">
                       <span className={`type-badge type-badge--${dev.type}`}>
                         {dev.type.toUpperCase()}

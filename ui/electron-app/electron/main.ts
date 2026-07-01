@@ -62,6 +62,14 @@ app.on('window-all-closed', () => {
 // One capture process per SDI channel (keyed by device id, e.g. "aja-0-1")
 const captureProcs = new Map<string, ChildProcess>()
 let captureProc:  ChildProcess | null = null   // kept for non-AJA / compat
+// Which device's frames actually get forwarded to the renderer's preview
+// canvas. Multiple channels can capture concurrently (captureProcs), but only
+// one should be ON SCREEN at a time — without this gate, every running
+// channel's frames would interleave on the same canvas. Switching preview is
+// just reassigning this value; it never touches the underlying processes, so
+// switching back to an already-running channel is instant and doesn't
+// interrupt its capture.
+let previewDeviceId: string | null = null
 let previewProc:  ChildProcess | null = null
 let relayProc:    ChildProcess | null = null
 let relayStop     = false   // set true to prevent auto-restart
@@ -672,7 +680,15 @@ startMjpegServer()
 // ─────────────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
-  kill(captureProc); captureProc = null
+  // NOTE: this used to unconditionally kill captureProc here, which made
+  // sense when only one capture could ever be active — but captureProc is
+  // just "whichever device was started/selected most recently", not "the
+  // device being started now". With concurrent multi-channel capture, that
+  // killed a DIFFERENT, unrelated channel's process every time a new one
+  // was started (confirmed via diagnostic logging: starting SDI 2 silently
+  // stopped SDI 1's already-running capture). The per-device kill below
+  // (via captureProcs, keyed by device.id) already correctly handles
+  // restarting the SAME channel; that's the only case that needs it.
   kill(previewProc); previewProc = null
   stopBeacon()  // capture-only mode — clear any stale stream beacon
 
@@ -714,7 +730,8 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
     })
     captureProcs.set(device.id, proc)
     captureProc = proc  // last-clicked channel drives the shared preview panel
-    streamMjpegFrames(proc)
+    previewDeviceId = device.id   // newly-started channel becomes the on-screen preview
+    streamMjpegFrames(proc, device.id)
 
     // stderr = JSON stats + diagnostics
     const devLabel = `SDI ${channelNum}`
@@ -782,7 +799,8 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
     })
     captureProcs.set(device.id, proc)
     captureProc = proc
-    streamMjpegFrames(proc)
+    previewDeviceId = device.id
+    streamMjpegFrames(proc, device.id)
 
     let ndiStderrBuf = ''
     proc.stderr?.on('data', (d: Buffer) => {
@@ -848,7 +866,8 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
     })
     captureProcs.set(device.id, proc)
     captureProc = proc
-    streamMjpegFrames(proc)
+    previewDeviceId = device.id
+    streamMjpegFrames(proc, device.id)
 
     let stderrBuf = ''
     proc.stderr?.on('data', (d: Buffer) => {
@@ -872,6 +891,12 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
   }
 
   // ── Webcam / DeckLink path (DirectShow via GStreamer or ffmpeg) ───────────
+  // This path doesn't track its process in captureProcs (unlike AJA/NDI/
+  // DeckLink-via-NTV2 above) since webcams aren't meant to run concurrently
+  // with each other — so it still needs its own explicit kill of whatever
+  // captureProc previously held, now that the removed top-level kill no
+  // longer does it implicitly.
+  kill(captureProc); captureProc = null
   activeCaptureType = device.type === 'decklink' ? 'decklink' : 'webcam'
   const gst = findGStreamer()
   const ffmpeg = findFFmpeg()
@@ -942,7 +967,8 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
   }
 
   // Push MJPEG frames to the HTTP preview server
-  streamMjpegFrames(captureProc)
+  previewDeviceId = device.id
+  streamMjpegFrames(captureProc, device.id)
 
   captureProc.stderr?.on('data', d => {
     const line = d.toString().trim()
@@ -961,7 +987,7 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
 // Raw YUV420P frame parser.
 // Wire format: [uint32 LE width][uint32 LE height][Y plane][Cb plane][Cr plane]
 // Sends every complete frame to the renderer as raw binary — no JPEG, no artifacts.
-function streamMjpegFrames(proc: ChildProcess) {
+function streamMjpegFrames(proc: ChildProcess, deviceId: string) {
   if (!proc.stdout) return
   let pending = Buffer.alloc(0)
 
@@ -982,6 +1008,11 @@ function streamMjpegFrames(proc: ChildProcess) {
 
       const yuv = pending.slice(8, total)
       pending = pending.slice(total)
+
+      // Only forward frames from whichever device is currently selected for
+      // preview — this process may still be capturing in the background even
+      // when it's not the one on screen (see previewDeviceId above).
+      if (deviceId !== previewDeviceId) continue
 
       // Send raw YUV to renderer — no encoding, pure signal
       try {
@@ -1016,8 +1047,23 @@ function streamRawYuv(proc: ChildProcess, w: number, h: number) {
   })
 }
 
-ipcMain.handle('stop-capture', () => {
-  kill(captureProc); captureProc = null
+ipcMain.handle('stop-capture', (_, deviceId?: string) => {
+  if (deviceId) {
+    const proc = captureProcs.get(deviceId)
+    if (proc) { kill(proc); captureProcs.delete(deviceId) }
+    if (proc === captureProc) captureProc = null
+    if (previewDeviceId === deviceId) previewDeviceId = null
+  } else {
+    kill(captureProc); captureProc = null
+    previewDeviceId = null
+  }
+  return { ok: true }
+})
+
+// Switches which already-running channel's frames are forwarded to the
+// preview canvas, without starting or stopping any capture process.
+ipcMain.handle('select-preview', (_, deviceId: string) => {
+  previewDeviceId = deviceId
   return { ok: true }
 })
 
@@ -1083,7 +1129,9 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
       await new Promise(r => setTimeout(r, 300))
       send('log', `[sdi_stream] ${protocol} → ${destUri}${protocol === 'rtp' ? ' (audio disabled — RTP is video-only)' : ''}`)
       captureProc = spawn(sdiStream, captureArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
-      streamMjpegFrames(captureProc)
+      const udpGoLiveId = udpBackend === 'ndi' ? `ndi::${udpDevice}` : `aja-${activeDeviceId}-${activeChannelNum}`
+      previewDeviceId = udpGoLiveId
+      streamMjpegFrames(captureProc, udpGoLiveId)
       let buf = ''
       captureProc.stderr?.on('data', (d: Buffer) => {
         buf += d.toString(); const ls = buf.split('\n'); buf = ls.pop() ?? ''
@@ -1127,7 +1175,9 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    streamMjpegFrames(captureProc)
+    const ndiGoLiveId = captureBackend === 'ndi' ? `ndi::${captureDevice}` : `aja-${activeDeviceId}-${activeChannelNum}`
+    previewDeviceId = ndiGoLiveId
+    streamMjpegFrames(captureProc, ndiGoLiveId)
     let ndiBuf = ''
     captureProc.stderr?.on('data', (d: Buffer) => {
       ndiBuf += d.toString()
@@ -1232,7 +1282,8 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     // stdout = binary MJPEG frames — must use streamMjpegFrames, NOT a text reader
-    streamMjpegFrames(captureProc)
+    previewDeviceId = goLiveDeviceId
+    streamMjpegFrames(captureProc, goLiveDeviceId)
     // stderr = JSON stats + diagnostics
     let goLiveStderrBuf = ''
     captureProc.stderr?.on('data', (d: Buffer) => {
@@ -1293,7 +1344,8 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    streamMjpegFrames(captureProc)
+    previewDeviceId = activeDeviceId
+    streamMjpegFrames(captureProc, activeDeviceId)
     let buf = ''
     captureProc.stderr?.on('data', (d: Buffer) => {
       buf += d.toString(); const ls = buf.split('\n'); buf = ls.pop() ?? ''
