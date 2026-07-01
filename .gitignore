@@ -15,6 +15,7 @@ ui/electron-app/node_modules/
 ui/electron-app/dist/
 ui/electron-app/dist-electron/
 ui/electron-app/release/
+ui/electron-app/*.asar
 
 # Debug/scratch scripts and logs accumulated during development
 ui/electron-app/cdp-*.js

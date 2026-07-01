@@ -60,8 +60,13 @@ export default function App() {
   const [selFormat, setSelFormat] = useState('')
 
   const [previewSrc,     setPreviewSrc]     = useState('')   // fallback MJPEG (unused now)
-  const [captureFormat,  setCaptureFormat]  = useState('')
-  const [audioCapture,   setAudioCapture]   = useState<number | null>(null)
+  // Keyed by device.id so each source's own format/audio badge persists
+  // independently — previously these were single shared values that got
+  // overwritten by whichever channel's stats arrived most recently, making
+  // a channel's badges disappear/show stale data as soon as you selected a
+  // different channel and came back.
+  const [captureFormats, setCaptureFormats] = useState<Record<string, string>>({})
+  const [audioCaptures,  setAudioCaptures]  = useState<Record<string, number | null>>({})
   const logRef    = useRef<HTMLDivElement>(null)
   const canvasRef    = useRef<HTMLCanvasElement>(null)
   const glStateRef   = useRef<{
@@ -89,11 +94,13 @@ export default function App() {
       pendingYuvRef.current = { w, h, data: new Uint8Array(yuv.buffer ?? yuv) }
     })
 
-    sdi.onCaptureFormat((fmt: string) => {
-      setCaptureFormat(fmt)
+    sdi.onCaptureFormat((d: {id: string, format: string}) => {
+      if (!d?.id) return
+      setCaptureFormats(prev => ({ ...prev, [d.id]: d.format }))
     })
-    sdi.onAudioStats((d: {captured: number}) => {
-      setAudioCapture(d.captured)
+    sdi.onAudioStats((d: {id: string, captured: number}) => {
+      if (!d?.id) return
+      setAudioCaptures(prev => ({ ...prev, [d.id]: d.captured }))
     })
     sdi.onDiscoveredFeed((f: any) => {
       setFeeds(prev => {
@@ -425,12 +432,12 @@ export default function App() {
                       <span className={`type-badge type-badge--${dev.type}`}>
                         {dev.type.toUpperCase()}
                       </span>
-                      {isActive && captureFormat && isSelected && (
-                        <span className="source-format">{captureFormat}</span>
+                      {isActive && captureFormats[dev.id] && (
+                        <span className="source-format">{captureFormats[dev.id]}</span>
                       )}
-                      {isActive && isSelected && (
-                        <span className={`audio-badge${audioCapture == null ? '' : audioCapture > 0 ? ' audio-badge--active' : ' audio-badge--silent'}`}>
-                          {audioCapture == null ? '◎ AUD' : audioCapture > 0 ? `● AUD ${audioCapture}f` : '○ AUD –'}
+                      {isActive && (
+                        <span className={`audio-badge${audioCaptures[dev.id] == null ? '' : audioCaptures[dev.id]! > 0 ? ' audio-badge--active' : ' audio-badge--silent'}`}>
+                          {audioCaptures[dev.id] == null ? '◎ AUD' : audioCaptures[dev.id]! > 0 ? `● AUD ${audioCaptures[dev.id]}f` : '○ AUD –'}
                         </span>
                       )}
                     </div>

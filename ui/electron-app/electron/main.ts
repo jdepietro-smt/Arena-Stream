@@ -731,8 +731,9 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
           try {
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
-            if (stat.mode) send('capture-format', formatMode(stat.mode))
-            if (typeof stat.audio_captured === 'number') send('audio-stats', { captured: stat.audio_captured })
+            if (stat.mode) send('capture-format', { id: device.id, format: formatMode(stat.mode) })
+            if (typeof stat.audio_captured === 'number')
+              send('audio-stats', { id: device.id, captured: stat.audio_captured })
           } catch {}
         } else {
           send('log', `[aja ${devLabel}] ${t}`)
@@ -796,8 +797,9 @@ ipcMain.handle('start-capture', async (_, device: Device, opts: StreamOpts) => {
           try {
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
-            if (stat.mode) send('capture-format', formatMode(stat.mode))
-            if (typeof stat.audio_captured === 'number') send('audio-stats', { captured: stat.audio_captured })
+            if (stat.mode) send('capture-format', { id: device.id, format: formatMode(stat.mode) })
+            if (typeof stat.audio_captured === 'number')
+              send('audio-stats', { id: device.id, captured: stat.audio_captured })
           } catch {}
         } else {
           send('log', `[ndi] ${t}`)
@@ -1135,7 +1137,9 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
         if (!t || /configuration:|built with| lib|Last message repeated/i.test(t)) continue
         if (t.startsWith('{')) {
           send('log', t)
-          try { const s = JSON.parse(t); if (s.mode) send('capture-format', formatMode(s.mode)) } catch {}
+          // No source-list row corresponds to this NDI *broadcast output* process
+          // (it isn't a capture device selection), so there's no device id to key
+          // a capture-format/audio-stats event by — logging is enough here.
         } else {
           send('log', `[ndi] ${t}`)
         }
@@ -1196,6 +1200,12 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
     // Determine backend: if activeNdiSource is set the device was an NDI source.
     const captureBackend = activeNdiSource ? 'ndi' : 'aja'
     const captureDevice  = activeNdiSource || deviceIdx
+    // Reconstruct the same device.id format used by the preview handlers
+    // above, so the "go live" stats keep updating the same source-list badge
+    // that showed this device during preview, instead of a global slot.
+    const goLiveDeviceId = captureBackend === 'ndi'
+      ? `ndi::${captureDevice}`
+      : `aja-${deviceIdx}-${activeChannelNum}`
 
     // Push directly to the external SRT destination (server or relay URL).
     // Bypassing the local-mediamtx intermediate hop eliminates the RTSP burst/
@@ -1237,8 +1247,9 @@ ipcMain.handle('start-stream', async (_, opts: StreamOpts) => {
           try {
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
-            if (stat.mode) send('capture-format', formatMode(stat.mode))
-            if (typeof stat.audio_captured === 'number') send('audio-stats', { captured: stat.audio_captured })
+            if (stat.mode) send('capture-format', { id: goLiveDeviceId, format: formatMode(stat.mode) })
+            if (typeof stat.audio_captured === 'number')
+              send('audio-stats', { id: goLiveDeviceId, captured: stat.audio_captured })
           } catch {}
         } else {
           send('log', `[aja] ${t}`)
