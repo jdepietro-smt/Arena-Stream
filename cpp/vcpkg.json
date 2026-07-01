@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "sdi-stream",
+  "version": "0.1.0",
+  "description": "SDI capture -> encode -> SRT streaming tool",
+  "dependencies": [
+    "libsrt",
+    {
+      "name": "ffmpeg",
+      "features": ["x264", "x265", "opus", "srt", "nvcodec"]
+    }
+  ]
+}

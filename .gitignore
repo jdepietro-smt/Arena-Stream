@@ -1,0 +1,32 @@
+# arena/ is its own separate git repository
+arena/
+
+# C++ build outputs
+cpp/build/
+cpp/vcpkg_installed/
+*.obj
+*.exe
+*.dll
+*.pdb
+*.lib
+
+# Electron/Node build outputs
+ui/electron-app/node_modules/
+ui/electron-app/dist/
+ui/electron-app/dist-electron/
+ui/electron-app/release/
+
+# Debug/scratch scripts and logs accumulated during development
+ui/electron-app/cdp-*.js
+ui/electron-app/*.txt
+ui/electron-app/dvr-ssh.js
+
+# Editor/OS
+.vs/
+.vscode/
+*.suo
+.DS_Store
+Thumbs.db
+
+# Local Claude Code settings (personal, not shared)
+.claude/settings.local.json
