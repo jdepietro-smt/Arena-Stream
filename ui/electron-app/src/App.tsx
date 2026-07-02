@@ -28,6 +28,127 @@ interface StreamOpts {
 
 const sdi = (window as any).sdi
 
+type FrameData = { w: number; h: number; data: Uint8Array }
+
+// One WebGL canvas + render loop per device, reading from a frames map shared
+// across all tiles (framesRef). Extracted from what used to be a single
+// canvas driven by a single "latest frame" ref — multi-channel capture needs
+// one of these per active channel so all of them can be visible at once
+// instead of only whichever one was most recently selected.
+function VideoTile({
+  deviceId, framesRef, label, isLive, onClick, isSelected,
+}: {
+  deviceId:  string
+  framesRef: React.MutableRefObject<Record<string, FrameData>>
+  label?:    string
+  isLive?:   boolean
+  onClick?:  () => void
+  isSelected?: boolean
+}) {
+  const canvasRef  = useRef<HTMLCanvasElement>(null)
+  const glStateRef = useRef<{
+    gl: WebGLRenderingContext
+    yTex: WebGLTexture; uTex: WebGLTexture; vTex: WebGLTexture
+    w: number; h: number
+  } | null>(null)
+  const rafRef = useRef(0)
+
+  useEffect(() => {
+    let glState: typeof glStateRef.current = null
+
+    const initGl = (canvas: HTMLCanvasElement, w: number, h: number) => {
+      canvas.width = w; canvas.height = h
+      const gl = canvas.getContext('webgl', { alpha: false, antialias: false, desynchronized: false })
+      if (!gl) return null
+
+      const mkShader = (type: number, src: string) => {
+        const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s
+      }
+      const vert = mkShader(gl.VERTEX_SHADER, `
+        attribute vec2 aPos; attribute vec2 aTex; varying vec2 vTex;
+        void main() { gl_Position = vec4(aPos,0.0,1.0); vTex = aTex; }
+      `)
+      const frag = mkShader(gl.FRAGMENT_SHADER, `
+        precision mediump float;
+        uniform sampler2D uY, uCb, uCr; varying vec2 vTex;
+        void main() {
+          /* BT.709 limited-range — correct for all HD SDI (1080i/p, 720p). */
+          float y  = texture2D(uY,  vTex).r - 0.0627;
+          float cb = texture2D(uCb, vTex).r - 0.5;
+          float cr = texture2D(uCr, vTex).r - 0.5;
+          gl_FragColor = vec4(
+            clamp(1.164*y + 1.793*cr,              0.0, 1.0),
+            clamp(1.164*y - 0.213*cb - 0.533*cr,   0.0, 1.0),
+            clamp(1.164*y + 2.112*cb,               0.0, 1.0),
+            1.0);
+        }
+      `)
+      const prog = gl.createProgram()!
+      gl.attachShader(prog, vert); gl.attachShader(prog, frag); gl.linkProgram(prog); gl.useProgram(prog)
+
+      const vbuf = gl.createBuffer()
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbuf)
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,0,1, 1,-1,1,1, -1,1,0,0, 1,1,1,0]), gl.STATIC_DRAW)
+      const aPos = gl.getAttribLocation(prog, 'aPos'); const aTex = gl.getAttribLocation(prog, 'aTex')
+      gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0)
+      gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8)
+
+      const mkTex = (unit: number, name: string) => {
+        gl.activeTexture(gl.TEXTURE0 + unit)
+        const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        gl.uniform1i(gl.getUniformLocation(prog, name), unit); return t
+      }
+      return { gl, yTex: mkTex(0,'uY'), uTex: mkTex(1,'uCb'), vTex: mkTex(2,'uCr'), w, h }
+    }
+
+    const render = () => {
+      rafRef.current = requestAnimationFrame(render)
+      const frame = framesRef.current[deviceId]
+      if (!frame) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+
+      if (!glState || glState.w !== frame.w || glState.h !== frame.h) {
+        glState = initGl(canvas, frame.w, frame.h)
+        glStateRef.current = glState
+      }
+      if (!glState) return
+
+      const { gl, yTex, uTex, vTex } = glState
+      const { w, h, data } = frame
+      const ySz = w * h, uvSz = (w >> 1) * (h >> 1)
+
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, yTex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(0, ySz))
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, uTex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w>>1, h>>1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(ySz, ySz+uvSz))
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, vTex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w>>1, h>>1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(ySz+uvSz))
+
+      gl.viewport(0, 0, w, h)
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    }
+    rafRef.current = requestAnimationFrame(render)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [deviceId, framesRef])
+
+  return (
+    <div className={`video-tile ${isSelected ? 'selected' : ''}`} onClick={onClick}>
+      <canvas ref={canvasRef} className="preview-canvas" />
+      {label && (
+        <div className="preview-overlay">
+          <span className="preview-name">{label}</span>
+          {isLive && <span className="live-dot" />}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
   // ── App mode ────────────────────────────────────────────────────────────────
@@ -97,16 +218,10 @@ export default function App() {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const logRef    = useRef<HTMLDivElement>(null)
-  const canvasRef    = useRef<HTMLCanvasElement>(null)
-  const glStateRef   = useRef<{
-    gl: WebGLRenderingContext
-    prog: WebGLProgram
-    yTex: WebGLTexture; uTex: WebGLTexture; vTex: WebGLTexture
-    w: number; h: number
-  } | null>(null)
-  // Latest YUV frame — IPC writes here, requestAnimationFrame reads it
-  const pendingYuvRef = useRef<{ w: number; h: number; data: Uint8Array } | null>(null)
-  const rafRef        = useRef<number>(0)
+  // Latest frame per device id — each active channel gets its own VideoTile
+  // (defined above) reading from this shared map, instead of a single ref
+  // for whichever one channel used to be "the" preview.
+  const framesRef = useRef<Record<string, FrameData>>({})
   const capturingRef = useRef(false)
 
   // ── IPC listeners ──────────────────────────────────────────────────────────
@@ -117,10 +232,11 @@ export default function App() {
     sdi.onStreamUrl((url: string) => setViewerUrl(url))
     sdi.onStreamStopped(() => setStreaming(false))
 
-    // Raw YUV420P preview — IPC just stores the latest frame.
-    // requestAnimationFrame (below) renders it, synced to display VBlank = no tearing.
-    sdi.onPreviewYuv((w: number, h: number, yuv: Buffer) => {
-      pendingYuvRef.current = { w, h, data: new Uint8Array(yuv.buffer ?? yuv) }
+    // Raw YUV420P preview — IPC just stores the latest frame per device id.
+    // Each VideoTile's own requestAnimationFrame loop renders it, synced to
+    // display VBlank = no tearing.
+    sdi.onPreviewYuv((id: string, w: number, h: number, yuv: Buffer) => {
+      framesRef.current[id] = { w, h, data: new Uint8Array(yuv.buffer ?? yuv) }
     })
 
     sdi.onCaptureFormat((d: {id: string, format: string}) => {
@@ -180,93 +296,6 @@ export default function App() {
     if (logRef.current)
       logRef.current.scrollTop = logRef.current.scrollHeight
   }, [logs])
-
-  // WebGL render loop — driven by requestAnimationFrame so every draw is
-  // VSync-aligned and tearing is eliminated.
-  useEffect(() => {
-    let glState: typeof glStateRef.current = null
-
-    const initGl = (canvas: HTMLCanvasElement, w: number, h: number) => {
-      canvas.width = w; canvas.height = h
-      const gl = canvas.getContext('webgl', { alpha: false, antialias: false, desynchronized: false })
-      if (!gl) return null
-
-      const mkShader = (type: number, src: string) => {
-        const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s
-      }
-      const vert = mkShader(gl.VERTEX_SHADER, `
-        attribute vec2 aPos; attribute vec2 aTex; varying vec2 vTex;
-        void main() { gl_Position = vec4(aPos,0.0,1.0); vTex = aTex; }
-      `)
-      const frag = mkShader(gl.FRAGMENT_SHADER, `
-        precision mediump float;
-        uniform sampler2D uY, uCb, uCr; varying vec2 vTex;
-        void main() {
-          /* BT.709 limited-range — correct for all HD SDI (1080i/p, 720p).
-             BT.601 was producing muted reds and a flat/shadowy look on HD content. */
-          float y  = texture2D(uY,  vTex).r - 0.0627;
-          float cb = texture2D(uCb, vTex).r - 0.5;
-          float cr = texture2D(uCr, vTex).r - 0.5;
-          gl_FragColor = vec4(
-            clamp(1.164*y + 1.793*cr,              0.0, 1.0),
-            clamp(1.164*y - 0.213*cb - 0.533*cr,   0.0, 1.0),
-            clamp(1.164*y + 2.112*cb,               0.0, 1.0),
-            1.0);
-        }
-      `)
-      const prog = gl.createProgram()!
-      gl.attachShader(prog, vert); gl.attachShader(prog, frag); gl.linkProgram(prog); gl.useProgram(prog)
-
-
-      const vbuf = gl.createBuffer()
-      gl.bindBuffer(gl.ARRAY_BUFFER, vbuf)
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,0,1, 1,-1,1,1, -1,1,0,0, 1,1,1,0]), gl.STATIC_DRAW)
-      const aPos = gl.getAttribLocation(prog, 'aPos'); const aTex = gl.getAttribLocation(prog, 'aTex')
-      gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0)
-      gl.enableVertexAttribArray(aTex); gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8)
-
-      const mkTex = (unit: number, name: string) => {
-        gl.activeTexture(gl.TEXTURE0 + unit)
-        const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-        gl.uniform1i(gl.getUniformLocation(prog, name), unit); return t
-      }
-      return { gl, prog, yTex: mkTex(0,'uY'), uTex: mkTex(1,'uCb'), vTex: mkTex(2,'uCr'), w, h }
-    }
-
-    const render = () => {
-      rafRef.current = requestAnimationFrame(render)
-      const frame = pendingYuvRef.current
-      if (!frame) return
-      const canvas = canvasRef.current
-      if (!canvas) return
-
-      if (!glState || glState.w !== frame.w || glState.h !== frame.h) {
-        glState = initGl(canvas, frame.w, frame.h)
-        glStateRef.current = glState
-      }
-      if (!glState) return
-
-      const { gl, yTex, uTex, vTex } = glState
-      const { w, h, data } = frame
-      const ySz = w * h, uvSz = (w >> 1) * (h >> 1)
-
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, yTex)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(0, ySz))
-      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, uTex)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w>>1, h>>1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(ySz, ySz+uvSz))
-      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, vTex)
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w>>1, h>>1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(ySz+uvSz))
-
-      gl.viewport(0, 0, w, h)
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-    }
-    rafRef.current = requestAnimationFrame(render)
-    return () => cancelAnimationFrame(rafRef.current)
-  }, [])   // runs once on mount, loop continues for app lifetime
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const scan = useCallback(async () => {
@@ -524,14 +553,33 @@ export default function App() {
 
         {/* ── Main area ────────────────────────────── */}
         <main className="main">
-          {/* Preview — WebGL canvas renders raw YUV420P, zero compression artifacts */}
+          {/* Preview — WebGL canvas(es) render raw YUV420P, zero compression artifacts.
+              Encode mode shows one tile per active channel (all running concurrently);
+              receive mode shows the single connected feed. */}
           <div className={`preview-wrap ${streaming || receiving ? 'live' : ''}`}>
-            <canvas ref={canvasRef} className="preview-canvas"
-              style={{ display: glStateRef.current ? 'block' : 'none' }} />
-            {appMode === 'encode' && !selected && (
+            {appMode === 'encode' && activeIds.size === 0 && (
               <div className="preview-placeholder">
                 <div className="placeholder-icon">▶</div>
                 <div>Select a source to preview</div>
+              </div>
+            )}
+            {appMode === 'encode' && activeIds.size > 0 && (
+              <div className={`video-grid video-grid--${Math.min(activeIds.size, 4)}`}>
+                {Array.from(activeIds).map(id => {
+                  const dev = devices.find(d => d.id === id)
+                  if (!dev) return null
+                  return (
+                    <VideoTile
+                      key={id}
+                      deviceId={id}
+                      framesRef={framesRef}
+                      label={customNames[id] || dev.name}
+                      isLive={streaming}
+                      isSelected={selected?.id === id}
+                      onClick={() => selectDevice(dev)}
+                    />
+                  )
+                })}
               </div>
             )}
             {appMode === 'receive' && !connectedFeed && (
@@ -540,15 +588,12 @@ export default function App() {
                 <div>Select a stream to receive</div>
               </div>
             )}
-            {appMode === 'encode' && selected && (
-              <div className="preview-overlay">
-                <span className="preview-name">{selected.name}</span>
-              </div>
-            )}
             {appMode === 'receive' && connectedFeed && (
-              <div className="preview-overlay">
-                <span className="preview-name">{connectedFeed.name}  {connectedFeed.ip}:{connectedFeed.port}</span>
-              </div>
+              <VideoTile
+                deviceId="__receive__"
+                framesRef={framesRef}
+                label={`${connectedFeed.name}  ${connectedFeed.ip}:${connectedFeed.port}`}
+              />
             )}
           </div>
 

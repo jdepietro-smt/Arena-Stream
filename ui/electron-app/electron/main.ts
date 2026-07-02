@@ -1009,15 +1009,13 @@ function streamMjpegFrames(proc: ChildProcess, deviceId: string) {
       const yuv = pending.slice(8, total)
       pending = pending.slice(total)
 
-      // Only forward frames from whichever device is currently selected for
-      // preview — this process may still be capturing in the background even
-      // when it's not the one on screen (see previewDeviceId above).
-      if (deviceId !== previewDeviceId) continue
-
-      // Send raw YUV to renderer — no encoding, pure signal
+      // Forward every active channel's frames, tagged by device id, so the
+      // renderer can show all of them at once in a grid — previously this
+      // was gated to only the single "selected" preview device, which was
+      // right for a one-canvas layout but wrong for a multi-tile grid.
       try {
         if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
-          win.webContents.send('preview-yuv', w, h, yuv)
+          win.webContents.send('preview-yuv', deviceId, w, h, yuv)
         }
       } catch {}
     }
@@ -1040,7 +1038,7 @@ function streamRawYuv(proc: ChildProcess, w: number, h: number) {
       pending = pending.slice(frameBytes)
       try {
         if (win && !win.isDestroyed() && !win.webContents.isDestroyed())
-          win.webContents.send('preview-yuv', w, h, yuv)
+          win.webContents.send('preview-yuv', '__receive__', w, h, yuv)
       } catch {}
     }
     if (pending.length > 16_000_000) pending = Buffer.alloc(0)

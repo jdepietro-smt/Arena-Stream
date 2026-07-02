@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld('sdi', {
   openDvr:       (o: unknown)            => ipcRenderer.invoke('open-dvr', o),
 
   onPreviewFrame:   (cb: (d: string) => void)                       => ipcRenderer.on('preview-frame',   (_, d) => cb(d)),
-  onPreviewYuv:     (cb: (w: number, h: number, d: Buffer) => void) => ipcRenderer.on('preview-yuv',     (_, w, h, d) => cb(w, h, d)),
+  onPreviewYuv:     (cb: (id: string, w: number, h: number, d: Buffer) => void) => ipcRenderer.on('preview-yuv',     (_, id, w, h, d) => cb(id, w, h, d)),
   onCaptureStopped: (cb: (d: unknown) => void)=> ipcRenderer.on('capture-stopped', (_, d) => cb(d)),
   onStreamStopped:  (cb: (d: unknown) => void)=> ipcRenderer.on('stream-stopped',  (_, d) => cb(d)),
   onStreamUrl:      (cb: (d: string) => void) => ipcRenderer.on('stream-url',      (_, d) => cb(d)),
