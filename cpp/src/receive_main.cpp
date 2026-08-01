@@ -32,10 +32,12 @@
 #include "redundancy.h"
 #include "srt_input.h"
 #include "srt_output.h"
+#include "stats_server.h"
 
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -52,7 +54,21 @@ struct Args {
     int         latency_ms = 150;
     int         window_ms  = 100;            // 2022-7 reassembly window
     std::string passphrase = "";
+    int         stats_port = 0;              // 0 = disabled
 };
+
+// Minimal JSON string escaping — SRT URIs realistically never contain quotes
+// or control characters, but a passphrase might; escape defensively rather
+// than assume.
+std::string json_str(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    for (char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+    }
+    return out;
+}
 
 void usage() {
     std::cerr <<
@@ -63,6 +79,12 @@ R"(sdi_receive — SMPTE 2022-7 SRT protection-switch gateway
   --latency <ms>      SRT latency for all connections (default: 150)
   --window  <ms>      2022-7 reassembly window in ms   (default: 100)
   --passphrase <s>    AES passphrase (applied to all connections)
+  --stats-port <port> Serve a JSON health probe on this TCP port (optional).
+                      GET anything → {"dual_path","path1_up","path2_up",
+                      "output_connected","src","src2","dest"}. Meant to be
+                      polled by a backend monitor over the network — the
+                      existing 5s stderr heartbeat only reaches whoever is
+                      watching this process's own console.
 
 Examples:
   # Simple relay
@@ -88,6 +110,7 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (arg == "--latency")    a.latency_ms = std::atoi(next());
         else if (arg == "--window")     a.window_ms  = std::atoi(next());
         else if (arg == "--passphrase") a.passphrase = next();
+        else if (arg == "--stats-port") a.stats_port = std::atoi(next());
         else if (arg == "-h" || arg == "--help") { usage(); return false; }
         else { std::cerr << "unknown arg: " << arg << "\n"; usage(); return false; }
     }
@@ -132,42 +155,46 @@ int main(int argc, char** argv) {
     const std::string dest_uri = (args.dest.find("://") != std::string::npos)
         ? args.dest : "srt://" + args.dest;
 
-    // SRT output config for the merged downstream stream.
-    // We don't know the codec params until we've seen the first packet, so
-    // SrtOutput is constructed lazily in the packet callback.
-    // For MPEG-TS relay mode (which is what we are), we use avformat's
-    // "mpegts" muxer with null codec contexts — it copies TS packets verbatim.
-    //
-    // Lazy construction is handled by storing the output as unique_ptr and
-    // creating it on the first video packet so stream indices are known.
-    std::unique_ptr<sdi::ReconnectingSrtOutput> out;
-
-    // We relay raw MPEG-TS AVPackets from SrtInput → ReconnectingSrtOutput.
-    // For a pure TS relay (no re-mux), we use libavformat in "copy" mode
-    // (avcodec_parameters_copy on the input stream parameters).
-    //
-    // Setup: we grab the AVFormatContext from SrtInput to read stream params,
-    // build a matching output context, then start copying packets.
-    //
-    // For simplicity in this implementation we let SrtInput start first,
-    // grab its fmt->streams[], then construct SrtOutput.
-
-    std::atomic<int>  vsi{-1}, asi{-1};
+    // We relay raw MPEG-TS AVPackets from SrtInput straight through to a
+    // downstream SRT destination — no re-encode, just avcodec_parameters_copy
+    // from the input stream(s) onto a matching output muxer built on first
+    // packet (once we know the input's codec params — see init_output below).
     std::atomic<bool> output_ready{false};
 
-    // The output is a simple SRT writer in "copy" mode.
-    // We use AVCodecContext* = nullptr trick: SrtOutput can be built with
-    // null contexts if we pre-configure the stream params via a helper.
-    //
-    // Simpler approach: use avformat directly here without SrtOutput wrapper
-    // (SrtOutput is designed for encoder output; for relay we need to copy
-    // stream params from the input). We build the AVFormatContext manually.
+    // Assigned right after each SrtInput is constructed, below, in whichever
+    // branch runs (the same pointers already used there to safely read
+    // format_context()) — reused here so the stats JSON provider can report
+    // is_running() over the network. nullptr until then, and stays nullptr
+    // for path 2 in single-path mode.
+    std::atomic<sdi::SrtInput*> live_src1{nullptr};
+    std::atomic<sdi::SrtInput*> live_src2{nullptr};
+
+    auto build_stats_json = [&]() -> std::string {
+        auto* p1 = live_src1.load();
+        auto* p2 = live_src2.load();
+        std::string j = "{";
+        j += "\"dual_path\":";        j += dual_path ? "true" : "false";
+        j += ",\"path1_up\":";        j += (p1 && p1->is_running()) ? "true" : "false";
+        j += ",\"path2_up\":";        j += (p2 && p2->is_running()) ? "true" : "false";
+        j += ",\"output_connected\":"; j += output_ready.load() ? "true" : "false";
+        j += ",\"src\":\""  + json_str(args.src)  + "\"";
+        j += ",\"src2\":\"" + json_str(args.src2) + "\"";
+        j += ",\"dest\":\"" + json_str(dest_uri)  + "\"";
+        j += "}";
+        return j;
+    };
+
+    std::unique_ptr<sdi::StatsServer> stats_server;
+    if (args.stats_port > 0) {
+        stats_server = std::make_unique<sdi::StatsServer>(args.stats_port, build_stats_json);
+        stats_server->start();
+    }
 
     AVFormatContext* out_fmt = nullptr;
     AVStream*        out_vstream = nullptr;
     AVStream*        out_astream = nullptr;
 
-    auto init_output = [&](AVFormatContext* in_fmt) -> bool {
+    auto init_output = [&](const AVFormatContext* in_fmt) -> bool {
         if (output_ready.load()) return true;
 
         std::string url = dest_uri;
@@ -224,20 +251,21 @@ int main(int argc, char** argv) {
     if (!dual_path) {
         sdi::SrtInput::Config src_cfg{args.src, args.latency_ms, args.passphrase};
 
-        // We need the input AVFormatContext to build the output.
-        // SrtInput doesn't expose it directly; we initialise lazily on first packet.
-        // We wrap in a state machine: first packet → init output → relay all.
-        std::atomic<bool> fmt_grabbed{false};
-
+        // We need the input's stream layout (codecpar, time_base) to build a
+        // matching output muxer. The reader thread and this callback are the
+        // same thread, so format_context() is safe to read here — see its
+        // doc comment in srt_input.h. live_src1 is assigned right after
+        // construction, below; packets can't arrive before start() is called.
         sdi::SrtInput src(src_cfg, [&](AVPacket* pkt, int /*si*/) {
-            if (!fmt_grabbed.load()) {
-                // Can't access the internal fmt here; SrtInput needs an accessor.
-                // For now, construct with safe defaults and relay raw packets.
-                // (A future refactor should expose SrtInput::format_context().)
-                fmt_grabbed.store(true);
+            if (!output_ready.load()) {
+                if (auto* p = live_src1.load()) {
+                    if (const AVFormatContext* in_fmt = p->format_context())
+                        init_output(in_fmt);
+                }
             }
             relay_packet(pkt);
         });
+        live_src1.store(&src);
 
         std::cerr << "sdi_receive: single-path relay " << args.src
                   << " → " << dest_uri << "\n";
@@ -272,12 +300,26 @@ int main(int argc, char** argv) {
         sdi::SrtInput::Config cfg1{args.src,  args.latency_ms, args.passphrase};
         sdi::SrtInput::Config cfg2{args.src2, args.latency_ms, args.passphrase};
 
+        // Whichever path delivers a packet first initialises the output —
+        // 2022-7 is meant to keep the stream alive even if one path never
+        // comes up at all, so we don't wait for both. See the single-path
+        // branch above for why reading format_context() here is safe.
+        auto maybe_init_from = [&](sdi::SrtInput* ptr) {
+            if (output_ready.load() || !ptr) return;
+            if (const AVFormatContext* in_fmt = ptr->format_context())
+                init_output(in_fmt);
+        };
+
         sdi::SrtInput src1(cfg1, [&](AVPacket* pkt, int /*si*/) {
+            maybe_init_from(live_src1.load());
             receiver.push(0, pkt);
         });
         sdi::SrtInput src2(cfg2, [&](AVPacket* pkt, int /*si*/) {
+            maybe_init_from(live_src2.load());
             receiver.push(1, pkt);
         });
+        live_src1.store(&src1);
+        live_src2.store(&src2);
 
         src1.start();
         src2.start();

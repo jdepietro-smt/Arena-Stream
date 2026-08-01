@@ -199,6 +199,14 @@ struct Args {
     // an NDI source on the LAN regardless of the SRT destination.
     bool        ndi_out        = false;
     std::string ndi_name       = "SDI Stream";     // NDI source name visible on LAN
+
+    // Adaptive bitrate — off by default so existing fixed-bitrate behavior
+    // is unchanged unless explicitly opted into. --bitrate becomes the
+    // ceiling (starting point); the encoder steps down under real network
+    // congestion (netq starting to drop packets — see the ABR loop in the
+    // stats heartbeat) and back up gradually once conditions are clean.
+    bool        abr            = false;
+    int         abr_floor_pct  = 40;   // floor as % of --bitrate; won't step below this
 };
 
 void usage() {
@@ -217,6 +225,10 @@ R"USAGE(sdi_stream -- SDI/NDI-in -> encode -> SRT
   --achannels <n>                 SDI embedded audio channels (default: 2)
   --ndi-out                       Also send to NDI LAN output simultaneously
   --ndi-name  <name>              NDI source name visible on LAN (default: SDI Stream)
+  --abr                           Adaptive bitrate: --bitrate becomes a ceiling;
+                                  steps down under real network congestion, back
+                                  up gradually once clean (default: off, fixed bitrate)
+  --abr-floor-pct <n>             Won't step bitrate below this % of --bitrate (default: 40)
 
 NDI notes:
   --backend ndi        Receive from an NDI source and bridge it to SRT.
@@ -252,6 +264,8 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (arg == "--dest2")     a.dest2          = next();
         else if (arg == "--ndi-out")   a.ndi_out        = true;
         else if (arg == "--ndi-name")  a.ndi_name       = next();
+        else if (arg == "--abr")           a.abr           = true;
+        else if (arg == "--abr-floor-pct") a.abr_floor_pct = std::atoi(next());
         else if (arg == "--list")        { /* handled before capture loop */ }
         else if (arg == "--list-codecs") { /* handled before capture loop */ }
         else if (arg == "-h" || arg == "--help") { usage(); return false; }
@@ -719,12 +733,31 @@ int main(int argc, char** argv) {
         std::to_string(mode.height) +
         (mode.interlaced ? "i" : "p") + "@" +
         fps_buf;
+    // Adaptive bitrate state. netq (declared above) is the queue between
+    // encode and the network-write thread, sized specifically so a slow
+    // network write never stalls capture — see its declaration comment.
+    // That means when the network genuinely can't keep up, packets pile up
+    // and get dropped THERE, not lost at the source. It's already computed
+    // every heartbeat for the JSON stats below, so it doubles as a real,
+    // no-extra-cost congestion signal without needing raw SRT socket stats
+    // (this sender goes through libavformat's SRT muxer, not raw libsrt, so
+    // srt_bistats() isn't available here the way it is in sdi_player.cpp's
+    // receive path).
+    int      abr_current_kbps  = args.bitrate_kbps;
+    uint64_t abr_last_netq_drop = 0;
+    int      abr_clean_streak   = 0;
+    const int abr_floor_kbps = std::max(1, args.bitrate_kbps * args.abr_floor_pct / 100);
+    constexpr double kAbrStepDownFactor        = 0.80;  // -20% per congested second
+    constexpr double kAbrStepUpFactor          = 1.05;  // +5% per clean second, once streak is long enough
+    constexpr int    kAbrCleanSecondsBeforeUp  = 5;
+
     while (!g_stop) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const auto v   = video_count.load();
         const auto a   = audio_count.load();
         const auto vd  = vq.dropped();
         const auto ad  = aq.dropped();
+        const auto nd  = netq.dropped();
         const auto now = std::time(nullptr);
 
         // JSON stats — written to stderr so stdout stays as pure MJPEG binary.
@@ -740,14 +773,46 @@ int main(int argc, char** argv) {
             << ",\"aq_drop\":"         << ad
             << ",\"vq_size\":"         << vq.size()
             << ",\"aq_size\":"         << aq.size()
-            << ",\"netq_drop\":"       << netq.dropped()
+            << ",\"netq_drop\":"       << nd
             << ",\"netq_size\":"       << netq.size()
             << ",\"backend\":\""       << args.backend << "\""
             << ",\"mode\":\""          << mode_str << "\""
             << ",\"dest\":\""          << args.dest << "\""
+            << (args.abr ? ",\"abr_kbps\":" + std::to_string(abr_current_kbps) : std::string())
             << "}\n";
 
         last_v = v; last_a = a;
+
+        if (args.abr) {
+            const bool congested = nd > abr_last_netq_drop;
+            abr_last_netq_drop = nd;
+
+            if (congested) {
+                abr_clean_streak = 0;
+                const int stepped = std::max(abr_floor_kbps,
+                    int(abr_current_kbps * kAbrStepDownFactor));
+                if (stepped < abr_current_kbps) {
+                    abr_current_kbps = stepped;
+                    enc.set_bitrate(abr_current_kbps);
+                    std::cerr << "abr: network congestion (netq dropping) — stepping down to "
+                              << abr_current_kbps << " kbps\n";
+                }
+            } else {
+                ++abr_clean_streak;
+                if (abr_clean_streak >= kAbrCleanSecondsBeforeUp &&
+                    abr_current_kbps < args.bitrate_kbps) {
+                    abr_clean_streak = 0;
+                    const int stepped = std::min(args.bitrate_kbps,
+                        int(abr_current_kbps * kAbrStepUpFactor));
+                    if (stepped > abr_current_kbps) {
+                        abr_current_kbps = stepped;
+                        enc.set_bitrate(abr_current_kbps);
+                        std::cerr << "abr: network clean for " << kAbrCleanSecondsBeforeUp
+                                  << "s — stepping up to " << abr_current_kbps << " kbps\n";
+                    }
+                }
+            }
+        }
     }
 
     // Shutdown sequence:

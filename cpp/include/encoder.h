@@ -15,6 +15,9 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
@@ -161,9 +164,19 @@ public:
             ctx_->width, ctx_->height, AV_PIX_FMT_NV12,
             SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         if (!sws_) throw std::runtime_error("sws_getContext failed");
+
+        // Real motion-adaptive deinterlace (yadif) for interlaced sources
+        // (e.g. 1080i from AJA) — replaces a prior fixed spatial blend that
+        // discarded every odd row unconditionally, even on fully static
+        // content where there's no combing to fix at all (confirmed live:
+        // static broadcast graphics looked permanently soft/"shadowy").
+        // yadif only touches rows where the two fields actually disagree.
+        if (mode.interlaced) init_deinterlace_filter();
     }
 
     ~Encoder() {
+        if (filt_frame_) av_frame_free(&filt_frame_);
+        if (filt_graph_) avfilter_graph_free(&filt_graph_);  // frees filt_src_/filt_sink_ too
         sws_freeContext(sws_);
         av_packet_free(&pkt_);
         av_frame_free(&frame_);
@@ -174,6 +187,24 @@ public:
     Encoder& operator=(const Encoder&) = delete;
 
     AVCodecContext* video_ctx() const { return ctx_; }
+    int current_bitrate_kbps() const { return int(ctx_->bit_rate / 1000); }
+
+    // Change the encoder's target bitrate mid-stream, for adaptive bitrate
+    // under changing network conditions. No encoder recreation needed:
+    // both ffmpeg's nvenc and libx264 wrappers re-read avctx->bit_rate (and
+    // rc_max_rate) on the next avcodec_send_frame and apply it via their own
+    // reconfigure path — nvenc's per-frame rate-control update for NVENC,
+    // x264_encoder_reconfig() for libx264. rc_buffer_size is recomputed the
+    // same way the constructor derives it, so the one-frame VBV constraint
+    // (see the constructor's comment on burst size vs. receiver buffers)
+    // stays correct at the new bitrate instead of clamping to the original.
+    void set_bitrate(int new_kbps) {
+        ctx_->bit_rate    = int64_t(new_kbps) * 1000;
+        ctx_->rc_max_rate = ctx_->bit_rate;
+        const int fps = std::max(1,
+            int(ctx_->framerate.num) / std::max(1, int(ctx_->framerate.den)));
+        ctx_->rc_buffer_size = int(ctx_->bit_rate / std::max(fps, 30));
+    }
 
     // Submit black NV12 frames with negative PTS to warm up the GPU encoder
     // pipeline before real capture begins.  Without this, NVENC takes several
@@ -213,26 +244,6 @@ public:
         sws_scale(sws_, src, strides, 0, ctx_->height,
                   frame_->data, frame_->linesize);
 
-        // Blend-deinterlace: when the source is interlaced (e.g. 1080i from AJA),
-        // interpolate each "wrong-field" row from its neighbours so progressive
-        // displays don't show comb artifacts at full resolution.
-        if (in.mode.interlaced) {
-            const int h  = ctx_->height;
-            const int ls = frame_->linesize[0];
-            uint8_t* Y   = frame_->data[0];
-            for (int y = 1; y < h - 1; y += 2) {
-                for (int x = 0; x < ls; x++)
-                    Y[y*ls+x] = uint8_t((int(Y[(y-1)*ls+x]) + int(Y[(y+1)*ls+x])) >> 1);
-            }
-            const int ch  = h / 2;
-            const int cls = frame_->linesize[1];
-            uint8_t*  UV  = frame_->data[1];
-            for (int y = 1; y < ch - 1; y += 2) {
-                for (int x = 0; x < cls; x++)
-                    UV[y*cls+x] = uint8_t((int(UV[(y-1)*cls+x]) + int(UV[(y+1)*cls+x])) >> 1);
-            }
-        }
-
         frame_->pts = av_rescale_q(
             in.pts.count(),
             AVRational{1, 1'000'000'000},
@@ -244,19 +255,93 @@ public:
                       << in.pts.count() << " frame_pts_ticks=" << frame_->pts << "\n";
         }
 
-        if (avcodec_send_frame(ctx_, frame_) < 0) return;
+        AVFrame* out_frame = frame_;
+        if (in.mode.interlaced) {
+            // mode=0 (send_frame) yields exactly one deinterlaced frame per
+            // input frame — frame rate is unchanged, unlike send_field (which
+            // would double it). KEEP_REF leaves frame_ valid for reuse next
+            // call instead of buffersrc taking ownership of it.
+            if (av_buffersrc_add_frame_flags(filt_src_, frame_, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
+                return;
+            av_frame_unref(filt_frame_);
+            if (av_buffersink_get_frame(filt_sink_, filt_frame_) < 0)
+                return;
+            out_frame = filt_frame_;
+        }
+
+        if (avcodec_send_frame(ctx_, out_frame) < 0) {
+            if (out_frame == filt_frame_) av_frame_unref(filt_frame_);
+            return;
+        }
         while (avcodec_receive_packet(ctx_, pkt_) == 0) {
             emit(pkt_);
             av_packet_unref(pkt_);
         }
+        if (out_frame == filt_frame_) av_frame_unref(filt_frame_);
     }
 
 private:
-    AVCodecContext* ctx_   = nullptr;
-    AVFrame*        frame_ = nullptr;
-    AVPacket*       pkt_   = nullptr;
-    SwsContext*     sws_   = nullptr;
-    bool            logged_first_ = false;
+    void init_deinterlace_filter() {
+        filt_graph_ = avfilter_graph_alloc();
+        if (!filt_graph_) throw std::runtime_error("avfilter_graph_alloc failed");
+
+        char args[512];
+        std::snprintf(args, sizeof(args),
+            "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1",
+            ctx_->width, ctx_->height, int(AV_PIX_FMT_NV12),
+            ctx_->time_base.num, ctx_->time_base.den);
+
+        const AVFilter* buffersrc  = avfilter_get_by_name("buffer");
+        const AVFilter* buffersink = avfilter_get_by_name("buffersink");
+        if (!buffersrc || !buffersink)
+            throw std::runtime_error("buffer/buffersink filters unavailable — libavfilter missing?");
+
+        if (avfilter_graph_create_filter(&filt_src_, buffersrc, "in", args, nullptr, filt_graph_) < 0)
+            throw std::runtime_error("failed to create buffer source filter");
+        if (avfilter_graph_create_filter(&filt_sink_, buffersink, "out", nullptr, nullptr, filt_graph_) < 0)
+            throw std::runtime_error("failed to create buffer sink filter");
+
+        const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_NV12, AV_PIX_FMT_NONE };
+        if (av_opt_set_int_list(filt_sink_, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0)
+            throw std::runtime_error("failed to set buffersink pix_fmts");
+
+        AVFilterInOut* outputs = avfilter_inout_alloc();
+        AVFilterInOut* inputs  = avfilter_inout_alloc();
+        outputs->name       = av_strdup("in");
+        outputs->filter_ctx = filt_src_;
+        outputs->pad_idx    = 0;
+        outputs->next       = nullptr;
+        inputs->name        = av_strdup("out");
+        inputs->filter_ctx  = filt_sink_;
+        inputs->pad_idx     = 0;
+        inputs->next        = nullptr;
+
+        // parity=-1: auto-detect field order per frame instead of assuming a
+        // fixed one — the old blend always treated odd rows as "wrong"
+        // regardless of actual field dominance, which would smear the wrong
+        // field on sources where that assumption didn't hold.
+        const char* filter_descr = "yadif=mode=0:parity=-1:deint=0";
+        int ret = avfilter_graph_parse_ptr(filt_graph_, filter_descr, &inputs, &outputs, nullptr);
+        avfilter_inout_free(&inputs);
+        avfilter_inout_free(&outputs);
+        if (ret < 0) throw std::runtime_error("avfilter_graph_parse_ptr failed for yadif");
+
+        if (avfilter_graph_config(filt_graph_, nullptr) < 0)
+            throw std::runtime_error("avfilter_graph_config failed");
+
+        filt_frame_ = av_frame_alloc();
+        if (!filt_frame_) throw std::runtime_error("av_frame_alloc (filt_frame_) failed");
+    }
+
+    AVCodecContext*  ctx_        = nullptr;
+    AVFrame*         frame_      = nullptr;
+    AVPacket*        pkt_        = nullptr;
+    SwsContext*      sws_        = nullptr;
+    bool             logged_first_ = false;
+    AVFilterGraph*   filt_graph_ = nullptr;
+    AVFilterContext* filt_src_   = nullptr;
+    AVFilterContext* filt_sink_  = nullptr;
+    AVFrame*         filt_frame_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------

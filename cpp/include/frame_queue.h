@@ -42,6 +42,19 @@ public:
         return item;
     }
 
+    // Non-blocking pop. Returns std::nullopt immediately if the queue is
+    // empty — for consumers running on a driver/SDK callback thread (e.g.
+    // DeckLink's ScheduledFrameCompleted) that must never block: if the
+    // decoder hasn't produced a frame yet, the caller re-schedules the
+    // previous frame rather than stalling the SDI output clock.
+    std::optional<T> try_pop() {
+        std::lock_guard lk(m_);
+        if (q_.empty()) return std::nullopt;
+        T item = std::move(q_.front());
+        q_.pop_front();
+        return item;
+    }
+
     // Discard all currently queued items without closing the queue.
     // Used to drop a backlog that accumulated while no consumer was running
     // (e.g. during encoder prewarm) so consumers resume from "now" instead of

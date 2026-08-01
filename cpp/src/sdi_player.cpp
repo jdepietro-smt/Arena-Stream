@@ -157,10 +157,12 @@ int main(int argc, char** argv) {
     int  port        = (col!=std::string::npos) ? std::atoi(hp.substr(col+1).c_str()) : 4200;
 
     // ── 2. Open SRT socket ────────────────────────────────────────────────
+    // SRTO_RCVLATENCY is milliseconds via the C API, not microseconds —
+    // see decoder_main.cpp for the full explanation of this off-by-1000.
     SRTSOCKET sock = srt_create_socket();
     {
-        int lat_us = args.latency * 1000;
-        srt_setsockopt(sock, 0, SRTO_RCVLATENCY, &lat_us, sizeof(lat_us));
+        int lat_ms = args.latency;
+        srt_setsockopt(sock, 0, SRTO_RCVLATENCY, &lat_ms, sizeof(lat_ms));
         int sndbuf = 128 * 1024;               // small recv buffer → low delay
         srt_setsockopt(sock, 0, SRTO_RCVBUF, &sndbuf, sizeof(sndbuf));
     }
@@ -257,7 +259,7 @@ int main(int argc, char** argv) {
     enc_ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
     enc_ctx->time_base = {1, 30};
     enc_ctx->flags |= AV_CODEC_FLAG_QSCALE;
-    enc_ctx->global_quality = FF_QP2LAMBDA * 3;  // q=3 � excellent quality, 40% less CPU than q=2
+    enc_ctx->global_quality = FF_QP2LAMBDA * 3;  // q=3 � excellent quality, 40% less CPU than q=2
     avcodec_open2(enc_ctx, mjpeg_enc, nullptr);
 
     AVFrame* dec_frame  = av_frame_alloc();

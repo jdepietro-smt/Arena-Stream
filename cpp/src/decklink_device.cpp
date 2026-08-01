@@ -328,13 +328,31 @@ void decklink_list_devices(
 #ifdef _WIN32
     ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IDeckLinkIterator* it = nullptr;
-    if (FAILED(::CoCreateInstance(CLSID_CDeckLinkIterator, nullptr, CLSCTX_ALL,
-                                  IID_IDeckLinkIterator,
-                                  reinterpret_cast<void**>(&it))) || !it)
+    HRESULT hr = ::CoCreateInstance(CLSID_CDeckLinkIterator, nullptr, CLSCTX_ALL,
+                                     IID_IDeckLinkIterator,
+                                     reinterpret_cast<void**>(&it));
+    if (FAILED(hr) || !it) {
+        // Previously silent — an empty device list from a COM failure looked
+        // identical to "no card present", with no way to tell them apart.
+        // REGDB_E_CLASSNOTREG specifically means Desktop Video's COM server
+        // isn't registered at all (driver not installed, or installed but
+        // the machine hasn't been rebooted since).
+        std::cerr << "decklink: CoCreateInstance(CLSID_CDeckLinkIterator) failed, hr=0x"
+                  << std::hex << hr << std::dec
+                  << (hr == REGDB_E_CLASSNOTREG
+                        ? " (REGDB_E_CLASSNOTREG — Desktop Video COM server not registered;"
+                          " is Desktop Video installed and has the machine been rebooted since?)"
+                        : " — is Blackmagic Desktop Video installed?")
+                  << "\n";
         return;
+    }
 #else
     IDeckLinkIterator* it = CreateDeckLinkIteratorInstance();
-    if (!it) return;
+    if (!it) {
+        std::cerr << "decklink: CreateDeckLinkIteratorInstance() returned null — "
+                     "is Desktop Video installed?\n";
+        return;
+    }
 #endif
 
     IDeckLink* dl = nullptr;
@@ -361,6 +379,11 @@ void decklink_list_devices(
         emit(idx, 1, name, "decklink");
         dl->Release();
         ++idx;
+    }
+    if (idx == 0) {
+        std::cerr << "decklink: COM iterator initialized successfully but found 0 cards — "
+                     "check the card is seated correctly and shows up in Windows Device Manager, "
+                     "and that Desktop Video's own status utility can see it\n";
     }
     it->Release();
 }

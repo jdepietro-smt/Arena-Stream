@@ -82,12 +82,13 @@ else()
     pkg_check_modules(AVCODEC    REQUIRED IMPORTED_TARGET libavcodec)
     pkg_check_modules(AVFORMAT   REQUIRED IMPORTED_TARGET libavformat)
     pkg_check_modules(AVUTIL     REQUIRED IMPORTED_TARGET libavutil)
+    pkg_check_modules(AVFILTER   REQUIRED IMPORTED_TARGET libavfilter)
     pkg_check_modules(SWSCALE    REQUIRED IMPORTED_TARGET libswscale)
     pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 
     target_link_libraries(sdi_srt_iface INTERFACE PkgConfig::SRT)
     target_link_libraries(sdi_ffmpeg_iface INTERFACE
-        PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL
+        PkgConfig::AVCODEC PkgConfig::AVFORMAT PkgConfig::AVUTIL PkgConfig::AVFILTER
         PkgConfig::SWSCALE PkgConfig::SWRESAMPLE)
 endif()
 
@@ -97,10 +98,12 @@ endif()
 add_library(sdi_core STATIC
     src/frame_queue.cpp
     src/capture_device.cpp
+    src/playout_device.cpp
     src/encoder.cpp
     src/srt_output.cpp
     src/redundancy.cpp
     src/srt_input.cpp
+    src/stats_server.cpp
 )
 target_include_directories(sdi_core PUBLIC include)
 target_link_libraries(sdi_core PUBLIC
@@ -131,7 +134,7 @@ if(ENABLE_DECKLINK)
             "and pass -DDECKLINK_SDK_DIR=/path/to/include")
     endif()
 
-    add_library(sdi_decklink STATIC src/decklink_device.cpp)
+    add_library(sdi_decklink STATIC src/decklink_device.cpp src/decklink_playout.cpp)
     target_include_directories(sdi_decklink PUBLIC ${DECKLINK_SDK_DIR})
     target_compile_definitions(sdi_decklink PUBLIC SDI_WITH_DECKLINK=1)
 
@@ -163,7 +166,7 @@ if(ENABLE_AJA)
             "and pass -DAJA_NTV2_DIR=/path/to/libajantv2")
     endif()
 
-    add_library(sdi_aja STATIC src/aja_device.cpp)
+    add_library(sdi_aja STATIC src/aja_device.cpp src/aja_playout.cpp)
     target_include_directories(sdi_aja PUBLIC
         ${AJA_NTV2_DIR}/ajantv2/includes
         ${AJA_NTV2_DIR}           # ajabase headers are included as "ajabase/..."
@@ -312,12 +315,30 @@ if(WIN32)
 endif()
 sdi_target_warnings(sdi_player)
 
+# ----------------------------------------------------------------------
+# sdi_decoder — receive-side decoder: SRT -> H.264/Opus decode -> SDI output.
+# Runs at a remote facility to play the stream back out to physical SDI
+# (monitor wall, switcher, etc.) via either vendor's output backend.
+# ----------------------------------------------------------------------
+add_executable(sdi_decoder src/decoder_main.cpp)
+target_link_libraries(sdi_decoder PRIVATE sdi_core)
+if(ENABLE_DECKLINK)
+    target_link_libraries(sdi_decoder PRIVATE sdi_decklink)
+endif()
+if(ENABLE_AJA)
+    target_link_libraries(sdi_decoder PRIVATE sdi_aja)
+endif()
+if(WIN32)
+    target_link_libraries(sdi_decoder PRIVATE ws2_32)
+endif()
+sdi_target_warnings(sdi_decoder)
+
 # ===========================================================================
 # Install rules
 # ===========================================================================
 include(GNUInstallDirs)
 
-install(TARGETS arena_stream sdi_receive
+install(TARGETS arena_stream sdi_receive sdi_decoder
     RUNTIME DESTINATION .
 )
 
@@ -398,7 +419,7 @@ set(CPACK_NSIS_DELETE_ICONS_EXTRA
 set(CPACK_DEBIAN_PACKAGE_MAINTAINER    "SMT <engineering@smt.com>")
 set(CPACK_DEBIAN_PACKAGE_SECTION       "video")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "libsrt-openssl (>= 1.5), libavcodec60, libavformat60, libavutil58, libswscale7, libswresample4"
+    "libsrt-openssl (>= 1.5), libavcodec60, libavformat60, libavutil58, libavfilter9, libswscale7, libswresample4"
 )
 set(CPACK_DEBIAN_PACKAGE_DESCRIPTION
     "SDI capture → encode → SRT streaming tools\n"

@@ -58,6 +58,16 @@ public:
     int video_stream_index() const { return vsi_.load(); }
     int audio_stream_index() const { return asi_.load(); }
 
+    // Non-owning pointer to the demuxer's format context (stream count,
+    // codecpar, time_base, etc.) — for building a downstream muxer that
+    // copies these streams verbatim (see sdi_receive). Only safe to read
+    // from within the PacketCallback: that callback runs synchronously on
+    // the same reader thread that owns fmt_, so there's no concurrent
+    // mutation during the call. Reading it from any other thread, or after
+    // the callback that observed it has returned, is unsafe — a reconnect
+    // on the reader thread can free the underlying context at any time.
+    const AVFormatContext* format_context() const { return fmt_; }
+
 private:
     void reader_loop(std::stop_token st);
 
