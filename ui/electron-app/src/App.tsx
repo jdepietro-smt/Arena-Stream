@@ -17,6 +17,8 @@ interface StreamOpts {
   protocol:         'srt' | 'udp' | 'rtp' | 'ndi'
   relayUrl:         string
   streamName:       string
+  srtPassphrase:    string    // must match the receiving server's srtPublishPassphrase
+  abrEnabled?:      boolean   // adaptive bitrate — bitrateKbps becomes a ceiling
   audioCodec:       string
   audioBitrateKbps: number
   audioEnabled:     boolean
@@ -70,10 +72,24 @@ function VideoTile({
       `)
       const frag = mkShader(gl.FRAGMENT_SHADER, `
         precision mediump float;
-        uniform sampler2D uY, uCb, uCr; varying vec2 vTex;
+        uniform sampler2D uY, uCb, uCr; uniform vec2 uTexel; varying vec2 vTex;
         void main() {
+          /* Source is native-resolution SDI (720p/1080), but the preview
+             canvas is almost always displayed larger than that (it fills
+             the app's main panel) — plain bilinear upscaling alone reads
+             visibly soft next to the actual broadcast output (confirmed:
+             a frame pulled directly from the live relay was pin-sharp,
+             while the app's own preview of the same moment looked notably
+             blurred). A small unsharp mask on luma only — chroma is already
+             subsampled and doesn't carry edge detail — recovers perceived
+             sharpness without amplifying color noise. */
+          float yC = texture2D(uY, vTex).r;
+          float yN = texture2D(uY, vTex + vec2(0.0,  uTexel.y)).r;
+          float yS = texture2D(uY, vTex - vec2(0.0,  uTexel.y)).r;
+          float yE = texture2D(uY, vTex + vec2(uTexel.x, 0.0)).r;
+          float yW = texture2D(uY, vTex - vec2(uTexel.x, 0.0)).r;
+          float y  = clamp(yC + 0.6 * (yC * 4.0 - yN - yS - yE - yW), 0.0, 1.0) - 0.0627;
           /* BT.709 limited-range — correct for all HD SDI (1080i/p, 720p). */
-          float y  = texture2D(uY,  vTex).r - 0.0627;
           float cb = texture2D(uCb, vTex).r - 0.5;
           float cr = texture2D(uCr, vTex).r - 0.5;
           gl_FragColor = vec4(
@@ -85,6 +101,7 @@ function VideoTile({
       `)
       const prog = gl.createProgram()!
       gl.attachShader(prog, vert); gl.attachShader(prog, frag); gl.linkProgram(prog); gl.useProgram(prog)
+      gl.uniform2f(gl.getUniformLocation(prog, 'uTexel'), 1.0 / w, 1.0 / h)
 
       const vbuf = gl.createBuffer()
       gl.bindBuffer(gl.ARRAY_BUFFER, vbuf)
@@ -105,10 +122,15 @@ function VideoTile({
       return { gl, yTex: mkTex(0,'uY'), uTex: mkTex(1,'uCb'), vTex: mkTex(2,'uCr'), w, h }
     }
 
+    let diagCount = 0
     const render = () => {
       rafRef.current = requestAnimationFrame(render)
       const frame = framesRef.current[deviceId]
       if (!frame) return
+      if (++diagCount % 120 === 1) {
+        console.log('[diag] tile', deviceId, 'drawing frame', frame.w, 'x', frame.h,
+          'keys in framesRef:', Object.keys(framesRef.current))
+      }
       const canvas = canvasRef.current
       if (!canvas) return
 
@@ -151,27 +173,30 @@ function VideoTile({
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
-  // ── App mode ────────────────────────────────────────────────────────────────
-  const [appMode, setAppMode] = useState<'encode' | 'receive'>('encode')
-
   // ── Encoder state ───────────────────────────────────────────────────────────
   const [devices,        setDevices]        = useState<Device[]>([])
   const [selected,       setSelected]       = useState<Device | null>(null)
   const [activeIds,      setActiveIds]      = useState<Set<string>>(new Set())
-  const [streaming,      setStreaming]       = useState(false)
-
-  // ── Receiver state ──────────────────────────────────────────────────────────
-  type Feed = { name: string; ip: string; port: number; format?: string; codec?: string; relay?: string }
-  const [feeds,          setFeeds]          = useState<Feed[]>([])
-  const [connectedFeed,  setConnectedFeed]  = useState<Feed | null>(null)
-  const [receiving,      setReceiving]      = useState(false)
-  const [viewerUrl,      setViewerUrl]       = useState('')
+  // Which channels are independently live (publishing out), keyed by device
+  // id — previously a single global boolean, which meant only one channel
+  // could ever be streaming: starting a second always killed the first.
+  const [liveIds,        setLiveIds]        = useState<Set<string>>(new Set())
+  const [togglingIds,    setTogglingIds]    = useState<Set<string>>(new Set())
+  const [viewerUrls,     setViewerUrls]      = useState<Record<string, string>>({})
   const [logs,           setLogs]           = useState<string[]>([])
   const [urlCopied,      setUrlCopied]      = useState(false)
   const [availableCodecs, setAvailableCodecs] = useState<{name:string;label:string;available:boolean}[]>([])
+  // GPU vs CPU is the only choice the user makes; which specific vendor
+  // encoder (NVENC/QSV/AMF/MF) backs "GPU" on this machine is resolved
+  // automatically from list-codecs — see resolveCodec() below. Previously
+  // the dropdown listed every individual encoder name (13 after QSV/AMF/MF/
+  // AV1 were added), which is not a choice a user should have to make.
+  const [hwMode, setHwMode] = useState<'gpu' | 'cpu'>(
+    (localStorage.getItem('arenaStream.hwMode') as 'gpu' | 'cpu') || 'gpu')
   const [opts, setOpts] = useState<StreamOpts>({
     codec: 'libx264', bitrateKbps: 15000, latencyMs: 20,
     destIp: '', destPort: 4200, protocol: 'srt', relayUrl: '5.78.236.254:8890', streamName: '',
+    srtPassphrase: localStorage.getItem('arenaStream.srtPassphrase') || '',
     audioCodec: 'aac', audioBitrateKbps: 192, audioEnabled: true,
     ndiName: 'Arena Stream',
   })
@@ -196,7 +221,23 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('arenaStream.customDeviceNames') || '{}') }
     catch { return {} }
   })
-  function renameDevice(id: string, name: string) {
+  // Renaming a channel that's already live doesn't touch its running
+  // process — the publish name it's actually using out on the wire stays
+  // whatever it was when Go Live was clicked. Left alone, clicking Go Live
+  // again to "apply" the new name just starts a SECOND process alongside
+  // the still-running old one (same physical SDI input published twice at
+  // once, under two different names) rather than replacing it. Restarting
+  // under the new name here closes that gap at the source — shared by both
+  // the sidebar rename and the STREAM NAME field below the preview.
+  async function applyLiveRename(id: string, trimmed: string) {
+    if (!trimmed || !liveIds.has(id)) return
+    const dev = devices.find(d => d.id === id)
+    if (!dev) return
+    await sdi.stopStream(id)
+    const res = await sdi.startStream(dev, { ...opts, streamName: trimmed })
+    if (!res.ok) setLiveIds(prev => { const s = new Set(prev); s.delete(id); return s })
+  }
+  async function renameDevice(id: string, name: string) {
     setCustomNames(prev => {
       const next = { ...prev }
       if (name.trim()) next[id] = name.trim()
@@ -208,9 +249,11 @@ export default function App() {
     // name field — otherwise the rename is purely cosmetic in the sidebar and
     // the dashboard still shows the generic auto-generated name (e.g. "sdi-0")
     // until the stream name field is separately typed in below the preview.
-    if (id === selected?.id && name.trim()) {
-      setOpts(o => ({ ...o, streamName: name.trim() }))
+    const trimmed = name.trim()
+    if (id === selected?.id && trimmed) {
+      setOpts(o => ({ ...o, streamName: trimmed }))
     }
+    await applyLiveRename(id, trimmed)
   }
   // Electron's renderer doesn't implement window.prompt() (only alert/confirm
   // have native support), so renaming uses an inline text input instead of a
@@ -229,8 +272,15 @@ export default function App() {
     sdi.onLog((line: string) => {
       setLogs(prev => [...prev.slice(-200), line])
     })
-    sdi.onStreamUrl((url: string) => setViewerUrl(url))
-    sdi.onStreamStopped(() => setStreaming(false))
+    sdi.onStreamUrl((d: {id: string, url: string}) => {
+      if (!d?.id) return
+      setViewerUrls(prev => ({ ...prev, [d.id]: d.url }))
+    })
+    sdi.onStreamStopped((d: {id?: string}) => {
+      if (!d?.id) return
+      setLiveIds(prev => { const s = new Set(prev); s.delete(d.id!); return s })
+      setViewerUrls(prev => { const next = { ...prev }; delete next[d.id!]; return next })
+    })
 
     // Raw YUV420P preview — IPC just stores the latest frame per device id.
     // Each VideoTile's own requestAnimationFrame loop renders it, synced to
@@ -247,55 +297,33 @@ export default function App() {
       if (!d?.id) return
       setAudioCaptures(prev => ({ ...prev, [d.id]: d.captured }))
     })
-    sdi.onDiscoveredFeed((f: any) => {
-      setFeeds(prev => {
-        const key = `${f.ip}:${f.port}`
-        const exists = prev.find(x => `${x.ip}:${x.port}` === key)
-        if (exists) return prev   // already listed
-        return [...prev, f as Feed]
-      })
+    // Without this, a channel whose capture process dies (crashed encoder,
+    // killed externally, etc.) stays in activeIds forever — clicking it
+    // again then takes the "already active, just switch preview" branch in
+    // selectDevice() and re-attaches to a process that no longer exists,
+    // instead of actually restarting it. Confirmed live: a channel that
+    // crashed on an interlaced source with the CPU encoder stayed stuck
+    // showing black no matter how many times it was re-clicked, until the
+    // whole app was relaunched.
+    sdi.onCaptureStopped((d: {id?: string, code?: number|null}) => {
+      if (!d?.id) return
+      setActiveIds(prev => { const s = new Set(prev); s.delete(d.id!); return s })
+      setCaptureFormats(prev => { const next = { ...prev }; delete next[d.id!]; return next })
+      setAudioCaptures(prev => { const next = { ...prev }; delete next[d.id!]; return next })
     })
-    sdi.onFeedExpired((f: any) => {
-      setFeeds(prev => prev.filter(x => !(x.ip === f.ip && x.port === f.port)))
-      setConnectedFeed(c => (c?.ip === f.ip && c?.port === f.port) ? null : c)
-    })
-    sdi.onReceiveStopped(() => { setReceiving(false); setConnectedFeed(null) })
     return () => {
       ['log','stream-url','stream-stopped','preview-frame','preview-yuv','capture-format',
-       'audio-stats','discovered-feed','feed-expired','receive-stopped'].forEach(c =>
+       'audio-stats','capture-stopped'].forEach(c =>
         sdi.removeAllListeners(c))
     }
   }, [])
-
-  // Start/stop discovery listener when switching modes
-  useEffect(() => {
-    if (appMode === 'receive') {
-      setFeeds([])
-      sdi.startDiscovery()
-    } else {
-      sdi.stopDiscovery()
-      if (receiving) { sdi.disconnectFeed(); setReceiving(false); setConnectedFeed(null) }
-    }
-  }, [appMode]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function connectToFeed(feed: Feed) {
-    if (receiving) { await sdi.disconnectFeed(); setReceiving(false) }
-    setConnectedFeed(feed)
-    const res = await sdi.connectFeed({ ip: feed.ip, port: feed.port, latencyMs: opts.latencyMs, relay: feed.relay, name: feed.name })
-    if (res?.ok) setReceiving(true)
-  }
-
-  async function disconnectFromFeed() {
-    await sdi.disconnectFeed()
-    setReceiving(false)
-    setConnectedFeed(null)
-  }
 
   // Auto-scroll log
   useEffect(() => {
     if (logRef.current)
       logRef.current.scrollTop = logRef.current.scrollHeight
   }, [logs])
+
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const scan = useCallback(async () => {
@@ -307,17 +335,39 @@ export default function App() {
   useEffect(() => {
     scan()
     // Probe available codecs from arena_stream.exe --list-codecs.
-    // Picks the best available as the default (GPU preferred over CPU).
     ;(window as any).sdi.listCodecs().then((codecs: {name:string;label:string;available:boolean}[]) => {
       setAvailableCodecs(codecs)
-      const available = codecs.filter(c => c.available)
-      if (available.length > 0)
-        setOpts(o => ({ ...o, codec: available[0].name }))
     }).catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Resolve hwMode ('gpu'/'cpu') + the probed codec list into one concrete
+  // encoder name to actually pass to arena_stream.exe. GPU picks the first
+  // available hardware encoder in list-codecs' own vendor-then-format order
+  // (h264_nvenc, h264_qsv, h264_amf, h264_mf, hevc_*, av1_*); CPU always
+  // resolves to libx264, which is bundled and always available. Runs
+  // whenever the probe result or the user's GPU/CPU choice changes, so the
+  // dropdown never needs to know individual encoder names.
+  useEffect(() => {
+    if (availableCodecs.length === 0) return
+    const isGpu = (name: string) => /_(nvenc|qsv|amf|mf)$/.test(name)
+    const pool = availableCodecs.filter(c => c.available && (hwMode === 'gpu' ? isGpu(c.name) : !isGpu(c.name)))
+    const fallbackPool = availableCodecs.filter(c => c.available)
+    const resolved = pool[0] || fallbackPool[0]
+    if (resolved) setOpts(o => ({ ...o, codec: resolved.name }))
+  }, [availableCodecs, hwMode])
+
+  function setHwModePersist(mode: 'gpu' | 'cpu') {
+    setHwMode(mode)
+    localStorage.setItem('arenaStream.hwMode', mode)
+  }
+
   async function selectDevice(dev: Device) {
-    if (streaming || capturingRef.current) return
+    // Previously gated on the single global `streaming` flag, which froze
+    // the entire sidebar while ANY channel was live — you couldn't even
+    // select a different channel, let alone start it, without stopping the
+    // one already running. Liveness is now per-channel, so only an
+    // in-flight start/stop on THIS click needs guarding against.
+    if (capturingRef.current) return
 
     const wasActive   = activeIds.has(dev.id)
     const wasSelected = selected?.id === dev.id
@@ -340,7 +390,7 @@ export default function App() {
     // a frame and other viewers of it (e.g. if it's also live) see no glitch.
     if (wasActive && !wasSelected) {
       setSelected(dev)
-      if (customNames[dev.id]) setOpts(o => ({ ...o, streamName: customNames[dev.id] }))
+      setOpts(o => ({ ...o, streamName: customNames[dev.id] || dev.name }))
       await sdi.selectPreview(dev.id)
       return
     }
@@ -348,7 +398,7 @@ export default function App() {
     // Not active yet — start it fresh (it becomes the preview automatically).
     capturingRef.current = true
     setSelected(dev)
-    const baseOpts = customNames[dev.id] ? { ...opts, streamName: customNames[dev.id] } : opts
+    const baseOpts = { ...opts, streamName: customNames[dev.id] || dev.name }
     try {
       const fmts = await sdi.queryFormats(dev.name)
       setFormats(fmts)
@@ -375,13 +425,40 @@ export default function App() {
   }
 
   async function toggleStream() {
-    if (streaming) {
-      await sdi.stopStream()
-      setStreaming(false)
-      setViewerUrl('')
-    } else {
-      const res = await sdi.startStream(opts)
-      if (res.ok) setStreaming(true)
+    if (!selected) return
+    const id = selected.id
+    // The backend now serializes concurrent start/stop calls for the same
+    // device, but blocking re-clicks here too avoids the confusing UX that
+    // triggered it in the first place: renaming doesn't restart an
+    // already-live stream, so clicking Go Live again looked like a no-op and
+    // invited a second, overlapping click before the first had resolved.
+    if (togglingIds.has(id)) return
+    setTogglingIds(prev => new Set([...prev, id]))
+    try {
+      if (liveIds.has(id)) {
+        await sdi.stopStream(id)
+        setLiveIds(prev => { const s = new Set(prev); s.delete(id); return s })
+        setViewerUrls(prev => { const next = { ...prev }; delete next[id]; return next })
+      } else {
+        const res = await sdi.startStream(selected, opts)
+        if (res.ok) {
+          setLiveIds(prev => new Set([...prev, id]))
+        } else {
+          // Previously silent on failure — the button just reset back to
+          // "GO LIVE" with zero indication of why, which read as the click
+          // doing nothing at all. Surface whatever main.ts's handler
+          // returned so a bad config (missing exe, missing dest IP, etc.)
+          // is visible instead of a no-op.
+          setLogs(prev => [...prev.slice(-200), `[error] Go Live failed: ${res.error || 'unknown error'}`])
+        }
+      }
+    } catch (e) {
+      // A thrown/rejected IPC call (e.g. main.ts's handler throwing) hit the
+      // same silent-failure gap — caught here now instead of propagating as
+      // an unhandled rejection with no user-visible trace.
+      setLogs(prev => [...prev.slice(-200), `[error] Go Live failed: ${e instanceof Error ? e.message : String(e)}`])
+    } finally {
+      setTogglingIds(prev => { const s = new Set(prev); s.delete(id); return s })
     }
   }
 
@@ -402,7 +479,10 @@ export default function App() {
   function getLocalIp() { return '' }
 
   function copyUrl() {
-    navigator.clipboard.writeText(viewerUrl)
+    if (!selected) return
+    const url = viewerUrls[selected.id]
+    if (!url) return
+    navigator.clipboard.writeText(url)
     setUrlCopied(true)
     setTimeout(() => setUrlCopied(false), 2000)
   }
@@ -414,76 +494,21 @@ export default function App() {
       <div className="titlebar">
         <div className="titlebar-left">
           <img className="app-logo" src="/logo.png" alt="" />
-          <span className="app-name">ARENA STREAM</span>
-          {/* Mode toggle */}
-          <div className="mode-toggle">
-            <button className={appMode === 'encode' ? 'active' : ''}
-              onClick={() => setAppMode('encode')}>ENCODE</button>
-            <button className={appMode === 'receive' ? 'active' : ''}
-              onClick={() => setAppMode('receive')}>RECEIVE</button>
-          </div>
-          {appMode === 'encode' && (
-            <span className={`live-badge ${streaming ? 'live' : ''}`}>
-              {streaming ? '● LIVE' : '○ OFFLINE'}
-            </span>
-          )}
-          {appMode === 'receive' && (
-            <span className={`live-badge ${receiving ? 'live' : ''}`}>
-              {receiving ? '● RECEIVING' : '○ IDLE'}
-            </span>
-          )}
+          <span className="app-name">ARENA ENCODER</span>
+          <span className={`live-badge ${liveIds.size > 0 ? 'live' : ''}`}>
+            {liveIds.size > 0 ? `● LIVE (${liveIds.size})` : '○ OFFLINE'}
+          </span>
         </div>
         <div className="titlebar-right">
-          {appMode === 'encode' && viewerUrl && (
+          {selected && viewerUrls[selected.id] && (
             <button className="url-pill" onClick={copyUrl}>
-              {urlCopied ? '✓ Copied' : viewerUrl}
+              {urlCopied ? '✓ Copied' : viewerUrls[selected.id]}
             </button>
           )}
         </div>
       </div>
 
       <div className="body">
-
-        {/* ── RECEIVE mode sidebar ──────────────────── */}
-        {appMode === 'receive' && (
-          <aside className="sidebar">
-            <div className="sidebar-header">
-              <span>FEEDS</span>
-              <span className="scan-pulse" title="Listening for streams…">◉</span>
-            </div>
-            <div className="source-list">
-              {feeds.length === 0 && (
-                <div className="no-devices">
-                  Listening for streams…<br/>
-                  Start streaming on any encoder<br/>on this network.
-                </div>
-              )}
-              {feeds.map(feed => {
-                const key = `${feed.ip}:${feed.port}`
-                const isConnected = connectedFeed?.ip === feed.ip && connectedFeed?.port === feed.port
-                return (
-                  <button key={key}
-                    className={`source-card ${isConnected ? 'selected' : ''} aja`}
-                    onClick={() => isConnected ? disconnectFromFeed() : connectToFeed(feed)}
-                    title={isConnected ? 'Click to disconnect' : 'Click to receive'}
-                  >
-                    <span className={`dot ${isConnected && receiving ? 'live' : isConnected ? 'preview' : ''}`} />
-                    <div className="source-info">
-                      <div className="source-name">{feed.name}</div>
-                      <div className="source-type">
-                        {feed.ip}:{feed.port}
-                        {feed.format && <span className="source-format">{feed.format}</span>}
-                      </div>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          </aside>
-        )}
-
-        {/* ── ENCODE mode source list ───────────────── */}
-        {appMode === 'encode' && (
         <aside className="sidebar">
           <div className="sidebar-header">
             <span>SOURCES</span>
@@ -497,7 +522,8 @@ export default function App() {
             {devices.map(dev => {
               const isActive   = activeIds.has(dev.id)
               const isSelected = selected?.id === dev.id
-              const dotState   = isActive && streaming ? 'live' : isActive ? 'preview' : ''
+              const isLive     = liveIds.has(dev.id)
+              const dotState   = isActive && isLive ? 'live' : isActive ? 'preview' : ''
               return (
                 <button
                   key={dev.id}
@@ -508,7 +534,6 @@ export default function App() {
                     setRenamingId(dev.id)
                     setRenameDraft(customNames[dev.id] || dev.name)
                   }}
-                  disabled={streaming}
                   title={isActive ? 'Click to stop this channel' : 'Click to start this channel — right-click to rename'}
                 >
                   <span className={`dot ${dotState}`} />
@@ -549,24 +574,23 @@ export default function App() {
             })}
           </div>
         </aside>
-        )} {/* end encode sidebar */}
 
         {/* ── Main area ────────────────────────────── */}
         <main className="main">
-          {/* Preview — WebGL canvas(es) render raw YUV420P, zero compression artifacts.
-              Encode mode shows one tile per active channel (all running concurrently);
-              receive mode shows the single connected feed. */}
-          <div className={`preview-wrap ${streaming || receiving ? 'live' : ''}`}>
-            {appMode === 'encode' && activeIds.size === 0 && (
+          {/* Preview — WebGL canvas(es) render raw YUV420P, zero compression
+              artifacts. One tile per active channel, all running concurrently. */}
+          <div className={`preview-wrap ${liveIds.size > 0 ? 'live' : ''}`}>
+            {activeIds.size === 0 && (
               <div className="preview-placeholder">
                 <div className="placeholder-icon">▶</div>
                 <div>Select a source to preview</div>
               </div>
             )}
-            {appMode === 'encode' && activeIds.size > 0 && (
+            {activeIds.size > 0 && (
               <div className={`video-grid video-grid--${Math.min(activeIds.size, 4)}`}>
                 {Array.from(activeIds).map(id => {
                   const dev = devices.find(d => d.id === id)
+                  console.log('[diag] rendering tile for', id, '-> matched device:', dev?.id, dev?.name)
                   if (!dev) return null
                   return (
                     <VideoTile
@@ -574,7 +598,7 @@ export default function App() {
                       deviceId={id}
                       framesRef={framesRef}
                       label={customNames[id] || dev.name}
-                      isLive={streaming}
+                      isLive={liveIds.has(id)}
                       isSelected={selected?.id === id}
                       onClick={() => selectDevice(dev)}
                     />
@@ -582,23 +606,9 @@ export default function App() {
                 })}
               </div>
             )}
-            {appMode === 'receive' && !connectedFeed && (
-              <div className="preview-placeholder">
-                <div className="placeholder-icon">◉</div>
-                <div>Select a stream to receive</div>
-              </div>
-            )}
-            {appMode === 'receive' && connectedFeed && (
-              <VideoTile
-                deviceId="__receive__"
-                framesRef={framesRef}
-                label={`${connectedFeed.name}  ${connectedFeed.ip}:${connectedFeed.port}`}
-              />
-            )}
           </div>
 
-          {/* Config + Go Live — encode mode only */}
-          {appMode === 'encode' && <div className="controls">
+          <div className="controls">
             <div className="config-row">
               {opts.protocol !== 'ndi' && <>
                 <label>RELAY
@@ -609,6 +619,8 @@ export default function App() {
                     type="text" placeholder="auto"
                     value={opts.streamName}
                     onChange={e => setOpts(o => ({...o, streamName: e.target.value}))}
+                    onBlur={e => { if (selected) renameDevice(selected.id, e.target.value.trim()) }}
+                    onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                     style={{width: 100}}
                   />
                 </label>
@@ -624,6 +636,20 @@ export default function App() {
                   <input type="number" value={opts.destPort}
                     onChange={e => setOpts(o => ({...o, destPort: +e.target.value}))} />
                 </label>
+                {opts.protocol === 'srt' && (
+                  <label>SRT PASSPHRASE
+                    <input
+                      type="password" placeholder="must match server"
+                      value={opts.srtPassphrase}
+                      onChange={e => {
+                        const v = e.target.value
+                        setOpts(o => ({...o, srtPassphrase: v}))
+                        localStorage.setItem('arenaStream.srtPassphrase', v)
+                      }}
+                      style={{width: 140}}
+                    />
+                  </label>
+                )}
               </>}
               <label>PROTOCOL
                 <select value={opts.protocol}
@@ -660,7 +686,7 @@ export default function App() {
                   <button
                     className="auto-btn"
                     onClick={autoLatency}
-                    disabled={measuringRtt || streaming}
+                    disabled={measuringRtt || (!!selected && liveIds.has(selected.id))}
                     title="Ping destination and set 4× RTT"
                   >
                     {measuringRtt ? '…' : 'Auto'}
@@ -678,20 +704,18 @@ export default function App() {
                   </select>
                 </label>
               )}
-              <label>VIDEO CODEC
-                <select value={opts.codec}
-                  onChange={e => setOpts(o => ({...o, codec: e.target.value}))}>
-                  {(availableCodecs.length > 0 ? availableCodecs : [
-                    {name:'libx264',    label:'H.264 (CPU)',         available:true},
-                    {name:'h264_nvenc', label:'H.264 (NVIDIA GPU)',  available:false},
-                    {name:'hevc_nvenc', label:'H.265 (NVIDIA GPU)',  available:false},
-                    {name:'libx265',    label:'H.265 (CPU)',         available:false},
-                  ]).map(c => (
-                    <option key={c.name} value={c.name} disabled={!c.available}>
-                      {c.label}{!c.available ? ' (unavailable)' : ''}
-                    </option>
-                  ))}
+              <label>ENCODER
+                <select value={hwMode} onChange={e => setHwModePersist(e.target.value as 'gpu' | 'cpu')}>
+                  <option value="gpu" disabled={!availableCodecs.some(c => c.available && /_(nvenc|qsv|amf|mf)$/.test(c.name))}>
+                    GPU (hardware)
+                  </option>
+                  <option value="cpu">CPU (software)</option>
                 </select>
+                {opts.codec && (
+                  <span className="encoder-resolved">
+                    Using: {availableCodecs.find(c => c.name === opts.codec)?.label || opts.codec}
+                  </span>
+                )}
               </label>
               <label>BITRATE
                 <select value={opts.bitrateKbps}
@@ -705,6 +729,14 @@ export default function App() {
                   <option value={30000}>30 Mbps</option>
                   <option value={40000}>40 Mbps</option>
                 </select>
+              </label>
+              <label className="abr-toggle" title="When on, the bitrate above becomes a ceiling — the encoder steps down under real network congestion and back up once conditions are clean, instead of holding a fixed bitrate regardless of the network.">
+                <input
+                  type="checkbox"
+                  checked={!!opts.abrEnabled}
+                  onChange={e => setOpts(o => ({...o, abrEnabled: e.target.checked}))}
+                />
+                ADAPTIVE BITRATE
               </label>
               <label>AUDIO
                 <select value={opts.audioEnabled ? 'on' : 'off'}
@@ -731,11 +763,13 @@ export default function App() {
             })()}
 
             <button
-              className={`go-live-btn ${streaming ? 'stop' : ''}`}
+              className={`go-live-btn ${selected && liveIds.has(selected.id) ? 'stop' : ''}`}
               onClick={toggleStream}
-              disabled={!selected}
+              disabled={!selected || togglingIds.has(selected.id)}
             >
-              {streaming ? '■  STOP STREAM' : '▶  GO LIVE'}
+              {selected && togglingIds.has(selected.id)
+                ? '…'
+                : selected && liveIds.has(selected.id) ? '■  STOP STREAM' : '▶  GO LIVE'}
             </button>
             {opts.relayUrl && (
               <button
@@ -749,7 +783,7 @@ export default function App() {
                 DVR Monitor
               </button>
             )}
-          </div>}
+          </div>
 
           {/* Log */}
           <div className="log-panel" ref={logRef}>

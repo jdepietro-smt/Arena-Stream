@@ -125,20 +125,32 @@ public:
         std::memcpy(di_buf_.data(), vf.data.data(), vf.data.size());
 
         // Vertical linear-blend deinterlace: fuse the two temporally-offset
-        // fields so motion (tickers, crawls, action) appears smooth.
-        // Only odd lines are rewritten; even lines (field 1) are kept intact.
-        for (int y = 1; y < src_h_ - 1; y += 2) {
-            const uint8_t* prev = di_buf_.data() + (y - 1) * stride;
-            uint8_t*       curr = di_buf_.data() +  y      * stride;
-            const uint8_t* next = di_buf_.data() + (y + 1) * stride;
-            for (int x = 0; x < stride; ++x)
-                curr[x] = uint8_t((uint16_t(prev[x]) + uint16_t(next[x])) >> 1);
-        }
-        // Bottom edge: if the last line is odd, replicate its predecessor.
-        if (src_h_ > 1 && (src_h_ & 1) == 0) {
-            std::memcpy(di_buf_.data() + (src_h_ - 1) * stride,
-                        di_buf_.data() + (src_h_ - 2) * stride,
-                        stride);
+        // fields so motion (tickers, crawls, action) appears smooth. Only
+        // odd lines are rewritten; even lines (field 1) are kept intact.
+        // Gated on vf.mode.interlaced — this used to run unconditionally on
+        // every frame, including genuinely progressive sources, silently
+        // averaging every other row together with its neighbors on content
+        // that was never interlaced and had nothing to fix. That's a real,
+        // uniform vertical blur, and it only ever hit this local preview
+        // path (the real encoder's own deinterlace, in main()'s vworker
+        // below, was already correctly gated) — confirmed live: a static
+        // on-screen graphic (crisp in the actual broadcast/relay output)
+        // read as visibly blurred only in Arena Stream's own preview
+        // window on a plain progressive 720p source.
+        if (vf.mode.interlaced) {
+            for (int y = 1; y < src_h_ - 1; y += 2) {
+                const uint8_t* prev = di_buf_.data() + (y - 1) * stride;
+                uint8_t*       curr = di_buf_.data() +  y      * stride;
+                const uint8_t* next = di_buf_.data() + (y + 1) * stride;
+                for (int x = 0; x < stride; ++x)
+                    curr[x] = uint8_t((uint16_t(prev[x]) + uint16_t(next[x])) >> 1);
+            }
+            // Bottom edge: if the last line is odd, replicate its predecessor.
+            if (src_h_ > 1 && (src_h_ & 1) == 0) {
+                std::memcpy(di_buf_.data() + (src_h_ - 1) * stride,
+                            di_buf_.data() + (src_h_ - 2) * stride,
+                            stride);
+            }
         }
 
         const uint8_t* src[4]   = { di_buf_.data(), nullptr, nullptr, nullptr };
@@ -207,6 +219,8 @@ struct Args {
     // stats heartbeat) and back up gradually once conditions are clean.
     bool        abr            = false;
     int         abr_floor_pct  = 40;   // floor as % of --bitrate; won't step below this
+
+    std::string reference      = "freerun";  // AJA only: "freerun" or "input1".."input8"
 };
 
 void usage() {
@@ -229,6 +243,7 @@ R"USAGE(sdi_stream -- SDI/NDI-in -> encode -> SRT
                                   steps down under real network congestion, back
                                   up gradually once clean (default: off, fixed bitrate)
   --abr-floor-pct <n>             Won't step bitrate below this % of --bitrate (default: 40)
+  --reference <freerun|input1..8> AJA only: genlock/reference source (default: freerun)
 
 NDI notes:
   --backend ndi        Receive from an NDI source and bridge it to SRT.
@@ -266,6 +281,7 @@ bool parse_args(int argc, char** argv, Args& a) {
         else if (arg == "--ndi-name")  a.ndi_name       = next();
         else if (arg == "--abr")           a.abr           = true;
         else if (arg == "--abr-floor-pct") a.abr_floor_pct = std::atoi(next());
+        else if (arg == "--reference")     a.reference     = next();
         else if (arg == "--list")        { /* handled before capture loop */ }
         else if (arg == "--list-codecs") { /* handled before capture loop */ }
         else if (arg == "-h" || arg == "--help") { usage(); return false; }
@@ -388,11 +404,27 @@ static void list_codecs() {
         const char* name;
         const char* label;
     };
+    // Vendor-specific hardware encoders first (each independently verified
+    // below by actually opening a context, not just found-by-name), then
+    // the vendor-neutral Windows Media Foundation path (routes to whatever
+    // hardware transform the driver registers, Intel/AMD/NVIDIA alike —
+    // useful on a box where the vendor-specific FFmpeg encoder wasn't
+    // built in, or as a second opinion when it was), then guaranteed-
+    // available software as the final, always-works option.
     static const Candidate candidates[] = {
-        { "h264_nvenc",  "H.264 (NVIDIA GPU)" },
-        { "hevc_nvenc",  "H.265 (NVIDIA GPU)" },
-        { "libx264",     "H.264 (CPU)"        },
-        { "libx265",     "H.265 (CPU)"        },
+        { "h264_nvenc",  "H.264 (NVIDIA GPU)"       },
+        { "h264_qsv",    "H.264 (Intel GPU)"        },
+        { "h264_amf",    "H.264 (AMD GPU)"          },
+        { "h264_mf",     "H.264 (Windows HW, any GPU)" },
+        { "hevc_nvenc",  "H.265 (NVIDIA GPU)"       },
+        { "hevc_qsv",    "H.265 (Intel GPU)"        },
+        { "hevc_amf",    "H.265 (AMD GPU)"          },
+        { "hevc_mf",     "H.265 (Windows HW, any GPU)" },
+        { "av1_nvenc",   "AV1 (NVIDIA GPU)"         },
+        { "av1_qsv",     "AV1 (Intel GPU)"          },
+        { "av1_amf",     "AV1 (AMD GPU)"            },
+        { "libx264",     "H.264 (CPU)"              },
+        { "libx265",     "H.265 (CPU)"              },
     };
 
     std::cout << "[\n";
@@ -476,6 +508,7 @@ int main(int argc, char** argv) {
         .requested_mode = {},    // auto-detect
         .auto_detect    = true,
         .audio_channels = uint32_t(args.audio_channels),
+        .reference      = args.reference,
     };
 
     std::atomic<uint64_t> video_count{0}, audio_count{0};
@@ -499,6 +532,33 @@ int main(int argc, char** argv) {
     // If there is a mode mismatch, stop and restart with --codec matching the
     // actual signal.
     const sdi::VideoMode mode = capture->current_mode();
+
+    // AV1 can't ride the MPEG-TS muxer used for SRT/UDP output: this FFmpeg
+    // build emits the video as unidentified private data (ffprobe: "bin_data"),
+    // so every receiver — mediamtx, the DVR relay, ffmpeg, VLC — gets a stream
+    // it cannot decode, and nothing on this side reports an error because the
+    // encoder itself opened fine (confirmed live on an AJA channel with
+    // av1_nvenc). Only rtp:// and rtsp:// outputs carry AV1 natively. Swap to
+    // the same vendor's H.264 encoder for any other destination, and let the
+    // Encoder's own open-failure fallback handle it from there if that one
+    // isn't available either.
+    {
+        auto carries_av1 = [](const std::string& d) {
+            return d.rfind("rtsp://", 0) == 0 || d.rfind("rtp://", 0) == 0;
+        };
+        const bool has_dest = !args.dest.empty() && args.dest != "none";
+        const bool mpegts_dest = has_dest &&
+            (!carries_av1(args.dest) || (!args.dest2.empty() && !carries_av1(args.dest2)));
+        if (mpegts_dest && args.codec.find("av1") != std::string::npos) {
+            std::string h264 = "libx264";
+            if      (args.codec.find("nvenc") != std::string::npos) h264 = "h264_nvenc";
+            else if (args.codec.find("qsv")   != std::string::npos) h264 = "h264_qsv";
+            else if (args.codec.find("amf")   != std::string::npos) h264 = "h264_amf";
+            std::cerr << "encoder: " << args.codec << " can't be carried over SRT/UDP "
+                         "(MPEG-TS has no usable AV1 signalling) — using " << h264 << " instead\n";
+            args.codec = h264;
+        }
+    }
 
     sdi::Encoder enc(mode, sdi::EncoderConfig{args.codec, args.bitrate_kbps});
 
@@ -571,6 +631,21 @@ int main(int argc, char** argv) {
     // CAPTURED FRAMES at the source. Dropping an already-encoded packet here
     // under sustained network slowness is far cheaper than losing source frames.
     sdi::FrameQueue<PendingPacket> netq{256};
+
+    // Same reasoning applies to the Electron preview: PreviewEncoder does a
+    // full-resolution deinterlace blend + bicubic YUV422->YUV420P scale +
+    // synchronous stdout write on EVERY frame, unconditionally, regardless of
+    // whether this channel is even the one currently shown on screen. Running
+    // that on the same thread that drains vq and drives the real H.264 encode
+    // meant the preview's per-frame cost ate directly into that thread's
+    // frame budget. Fine with one channel; with 4 concurrent AJA channels
+    // competing for CPU scheduling, it was enough jitter to fill the 8-frame
+    // vq and start dropping CAPTURED frames — confirmed live: vq_drop climbed
+    // continuously on every 60fps stream once a 4th channel went live, while
+    // CPU/GPU utilization stayed under 20%, pointing at scheduling stalls
+    // rather than raw compute exhaustion. Capacity 2: preview only ever needs
+    // the latest frame, so an old one is worth dropping, not queuing.
+    sdi::FrameQueue<sdi::VideoFrame> previewq{2};
 
     // Diagnostic: measure wall-clock time (since this point) at which the first
     // video and first audio packet actually reach the network write call, plus
@@ -649,12 +724,21 @@ int main(int argc, char** argv) {
     vq.clear();
     aq.clear();
 
-    // --- Video worker: queue → H.264 encode → SRT  +  YUV → stdout ---
-    std::jthread vworker([&](std::stop_token st) {
+    // --- Preview worker: previewq → deinterlace/scale → stdout (decoupled, see previewq above) ---
+    std::jthread pworker([&](std::stop_token st) {
         // Pass native resolution to the preview — no downscale, no quality loss.
         // The old 1280×720 target caused SWS_AREA box-blurring of text/graphics.
         PreviewEncoder preview(mode.width, mode.height, mode.width, mode.height);
 
+        while (!st.stop_requested()) {
+            auto f = previewq.pop();
+            if (!f) break;
+            preview.write(*f);
+        }
+    });
+
+    // --- Video worker: queue → H.264 encode → SRT  +  YUV → stdout ---
+    std::jthread vworker([&](std::stop_token st) {
         while (!st.stop_requested()) {
             auto f = vq.pop();
             if (!f) break;
@@ -686,7 +770,7 @@ int main(int argc, char** argv) {
 #ifdef SDI_WITH_NDI
             if (ndi_output) ndi_output->send_video(*f);
 #endif
-            preview.write(*f);
+            previewq.push(sdi::VideoFrame(*f));
 
             // Skip encoding entirely when there is no SRT destination
             // (NDI-only mode or preview-only mode).  Encoding at full bitrate
@@ -819,10 +903,10 @@ int main(int argc, char** argv) {
     //  1. Stop capture (no new frames produced).
     //  2. Close capture queues (vworker/aworker see nullopt and exit their loops).
     //  3. Explicitly join vworker/aworker — they must fully stop pushing into
-    //     netq BEFORE netq is closed, or netout could close while a push is
-    //     still in flight.
-    //  4. Close netq (netout sees nullopt and exits after draining).
-    //  5. netout's jthread destructor joins it (already exited, so immediate).
+    //     netq/previewq BEFORE those are closed, or netout/pworker could close
+    //     while a push is still in flight.
+    //  4. Close netq/previewq (netout/pworker see nullopt and exit after draining).
+    //  5. netout/pworker's jthread destructors join them (already exited, so immediate).
     //  6. SrtOutput destructor: write trailer, close SRT/RTSP connection.
     capture->stop();
     vq.close();
@@ -832,6 +916,9 @@ int main(int argc, char** argv) {
     aworker.request_stop();
     aworker.join();
     netq.close();
+    previewq.close();
+    pworker.request_stop();
+    pworker.join();
     // netout, out destroyed in reverse order when scope exits.
     return 0;
 }

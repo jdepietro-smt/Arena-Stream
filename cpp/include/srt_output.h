@@ -40,12 +40,27 @@ public:
         const bool is_rtp  = (url.rfind("rtp://", 0) == 0);
         const bool is_rtsp = (url.rfind("rtsp://", 0) == 0);
         if (is_srt) {
-            url += (url.find('?') == std::string::npos) ? "?" : "&";
-            if (url.find("mode=") == std::string::npos)
-                url += "mode=caller&";
-            url += "latency=" + std::to_string(cfg.latency_ms * 1000);
-            if (!cfg.passphrase.empty())
-                url += "&passphrase=" + cfg.passphrase + "&pbkeylen=16";
+            // Callers (Electron's relay path in particular) sometimes pass a
+            // URI that already has mode=/latency=/passphrase= baked in — e.g.
+            // srt://host:port?streamid=publish:X&mode=caller&latency=200000
+            // &passphrase=.... Appending our own copies on top produced
+            // "...&latency=200000&latency=200000" (and a duplicated
+            // passphrase), which the relay's SRT handshake rejected outright
+            // (confirmed live: "Peer rejected connection" on every attempt,
+            // in a tight restart loop that kept killing the preview). Only
+            // fill in what's actually missing, exactly like the existing
+            // mode= guard already did.
+            const bool has_mode       = url.find("mode=")       != std::string::npos;
+            const bool has_latency    = url.find("latency=")    != std::string::npos;
+            const bool has_passphrase = url.find("passphrase=") != std::string::npos;
+            auto append = [&](const std::string& kv) {
+                url += (url.find('?') == std::string::npos) ? "?" : "&";
+                url += kv;
+            };
+            if (!has_mode)    append("mode=caller");
+            if (!has_latency) append("latency=" + std::to_string(cfg.latency_ms * 1000));
+            if (!cfg.passphrase.empty() && !has_passphrase)
+                append("passphrase=" + cfg.passphrase + "&pbkeylen=16");
         }
 
         // RTP → use the rtp muxer (raw NAL units in RTP packets, payload 96,

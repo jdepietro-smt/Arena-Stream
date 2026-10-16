@@ -28,6 +28,23 @@ struct CaptureConfig {
 
     // Number of audio channels to capture (2, 4, 8, or 16).
     uint32_t    audio_channels = 2;
+
+    // AJA only: genlock/reference source. "freerun" (default) is correct
+    // whenever nothing else needs this channel frame-synced to another —
+    // the safe choice for a standalone capture. On AJA hardware the
+    // reference selector is a BOARD-WIDE setting, not per-channel: the
+    // capture backend previously hardcoded it to the channel-1 SDI input
+    // unconditionally, on every start() call, for every channel. Fine by
+    // coincidence when channel 1 itself had signal, but the moment another
+    // channel (2, 3, ...) is opened while channel 1's input is unplugged,
+    // that channel's start() pins the WHOLE CARD's reference to a dead
+    // input with nothing to lock to — starving every other channel on the
+    // card of a valid clock and breaking their input-format detection,
+    // which looks exactly like "no signal" even though the source and an
+    // external tool (AJA's own router/control panel, which doesn't force
+    // this) both see the signal fine. Set to "input1".."input8" only if
+    // you specifically need board-wide genlock to one input.
+    std::string reference = "freerun";
 };
 
 // Abstract base. Concrete implementations live in decklink_device.cpp and

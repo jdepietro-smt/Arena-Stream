@@ -141,7 +141,26 @@ bool AJADevice::start(const CaptureConfig& cfg,
     impl_->card.UnsubscribeInputVerticalEvent(ch);
 
     impl_->card.SetMode(ch, NTV2_MODE_CAPTURE, false);
-    impl_->card.SetReference(NTV2_REFERENCE_INPUT1);
+    // The reference/genlock selector is a BOARD-WIDE AJA setting, not
+    // per-channel (same as aja_playout.cpp's SetReference call) — this used
+    // to hardcode NTV2_REFERENCE_INPUT1 unconditionally, on every start()
+    // for every channel. That pins the WHOLE CARD's reference to channel 1's
+    // SDI input regardless of which channel is actually being opened; if
+    // that input has no signal, the card has nothing to lock to and every
+    // OTHER channel's input-format detection breaks too — indistinguishable
+    // from "no signal" even though the source and an external tool (AJA's
+    // own router/control panel, which doesn't force this) both see it fine.
+    // Default free-run; cfg.reference="input1".."input8" opts into
+    // board-wide genlock only when actually needed.
+    NTV2ReferenceSource ref_source = NTV2_REFERENCE_FREERUN;
+    if (cfg.reference.rfind("input", 0) == 0) {
+        int input_num = 1;
+        try { input_num = std::stoi(cfg.reference.substr(5)); } catch (...) {}
+        if (input_num < 1) input_num = 1;
+        if (input_num > 8) input_num = 8;
+        ref_source = NTV2ReferenceSource(NTV2_REFERENCE_INPUT1 + input_num - 1);
+    }
+    impl_->card.SetReference(ref_source);
     impl_->card.EnableChannel(ch);
 
     // --- 3b. Route SDI input -> frame store. ---

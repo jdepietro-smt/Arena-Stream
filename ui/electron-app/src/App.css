@@ -73,29 +73,6 @@ body {
 }
 .live-badge.live { color: var(--danger); border-color: rgba(239,68,68,0.3); background: rgba(239,68,68,0.08); }
 
-/* Mode toggle */
-.mode-toggle {
-  display: flex;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  overflow: hidden;
-  padding: 2px;
-  gap: 2px;
-}
-.mode-toggle button {
-  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
-  padding: 3px 12px; border: none;
-  background: transparent; color: var(--muted);
-  cursor: pointer; transition: all 0.15s;
-  border-radius: 5px; font-family: var(--font);
-}
-.mode-toggle button.active {
-  background: var(--accent); color: #fff;
-  box-shadow: 0 0 12px rgba(99,102,241,0.35);
-}
-.mode-toggle button:not(.active):hover { background: var(--lift); color: var(--text); }
-
 .url-pill {
   background: transparent;
   border: 1px solid var(--border);
@@ -175,11 +152,6 @@ body {
 @keyframes blink {
   0%, 100% { box-shadow: 0 0 6px var(--danger); }
   50%       { box-shadow: 0 0 16px var(--danger); }
-}
-
-.scan-pulse { color: var(--success); font-size: 13px; animation: blink-green 1.5s ease-in-out infinite; }
-@keyframes blink-green {
-  0%, 100% { opacity: 1; } 50% { opacity: 0.25; }
 }
 
 .source-info { overflow: hidden; flex: 1; }
@@ -331,6 +303,11 @@ input:focus, select:focus {
 }
 input[type=number] { width: 72px; }
 select { min-width: 116px; cursor: pointer; }
+
+.encoder-resolved {
+  font-size: 9.5px; font-weight: 500; letter-spacing: 0.02em;
+  text-transform: none; color: var(--muted); margin-top: 2px;
+}
 
 /* Relay preset pill */
 .relay-preset {

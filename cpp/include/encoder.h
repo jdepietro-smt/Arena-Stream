@@ -46,91 +46,27 @@ struct EncoderConfig {
 class Encoder {
 public:
     Encoder(const VideoMode& mode, const EncoderConfig& cfg) {
-        // Try requested codec; if GPU codec unavailable fall back to software.
-        const AVCodec* codec = avcodec_find_encoder_by_name(cfg.codec_name.c_str());
-        bool nvenc_fallback = false;
-        if (!codec && (cfg.codec_name=="h264_nvenc"||cfg.codec_name=="hevc_nvenc")) {
-            std::cerr << "encoder: " << cfg.codec_name << " not available, falling back to libx264\n";
-            codec = avcodec_find_encoder_by_name("libx264");
-            nvenc_fallback = true;
-        }
-        if (!codec) throw std::runtime_error("encoder not found: " + cfg.codec_name);
-        // effective_name drives option blocks below — tracks actual codec after fallback.
-        const std::string effective_name = nvenc_fallback ? "libx264" : cfg.codec_name;
-
-        ctx_ = avcodec_alloc_context3(codec);
-        if (!ctx_) throw std::runtime_error("avcodec_alloc_context3 failed");
-
-        ctx_->width          = int(mode.width);
-        ctx_->height         = int(mode.height);
-        ctx_->pix_fmt        = AV_PIX_FMT_NV12;
-        // A time_base with one tick per frame period (fps_den/fps_num) leaves
-        // zero rounding headroom: av_rescale_q from the capture's nanosecond
-        // PTS collapses onto the same integer tick whenever two frames' real
-        // capture timestamps are closer together than one full frame period —
-        // which happens routinely with hardware capture jitter — producing
-        // duplicate PTS/DTS that the muxer then rejects outright. A
-        // microsecond time_base gives ~16,683 distinct ticks per frame at
-        // 59.94fps, far more than any real jitter can collide on, while
-        // `framerate` (used for encoder rate control) stays frame-accurate.
-        ctx_->time_base      = AVRational{1, 1'000'000};
-        ctx_->framerate      = AVRational{int(mode.fps_num), int(mode.fps_den)};
-        ctx_->bit_rate       = int64_t(cfg.bitrate_kbps) * 1000;
-        ctx_->rc_max_rate    = ctx_->bit_rate;
-        // One-frame VBV: constrains the encoder to no more than one frame's
-        // worth of bits per burst.  With intra-refresh there are no IDR spikes,
-        // so this is achievable at any bitrate.  Critically, this keeps the UDP
-        // burst per frame ≤ ~21 KB at 10 Mbps / 60 fps — well inside the OS
-        // default socket receive buffer (64–256 KB) at all supported bitrates.
-        // Previous value was bit_rate/8 (1/8 s), which grew to 156 KB at 10 Mbps
-        // and overflowed the receiver buffer, causing breakups above 5 Mbps.
-        {
-            const int fps = std::max(1,
-                int(mode.fps_num) / std::max(1, int(mode.fps_den)));
-            ctx_->rc_buffer_size = ctx_->bit_rate / std::max(fps, 30);
-        }
-        ctx_->gop_size       = cfg.gop;
-        ctx_->max_b_frames   = 0;               // required for low latency
-
-        if (effective_name == "h264_nvenc" || effective_name == "hevc_nvenc") {
-            av_opt_set(ctx_->priv_data, "preset",         "p3",  0);
-            av_opt_set(ctx_->priv_data, "tune",           "ll",  0);
-            av_opt_set(ctx_->priv_data, "rc",             "cbr", 0);
-            av_opt_set(ctx_->priv_data, "zerolatency",    "1",   0);
-            av_opt_set_int(ctx_->priv_data, "delay",      0,     0);
-            // SPS/PPS on every IDR — mid-stream join / packet-loss recovery.
-            av_opt_set_int(ctx_->priv_data, "repeat_headers", 1, 0);
-            // Dynamic slice count: target one slice per RTP packet (1300 B).
-            // Fixed at 8 previously — fine at 5 Mbps but at 10+ Mbps each slice
-            // grew beyond one MTU, causing multi-packet bursts that overflowed
-            // the receiver UDP buffer.  Now slices = bytes_per_frame / 1300,
-            // so each slice always fits in one UDP packet at any bitrate.
-            {
-                const int fps = std::max(1,
-                    int(mode.fps_num) / std::max(1, int(mode.fps_den)));
-                const int bytes_per_frame =
-                    int(int64_t(cfg.bitrate_kbps) * 1000 / 8 / std::max(fps, 1));
-                const int n_slices = std::max(4, bytes_per_frame / 1300);
-                av_opt_set_int(ctx_->priv_data, "slices", n_slices, 0);
-            }
-        }
-        if (effective_name == "libx264") {
-            av_opt_set(ctx_->priv_data, "preset",    "veryfast",    0);
-            av_opt_set(ctx_->priv_data, "tune",      "zerolatency", 0);
-            // repeat-headers=1 — SPS/PPS before every IDR so mediamtx and other
-            // relay servers can begin forwarding to new readers at keyframe boundaries.
-            // intra-refresh intentionally absent: cyclic intra-refresh produces no
-            // IDR frames, which prevents mediamtx from serving new readers.
-            // slice-max-size intentionally absent: MTU-sized slices create 40+ NALUs
-            // per frame; mediamtx v1.9.x hard-caps at 25 and drops every frame.
-            // SRT handles its own MTU fragmentation — encoder-level slicing is unnecessary.
-            av_opt_set(ctx_->priv_data, "x264-params",
-                       "nal-hrd=cbr:force-cfr=1:sync-lookahead=0"
-                       ":repeat-headers=1", 0);
-        }
-
-        if (avcodec_open2(ctx_, codec, nullptr) < 0)
-            throw std::runtime_error("avcodec_open2 failed");
+        // Try the requested codec first, whatever it is — vendor-specific
+        // hardware name (h264_nvenc/h264_qsv/h264_amf/av1_nvenc/...),
+        // vendor-neutral Windows Media Foundation (h264_mf/hevc_mf), or
+        // software (libx264/libx265). ANY of those can fail two different
+        // ways: avcodec_find_encoder_by_name() returns null (not compiled
+        // in), or it's found but avcodec_open2() fails (compiled in, but
+        // no working driver/hardware behind it right now — e.g. a GPU that
+        // was present when list-codecs last probed it, but isn't anymore).
+        // The old code only ever handled the first case, and only for
+        // h264_nvenc/hevc_nvenc specifically — any other codec that failed
+        // to OPEN (not just failed to be found) threw uncaught, crashing
+        // the whole process. That's exactly the class of bug that made
+        // every interlaced AJA capture crash before it was found and fixed
+        // (a different throw, same "nothing catches this" root problem).
+        // libx264 is the fallback for everything: it's bundled with every
+        // FFmpeg build here, needs no driver, and is already proven
+        // working — the one thing this constructor must never fail to
+        // fall back to, no matter what was originally requested.
+        std::string effective_name = cfg.codec_name;
+        const AVCodec* codec = open_with_fallback(mode, cfg, effective_name);
+        if (!codec) throw std::runtime_error("no working encoder available (tried " + cfg.codec_name + " and libx264 fallback)");
 
         frame_ = av_frame_alloc();
         pkt_   = av_packet_alloc();
@@ -161,7 +97,7 @@ public:
         }
         sws_ = sws_getContext(
             ctx_->width, ctx_->height, src_fmt,
-            ctx_->width, ctx_->height, AV_PIX_FMT_NV12,
+            ctx_->width, ctx_->height, ctx_->pix_fmt,
             SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         if (!sws_) throw std::runtime_error("sws_getContext failed");
 
@@ -281,6 +217,172 @@ public:
     }
 
 private:
+    // Attempts to fully set up and open ctx_ for `name`. On any failure
+    // (codec not found, or avcodec_open2 rejects it) frees whatever was
+    // partially allocated and, unless `name` was already "libx264", retries
+    // once with "libx264". Updates `effective_name` to whichever codec
+    // actually ended up open, so callers can tell what really happened.
+    // Returns the opened AVCodec*, or nullptr if even libx264 failed to open
+    // (which would indicate a broken FFmpeg build, not a missing GPU).
+    const AVCodec* open_with_fallback(const VideoMode& mode, const EncoderConfig& cfg,
+                                       std::string& effective_name) {
+        std::string name = cfg.codec_name;
+        for (;;) {
+            const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+            if (codec && try_open(mode, cfg, codec, name)) {
+                effective_name = name;
+                return codec;
+            }
+            if (!codec)
+                std::cerr << "encoder: " << name << " not available";
+            else
+                std::cerr << "encoder: " << name << " found but failed to open (driver/hardware not present?)";
+            if (name == "libx264") {
+                std::cerr << " — no fallback left\n";
+                return nullptr;
+            }
+            std::cerr << ", falling back to libx264\n";
+            name = "libx264";
+        }
+    }
+
+    // Allocates ctx_ and configures it for `codec`/`name`, then opens it.
+    // On failure, tears ctx_ back down to nullptr so the caller can retry
+    // cleanly with a different codec.
+    bool try_open(const VideoMode& mode, const EncoderConfig& cfg,
+                  const AVCodec* codec, const std::string& name) {
+        ctx_ = avcodec_alloc_context3(codec);
+        if (!ctx_) throw std::runtime_error("avcodec_alloc_context3 failed");
+
+        ctx_->width          = int(mode.width);
+        ctx_->height         = int(mode.height);
+        // Progressive sources go straight from sws_scale to the encoder,
+        // where NV12 is well-proven (NVENC's native format, no issues seen
+        // across months of progressive streams). Interlaced sources instead
+        // route through the yadif deinterlace filter graph below, and in
+        // this FFmpeg build yadif doesn't accept NV12 — the graph silently
+        // auto-inserts a conversion to YUV420P (the pix_fmts restriction
+        // meant to prevent that fails to apply; see init_deinterlace_filter).
+        // Declaring NV12 here while the graph actually hands back YUV420P
+        // produced a real, confirmed-live bug: libavcodec's own plane-size
+        // check compared width (1920) against YUV420P's half-width chroma
+        // stride (960) as if it were NV12's full-width one ("Input picture
+        // width (1920) is greater than stride (960)"), corrupting every
+        // frame — the NHL Network (1920x1080i) stream played back as solid
+        // black because of exactly this. Matching what the filter graph
+        // actually produces removes the mismatch instead of fighting it.
+        ctx_->pix_fmt        = mode.interlaced ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_NV12;
+        // A time_base with one tick per frame period (fps_den/fps_num) leaves
+        // zero rounding headroom: av_rescale_q from the capture's nanosecond
+        // PTS collapses onto the same integer tick whenever two frames' real
+        // capture timestamps are closer together than one full frame period —
+        // which happens routinely with hardware capture jitter — producing
+        // duplicate PTS/DTS that the muxer then rejects outright. A
+        // microsecond time_base gives ~16,683 distinct ticks per frame at
+        // 59.94fps, far more than any real jitter can collide on, while
+        // `framerate` (used for encoder rate control) stays frame-accurate.
+        ctx_->time_base      = AVRational{1, 1'000'000};
+        ctx_->framerate      = AVRational{int(mode.fps_num), int(mode.fps_den)};
+        ctx_->bit_rate       = int64_t(cfg.bitrate_kbps) * 1000;
+        ctx_->rc_max_rate    = ctx_->bit_rate;
+        // One-frame VBV: constrains the encoder to no more than one frame's
+        // worth of bits per burst.  With intra-refresh there are no IDR spikes,
+        // so this is achievable at any bitrate.  Critically, this keeps the UDP
+        // burst per frame ≤ ~21 KB at 10 Mbps / 60 fps — well inside the OS
+        // default socket receive buffer (64–256 KB) at all supported bitrates.
+        // Previous value was bit_rate/8 (1/8 s), which grew to 156 KB at 10 Mbps
+        // and overflowed the receiver buffer, causing breakups above 5 Mbps.
+        {
+            const int fps = std::max(1,
+                int(mode.fps_num) / std::max(1, int(mode.fps_den)));
+            ctx_->rc_buffer_size = ctx_->bit_rate / std::max(fps, 30);
+        }
+        ctx_->gop_size       = cfg.gop;
+        ctx_->max_b_frames   = 0;               // required for low latency
+
+        // Tag every encoded stream as BT.709 explicitly, regardless of
+        // resolution. Without this, encoders leave colorspace/primaries/trc
+        // as "unspecified" in the bitstream, and downstream tools (e.g. a
+        // relay's own re-transcode) are left to guess — usually by
+        // resolution, which is exactly wrong the moment two different
+        // formats are live at once (confirmed live: an SD-tuned downstream
+        // default applied to an HD 1080i source produced visibly wrong
+        // colors after that stream's re-encode, while lower-resolution
+        // streams the guess happened to match looked fine). SDI sources
+        // here are always HD or effectively HD-graded, so BT.709 is correct
+        // universally — no per-resolution branching needed. Limited
+        // (studio/broadcast) range, matching SDI's native signal levels.
+        ctx_->colorspace     = AVCOL_SPC_BT709;
+        ctx_->color_primaries= AVCOL_PRI_BT709;
+        ctx_->color_trc      = AVCOL_TRC_BT709;
+        ctx_->color_range    = AVCOL_RANGE_MPEG;
+
+        // Hardware-vendor low-latency CBR knobs. Each block only applies its
+        // own option names, which is safe because avcodec_alloc_context3
+        // already gave us the AVCodec-specific priv_data for `codec` — an
+        // AMF option set on an NVENC context (etc.) simply wouldn't exist to
+        // set. Unrecognized-name failures from av_opt_set are intentionally
+        // ignored here (best-effort tuning, not correctness-critical); a
+        // wrong option value would surface as avcodec_open2 failing below,
+        // which is already handled by the fallback in open_with_fallback.
+        if (name == "h264_nvenc" || name == "hevc_nvenc" || name == "av1_nvenc") {
+            av_opt_set(ctx_->priv_data, "preset",         "p3",  0);
+            av_opt_set(ctx_->priv_data, "tune",           "ll",  0);
+            av_opt_set(ctx_->priv_data, "rc",             "cbr", 0);
+            av_opt_set(ctx_->priv_data, "zerolatency",    "1",   0);
+            av_opt_set_int(ctx_->priv_data, "delay",      0,     0);
+            // SPS/PPS on every IDR — mid-stream join / packet-loss recovery.
+            av_opt_set_int(ctx_->priv_data, "repeat_headers", 1, 0);
+            // Dynamic slice count: target one slice per RTP packet (1300 B).
+            // Fixed at 8 previously — fine at 5 Mbps but at 10+ Mbps each slice
+            // grew beyond one MTU, causing multi-packet bursts that overflowed
+            // the receiver UDP buffer.  Now slices = bytes_per_frame / 1300,
+            // so each slice always fits in one UDP packet at any bitrate.
+            {
+                const int fps = std::max(1,
+                    int(mode.fps_num) / std::max(1, int(mode.fps_den)));
+                const int bytes_per_frame =
+                    int(int64_t(cfg.bitrate_kbps) * 1000 / 8 / std::max(fps, 1));
+                const int n_slices = std::max(4, bytes_per_frame / 1300);
+                av_opt_set_int(ctx_->priv_data, "slices", n_slices, 0);
+            }
+        } else if (name == "h264_qsv" || name == "hevc_qsv" || name == "av1_qsv") {
+            av_opt_set(ctx_->priv_data, "preset",      "veryfast", 0);
+            av_opt_set(ctx_->priv_data, "low_delay_brc", "1",      0);
+            av_opt_set_int(ctx_->priv_data, "look_ahead", 0,       0);
+        } else if (name == "h264_amf" || name == "hevc_amf" || name == "av1_amf") {
+            av_opt_set(ctx_->priv_data, "usage",       "ultralowlatency", 0);
+            av_opt_set(ctx_->priv_data, "rc",          "cbr",             0);
+            av_opt_set_int(ctx_->priv_data, "quality", 0 /* speed */,     0);
+        } else if (name == "h264_mf" || name == "hevc_mf") {
+            av_opt_set_int(ctx_->priv_data, "rate_control", 1 /* CBR */, 0);
+            av_opt_set_int(ctx_->priv_data, "low_latency",  1,           0);
+        } else if (name == "libx264") {
+            av_opt_set(ctx_->priv_data, "preset",    "veryfast",    0);
+            av_opt_set(ctx_->priv_data, "tune",      "zerolatency", 0);
+            // repeat-headers=1 — SPS/PPS before every IDR so mediamtx and other
+            // relay servers can begin forwarding to new readers at keyframe boundaries.
+            // intra-refresh intentionally absent: cyclic intra-refresh produces no
+            // IDR frames, which prevents mediamtx from serving new readers.
+            // slice-max-size intentionally absent: MTU-sized slices create 40+ NALUs
+            // per frame; mediamtx v1.9.x hard-caps at 25 and drops every frame.
+            // SRT handles its own MTU fragmentation — encoder-level slicing is unnecessary.
+            av_opt_set(ctx_->priv_data, "x264-params",
+                       "nal-hrd=cbr:force-cfr=1:sync-lookahead=0"
+                       ":repeat-headers=1", 0);
+        } else if (name == "libx265") {
+            av_opt_set(ctx_->priv_data, "preset", "veryfast", 0);
+            av_opt_set(ctx_->priv_data, "x265-params",
+                       "repeat-headers=1:no-info=1", 0);
+        }
+
+        if (avcodec_open2(ctx_, codec, nullptr) < 0) {
+            avcodec_free_context(&ctx_);  // sets ctx_ back to nullptr
+            return false;
+        }
+        return true;
+    }
+
     void init_deinterlace_filter() {
         filt_graph_ = avfilter_graph_alloc();
         if (!filt_graph_) throw std::runtime_error("avfilter_graph_alloc failed");
@@ -288,7 +390,7 @@ private:
         char args[512];
         std::snprintf(args, sizeof(args),
             "video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=1/1",
-            ctx_->width, ctx_->height, int(AV_PIX_FMT_NV12),
+            ctx_->width, ctx_->height, int(ctx_->pix_fmt),
             ctx_->time_base.num, ctx_->time_base.den);
 
         const AVFilter* buffersrc  = avfilter_get_by_name("buffer");
@@ -301,12 +403,33 @@ private:
         if (avfilter_graph_create_filter(&filt_sink_, buffersink, "out", nullptr, nullptr, filt_graph_) < 0)
             throw std::runtime_error("failed to create buffer sink filter");
 
-        const enum AVPixelFormat pix_fmts[] = { AV_PIX_FMT_NV12, AV_PIX_FMT_NONE };
-        if (av_opt_set_int_list(filt_sink_, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN) < 0)
-            throw std::runtime_error("failed to set buffersink pix_fmts");
+        // Best-effort only — NOT fatal. On this FFmpeg build, buffersink is
+        // already initialized by the time avfilter_graph_create_filter()
+        // returns (no init args needed, unlike buffersrc), so this always
+        // fails with EINVAL ("pix_fmts is not a runtime option..."). This
+        // used to throw on that failure, which is why EVERY interlaced
+        // capture crashed the whole process on startup, unconditionally —
+        // confirmed live: this line is exactly where a real AJA 1080i input
+        // died every single time, regardless of video codec or whether
+        // audio encoding was also active (both looked like plausible
+        // culprits before this was actually instrumented and isolated).
+        // NOT actually harmless to skip, despite what this used to assume:
+        // on this FFmpeg build, yadif doesn't accept NV12 at all, so when
+        // buffersrc declared NV12 (this filter graph's old default), the
+        // graph silently auto-inserted a conversion to YUV420P — a real,
+        // confirmed-live mismatch against the encoder, which still expected
+        // NV12; see the comment on ctx_->pix_fmt above for what that broke.
+        // ctx_->pix_fmt is YUV420P here now (this function only runs when
+        // mode.interlaced is true), matching what yadif actually processes
+        // in this build, so buffersrc's declared format and yadif's native
+        // format already agree — this restriction call failing is genuinely
+        // harmless now, since there's nothing left for it to need to force.
+        const enum AVPixelFormat pix_fmts[] = { ctx_->pix_fmt, AV_PIX_FMT_NONE };
+        av_opt_set_int_list(filt_sink_, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
 
         AVFilterInOut* outputs = avfilter_inout_alloc();
         AVFilterInOut* inputs  = avfilter_inout_alloc();
+        if (!outputs || !inputs) throw std::runtime_error("avfilter_inout_alloc failed");
         outputs->name       = av_strdup("in");
         outputs->filter_ctx = filt_src_;
         outputs->pad_idx    = 0;

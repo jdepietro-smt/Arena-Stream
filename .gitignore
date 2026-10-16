@@ -22,6 +22,9 @@ ui/electron-app/cdp-*.js
 ui/electron-app/*.txt
 ui/electron-app/dvr-ssh.js
 
+# Local secrets (see ui/electron-app/electron/secrets.example.ts)
+ui/electron-app/electron/secrets.ts
+
 # Editor/OS
 .vs/
 .vscode/
