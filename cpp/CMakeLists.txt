@@ -298,6 +298,17 @@ endif()
 sdi_target_warnings(arena_stream)
 
 # ----------------------------------------------------------------------
+# Tests — plain assert executables, no test framework dependency.
+# codec_policy.h is pure C++ (no FFmpeg), so its test links nothing.
+# Run with:  ctest --test-dir build -C Release --output-on-failure
+# ----------------------------------------------------------------------
+enable_testing()
+add_executable(codec_policy_test tests/codec_policy_test.cpp)
+target_include_directories(codec_policy_test PRIVATE include)
+sdi_target_warnings(codec_policy_test)
+add_test(NAME codec_policy COMMAND codec_policy_test)
+
+# ----------------------------------------------------------------------
 # Receiver binary — SMPTE 2022-7 protection-switch gateway.
 # No vendor SDK dependency; just sdi_core (FFmpeg + SRT).
 # ----------------------------------------------------------------------

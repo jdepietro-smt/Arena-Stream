@@ -6,6 +6,7 @@
 //     sdi_stream --backend decklink --dest 10.0.0.5:4200 --codec hevc_nvenc
 
 #include "capture_device.h"
+#include "codec_policy.h"
 #include "encoder.h"
 #include "frame_queue.h"
 #include "redundancy.h"
@@ -18,6 +19,7 @@
 #include <cstdio>
 #include <ctime>
 #include <iostream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -203,7 +205,7 @@ struct Args {
     std::string dest2          = "";               // host:port — secondary (2022-7)
     int         latency_ms     = 150;
     int         bitrate_kbps   = 8000;
-    std::string codec          = "h264_nvenc";     // or libx264, hevc_nvenc
+    std::string codec          = "gpu";            // gpu | cpu | an encoder name (see codec_policy.h)
     std::string audio_codec    = "libopus";        // or aac
     int         audio_kbps     = 192;
     int         audio_channels = 2;
@@ -233,7 +235,9 @@ R"USAGE(sdi_stream -- SDI/NDI-in -> encode -> SRT
   --dest2     <host:port>         SRT secondary destination for SMPTE 2022-7 (optional)
   --latency   <ms>                SRT latency window in ms (default: 150)
   --bitrate   <kbps>              Video bitrate kbps (default: 8000)
-  --codec     <name>              Video encoder name (default: h264_nvenc)
+  --codec     <gpu|cpu|name>      Encoder request (default: gpu). gpu tries NVENC, QSV,
+                                  AMF, Media Foundation, then libx264; cpu is libx264;
+                                  a name (e.g. hevc_nvenc) is tried alone, then libx264
   --acodec    <name>              Audio encoder name (default: libopus)
   --abitrate  <kbps>              Audio bitrate kbps (default: 192)
   --achannels <n>                 SDI embedded audio channels (default: 2)
@@ -429,6 +433,7 @@ static void list_codecs() {
 
     std::cout << "[\n";
     bool first = true;
+    std::map<std::string, bool> availability;
     for (const auto& c : candidates) {
         const AVCodec* codec = avcodec_find_encoder_by_name(c.name);
         bool available = false;
@@ -450,11 +455,39 @@ static void list_codecs() {
                 avcodec_free_context(&ctx);
             }
         }
+        availability[c.name] = available;
         if (!first) std::cout << ",\n";
         first = false;
         std::cout << "  {\"name\":\""  << json_str(c.name)
                   << "\",\"label\":\"" << json_str(c.label)
                   << "\",\"available\":" << (available ? "true" : "false") << "}";
+    }
+
+    // The two encoder requests the UI offers, resolved through the same policy
+    // a real stream uses: what each would pick on this machine right now.
+    // "gpu" is only available when a hardware encoder opened — resolving to the
+    // libx264 that ends every chain doesn't count.
+    auto label_of = [&](const std::string& name) -> std::string {
+        for (const auto& c : candidates) if (name == c.name) return c.label;
+        return name;
+    };
+    auto is_available = [&](const std::string& name) {
+        auto it = availability.find(name);
+        return it != availability.end() && it->second;
+    };
+    for (const char* request : { "gpu", "cpu" }) {
+        const std::string resolved = sdi::codec_policy::first_available(
+            sdi::codec_policy::candidate_chain(request, sdi::codec_policy::DestKind::None),
+            is_available);
+        const bool hardware = std::string(request) == "gpu"
+            ? (!resolved.empty() && resolved != sdi::codec_policy::kSoftware)
+            : !resolved.empty();
+        std::cout << ",\n  {\"name\":\"" << request
+                  << "\",\"label\":\"" << (std::string(request) == "gpu" ? "GPU (hardware)" : "CPU (software)")
+                  << "\",\"available\":" << (hardware ? "true" : "false")
+                  << ",\"resolves_to\":\"" << json_str(hardware ? resolved.c_str() : "")
+                  << "\",\"resolves_label\":\"" << json_str(hardware ? label_of(resolved).c_str() : "")
+                  << "\"}";
     }
     std::cout << "\n]\n";
 }
@@ -533,34 +566,19 @@ int main(int argc, char** argv) {
     // actual signal.
     const sdi::VideoMode mode = capture->current_mode();
 
-    // AV1 can't ride the MPEG-TS muxer used for SRT/UDP output: this FFmpeg
-    // build emits the video as unidentified private data (ffprobe: "bin_data"),
-    // so every receiver — mediamtx, the DVR relay, ffmpeg, VLC — gets a stream
-    // it cannot decode, and nothing on this side reports an error because the
-    // encoder itself opened fine (confirmed live on an AJA channel with
-    // av1_nvenc). Only rtp:// and rtsp:// outputs carry AV1 natively. Swap to
-    // the same vendor's H.264 encoder for any other destination, and let the
-    // Encoder's own open-failure fallback handle it from there if that one
-    // isn't available either.
-    {
-        auto carries_av1 = [](const std::string& d) {
-            return d.rfind("rtsp://", 0) == 0 || d.rfind("rtp://", 0) == 0;
-        };
-        const bool has_dest = !args.dest.empty() && args.dest != "none";
-        const bool mpegts_dest = has_dest &&
-            (!carries_av1(args.dest) || (!args.dest2.empty() && !carries_av1(args.dest2)));
-        if (mpegts_dest && args.codec.find("av1") != std::string::npos) {
-            std::string h264 = "libx264";
-            if      (args.codec.find("nvenc") != std::string::npos) h264 = "h264_nvenc";
-            else if (args.codec.find("qsv")   != std::string::npos) h264 = "h264_qsv";
-            else if (args.codec.find("amf")   != std::string::npos) h264 = "h264_amf";
-            std::cerr << "encoder: " << args.codec << " can't be carried over SRT/UDP "
-                         "(MPEG-TS has no usable AV1 signalling) — using " << h264 << " instead\n";
-            args.codec = h264;
-        }
-    }
+    // Which encoders to try is codec_policy.h's decision (request + where the
+    // stream is going); Encoder walks the chain and keeps the first that opens.
+    const auto dest_kind = sdi::codec_policy::dest_kind(args.dest, args.dest2);
+    if (sdi::codec_policy::refused(args.codec, dest_kind))
+        std::cerr << "encoder: " << args.codec << " can't be carried over SRT/UDP "
+                     "(MPEG-TS has no usable AV1 signalling) — substituting H.264\n";
 
-    sdi::Encoder enc(mode, sdi::EncoderConfig{args.codec, args.bitrate_kbps});
+    sdi::EncoderConfig enc_cfg;
+    enc_cfg.codec_name   = args.codec;
+    enc_cfg.bitrate_kbps = args.bitrate_kbps;
+    enc_cfg.chain        = sdi::codec_policy::candidate_chain(args.codec, dest_kind);
+    sdi::Encoder enc(mode, enc_cfg);
+    std::cerr << "encoder: " << enc.name() << " (requested " << args.codec << ")\n";
 
     // Prewarm the GPU encoder pipeline.  NVENC has a startup window of several
     // seconds before it produces its first output packet; audio accumulates
@@ -861,6 +879,7 @@ int main(int argc, char** argv) {
             << ",\"netq_size\":"       << netq.size()
             << ",\"backend\":\""       << args.backend << "\""
             << ",\"mode\":\""          << mode_str << "\""
+            << ",\"encoder\":\""       << enc.name() << "\""
             << ",\"dest\":\""          << args.dest << "\""
             << (args.abr ? ",\"abr_kbps\":" + std::to_string(abr_current_kbps) : std::string())
             << "}\n";

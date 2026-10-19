@@ -41,32 +41,28 @@ struct EncoderConfig {
     int         bitrate_kbps = 8000;
     int         gop          = 15;            // IDR every 0.25s at 60fps — fast recovery
     bool        zerolatency  = true;
+    // Encoders to try, in order — normally built by codec_policy.h. Empty
+    // means "codec_name, then libx264", which is what callers that don't use
+    // the policy always got.
+    std::vector<std::string> chain;
 };
 
 class Encoder {
 public:
     Encoder(const VideoMode& mode, const EncoderConfig& cfg) {
-        // Try the requested codec first, whatever it is — vendor-specific
-        // hardware name (h264_nvenc/h264_qsv/h264_amf/av1_nvenc/...),
-        // vendor-neutral Windows Media Foundation (h264_mf/hevc_mf), or
-        // software (libx264/libx265). ANY of those can fail two different
-        // ways: avcodec_find_encoder_by_name() returns null (not compiled
-        // in), or it's found but avcodec_open2() fails (compiled in, but
-        // no working driver/hardware behind it right now — e.g. a GPU that
-        // was present when list-codecs last probed it, but isn't anymore).
-        // The old code only ever handled the first case, and only for
-        // h264_nvenc/hevc_nvenc specifically — any other codec that failed
-        // to OPEN (not just failed to be found) threw uncaught, crashing
-        // the whole process. That's exactly the class of bug that made
-        // every interlaced AJA capture crash before it was found and fixed
-        // (a different throw, same "nothing catches this" root problem).
-        // libx264 is the fallback for everything: it's bundled with every
-        // FFmpeg build here, needs no driver, and is already proven
-        // working — the one thing this constructor must never fail to
-        // fall back to, no matter what was originally requested.
-        std::string effective_name = cfg.codec_name;
+        // Walk the candidate chain and keep the first encoder that opens.
+        // Any candidate can fail two different ways: avcodec_find_encoder_by_
+        // name() returns null (not compiled in), or it's found but
+        // avcodec_open2() fails (compiled in, but no working driver or
+        // hardware behind it right now). Opening is the only test that
+        // proves an encoder works, which is why stream start doesn't probe
+        // separately — see codec_policy.h. A chain from the policy always
+        // ends in libx264, which needs no driver, so a missing GPU never
+        // takes the stream down.
+        std::string effective_name;
         const AVCodec* codec = open_with_fallback(mode, cfg, effective_name);
-        if (!codec) throw std::runtime_error("no working encoder available (tried " + cfg.codec_name + " and libx264 fallback)");
+        if (!codec) throw std::runtime_error("no working encoder available (tried " + chain_text(cfg) + ")");
+        encoder_name_ = effective_name;
 
         frame_ = av_frame_alloc();
         pkt_   = av_packet_alloc();
@@ -123,6 +119,8 @@ public:
     Encoder& operator=(const Encoder&) = delete;
 
     AVCodecContext* video_ctx() const { return ctx_; }
+    // The encoder that actually opened — may differ from what was requested.
+    const std::string& name() const { return encoder_name_; }
     int current_bitrate_kbps() const { return int(ctx_->bit_rate / 1000); }
 
     // Change the encoder's target bitrate mid-stream, for adaptive bitrate
@@ -217,33 +215,46 @@ public:
     }
 
 private:
-    // Attempts to fully set up and open ctx_ for `name`. On any failure
-    // (codec not found, or avcodec_open2 rejects it) frees whatever was
-    // partially allocated and, unless `name` was already "libx264", retries
-    // once with "libx264". Updates `effective_name` to whichever codec
-    // actually ended up open, so callers can tell what really happened.
-    // Returns the opened AVCodec*, or nullptr if even libx264 failed to open
-    // (which would indicate a broken FFmpeg build, not a missing GPU).
+    // The candidates to try: the configured chain, or (for callers that
+    // don't use the policy) codec_name followed by libx264.
+    static std::vector<std::string> chain_of(const EncoderConfig& cfg) {
+        if (!cfg.chain.empty()) return cfg.chain;
+        if (cfg.codec_name == "libx264") return { "libx264" };
+        return { cfg.codec_name, "libx264" };
+    }
+
+    static std::string chain_text(const EncoderConfig& cfg) {
+        std::string s;
+        for (const auto& n : chain_of(cfg)) s += (s.empty() ? "" : ", ") + n;
+        return s;
+    }
+
+    // Opens ctx_ with the first encoder in the chain that works. Each failed
+    // candidate (not found, or avcodec_open2 rejects it) is torn down by
+    // try_open and logged, then the next is tried. `effective_name` is set to
+    // whichever encoder actually opened. Returns nullptr only if every
+    // candidate failed — for a chain ending in libx264 that means a broken
+    // FFmpeg build, not a missing GPU.
     const AVCodec* open_with_fallback(const VideoMode& mode, const EncoderConfig& cfg,
                                        std::string& effective_name) {
-        std::string name = cfg.codec_name;
-        for (;;) {
+        const auto chain = chain_of(cfg);
+        for (size_t i = 0; i < chain.size(); ++i) {
+            const std::string& name = chain[i];
             const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
             if (codec && try_open(mode, cfg, codec, name)) {
                 effective_name = name;
+                if (i > 0)
+                    std::cerr << "encoder: using " << name << " (first choice "
+                              << chain[0] << " was not usable)\n";
                 return codec;
             }
-            if (!codec)
-                std::cerr << "encoder: " << name << " not available";
-            else
-                std::cerr << "encoder: " << name << " found but failed to open (driver/hardware not present?)";
-            if (name == "libx264") {
-                std::cerr << " — no fallback left\n";
-                return nullptr;
-            }
-            std::cerr << ", falling back to libx264\n";
-            name = "libx264";
+            std::cerr << "encoder: " << name
+                      << (codec ? " found but failed to open (driver/hardware not present?)"
+                                : " not available");
+            if (i + 1 < chain.size()) std::cerr << ", trying " << chain[i + 1] << "\n";
+            else                      std::cerr << " — no candidates left\n";
         }
+        return nullptr;
     }
 
     // Allocates ctx_ and configures it for `codec`/`name`, then opens it.
@@ -456,6 +467,7 @@ private:
         if (!filt_frame_) throw std::runtime_error("av_frame_alloc (filt_frame_) failed");
     }
 
+    std::string      encoder_name_;
     AVCodecContext*  ctx_        = nullptr;
     AVFrame*         frame_      = nullptr;
     AVPacket*        pkt_        = nullptr;

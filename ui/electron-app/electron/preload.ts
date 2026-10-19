@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('sdi', {
   onLog:            (cb: (d: string) => void) => ipcRenderer.on('log',             (_, d) => cb(d)),
   onCaptureFormat:  (cb: (d: {id: string, format: string}) => void)  => ipcRenderer.on('capture-format',   (_, d) => cb(d)),
   onAudioStats:     (cb: (d: {id: string, captured: number}) => void) => ipcRenderer.on('audio-stats', (_, d) => cb(d)),
+  onEncoderUsed:    (cb: (d: {id: string, encoder: string}) => void)  => ipcRenderer.on('encoder-used',   (_, d) => cb(d)),
 
   removeAllListeners: (ch: string) => ipcRenderer.removeAllListeners(ch),
 })

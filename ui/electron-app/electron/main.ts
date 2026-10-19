@@ -589,15 +589,32 @@ ipcMain.handle('scan-devices', async () => {
   return devices
 })
 
+interface CodecEntry {
+  name: string; label: string; available: boolean
+  resolves_to?: string; resolves_label?: string   // only on the "gpu" / "cpu" entries
+}
+
+// Last --list-codecs result. Which encoder is used is arena_stream's decision
+// (codec_policy.h): the UI sends "gpu" or "cpu" and arena_stream resolves it.
+// This cache only lets the few places that need a concrete encoder name for
+// something else (the legacy webcam path, discovery beacons) look the answer
+// up rather than re-deriving it here.
+let codecList: CodecEntry[] = []
+
+function concreteEncoderName(codec: string): string {
+  if (codec !== 'gpu' && codec !== 'cpu') return codec
+  return codecList.find(c => c.name === codec)?.resolves_to || 'libx264'
+}
+
 ipcMain.handle('list-codecs', async () => {
   const bin = findBin('arena_stream.exe')
   if (!bin) return []
-  return new Promise<{ name: string; label: string; available: boolean }[]>(resolve => {
+  return new Promise<CodecEntry[]>(resolve => {
     const proc = spawn(bin, ['--list-codecs'], { windowsHide: true })
     let out = ''
     proc.stdout?.on('data', (d: Buffer) => { out += d.toString() })
     proc.on('close', () => {
-      try { resolve(JSON.parse(out)) } catch { resolve([]) }
+      try { codecList = JSON.parse(out); resolve(codecList) } catch { resolve([]) }
     })
     setTimeout(() => { proc.kill(); resolve([]) }, 5000)
   })
@@ -840,7 +857,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
       '--backend',   'aja',
       '--device',    deviceIdx,
       '--conn',      channelNum,
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? ('libopus') : 'none',
@@ -873,6 +890,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
             if (stat.mode) send('capture-format', { id: device.id, format: formatMode(stat.mode) })
+            if (typeof stat.encoder === 'string') send('encoder-used', { id: device.id, encoder: stat.encoder })
             if (typeof stat.audio_captured === 'number')
               send('audio-stats', { id: device.id, captured: stat.audio_captured })
           } catch {}
@@ -929,7 +947,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
     const captureArgs = [
       '--backend',   'ndi',
       '--device',    sourceName,
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? ('libopus') : 'none',
@@ -961,6 +979,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
             if (stat.mode) send('capture-format', { id: device.id, format: formatMode(stat.mode) })
+            if (typeof stat.encoder === 'string') send('encoder-used', { id: device.id, encoder: stat.encoder })
             if (typeof stat.audio_captured === 'number')
               send('audio-stats', { id: device.id, captured: stat.audio_captured })
           } catch {}
@@ -1001,7 +1020,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
       '--backend',   'decklink',
       '--device',    deviceIdx,
       '--conn',      'sdi',
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? ('libopus') : 'none',
@@ -1050,6 +1069,9 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
   // captureProc previously held, now that the removed top-level kill no
   // longer does it implicitly.
   kill(captureProc); captureProc = null
+  // This path drives GStreamer/ffmpeg directly rather than arena_stream, so it
+  // needs a concrete encoder name, not "gpu"/"cpu".
+  opts = { ...opts, codec: concreteEncoderName(opts.codec) }
   const gst = findGStreamer()
   const ffmpeg = findFFmpeg()
 
@@ -1301,7 +1323,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     if (!isAja && !isNdi) return { ok: false, error: 'UDP mode only supported with AJA backend' }
     const destUri  = protocol === 'rtp' ? `rtp://${destIp}:${port}` : `udp://${destIp}:${port}`
     send('log', `[${protocol}] pushing to ${destUri}`)
-    startBeacon(device.id, streamName, port, '', opts.codec, '', opts.bitrateKbps)
+    startBeacon(device.id, streamName, port, '', concreteEncoderName(opts.codec),'', opts.bitrateKbps)
 
     const sdiStream = findBin('arena_stream.exe')
     if (!sdiStream) return { ok: false, error: 'arena_stream.exe not found' }
@@ -1309,7 +1331,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     const captureDevice  = isNdi ? ndiSourceName : ajaDeviceIdx
     const captureArgs = [
       '--backend', captureBackend, '--device', captureDevice,
-      '--codec',   opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',   opts.codec,
       '--bitrate', String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       // RTP muxer is single-stream (video only) — audio would corrupt the H.264
@@ -1356,7 +1378,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     const captureArgs = [
       '--backend',   captureBackend,
       '--device',    captureDevice,
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? ('libopus') : 'none',
@@ -1457,7 +1479,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
       '--backend',   captureBackend,
       '--device',    captureDevice,
       '--conn',      ajaChannelNum,
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? 'libopus' : 'none',
@@ -1489,6 +1511,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
             const fixed = t.replace(/:on([,}])/g, ':"on"$1').replace(/:off([,}])/g, ':"off"$1')
             const stat = JSON.parse(fixed)
             if (stat.mode) send('capture-format', { id: device.id, format: formatMode(stat.mode) })
+            if (typeof stat.encoder === 'string') send('encoder-used', { id: device.id, encoder: stat.encoder })
             if (typeof stat.audio_captured === 'number')
               send('audio-stats', { id: device.id, captured: stat.audio_captured })
           } catch {}
@@ -1508,7 +1531,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
       send('capture-stopped', { id: device.id, code })
       send('log', `AJA stream ended (${code})`)
     })
-    startBeacon(device.id, streamName, port, '', opts.codec, `${localIp}:8890`, opts.bitrateKbps)
+    startBeacon(device.id, streamName, port, '', concreteEncoderName(opts.codec),`${localIp}:8890`, opts.bitrateKbps)
     send('stream-url', { id: device.id, url: viewerUri })
     return { ok: true, viewerUri }
   }
@@ -1524,7 +1547,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
       '--backend',   'decklink',
       '--device',    dlDeviceIdx,
       '--conn',      'sdi',
-      '--codec',     opts.codec.includes('nvenc') ? opts.codec : 'libx264',
+      '--codec',     opts.codec,
       '--bitrate',   String(opts.bitrateKbps),
       ...(opts.abrEnabled ? ['--abr'] : []),
       '--acodec',    (opts.audioEnabled ?? true) ? 'libopus' : 'none',
@@ -1556,7 +1579,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
       send('capture-stopped', { id: device.id, code })
       send('log', `DeckLink stream ended (${code})`)
     })
-    startBeacon(device.id, streamName, port, '', opts.codec, `${localIp}:8890`, opts.bitrateKbps)
+    startBeacon(device.id, streamName, port, '', concreteEncoderName(opts.codec),`${localIp}:8890`, opts.bitrateKbps)
     send('stream-url', { id: device.id, url: viewerUri })
     return { ok: true, viewerUri }
   }
@@ -1590,7 +1613,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     send('log', `Stream ended (${code})`)
   })
 
-  startBeacon(device.id, streamName, port, '', opts.codec || '', relayUrl, opts.bitrateKbps)
+  startBeacon(device.id, streamName, port, '', concreteEncoderName(opts.codec || ''), relayUrl, opts.bitrateKbps)
   send('stream-url', { id: device.id, url: viewerUri })
   return { ok: true, viewerUri }
 }))

@@ -185,16 +185,22 @@ export default function App() {
   const [viewerUrls,     setViewerUrls]      = useState<Record<string, string>>({})
   const [logs,           setLogs]           = useState<string[]>([])
   const [urlCopied,      setUrlCopied]      = useState(false)
-  const [availableCodecs, setAvailableCodecs] = useState<{name:string;label:string;available:boolean}[]>([])
-  // GPU vs CPU is the only choice the user makes; which specific vendor
-  // encoder (NVENC/QSV/AMF/MF) backs "GPU" on this machine is resolved
-  // automatically from list-codecs — see resolveCodec() below. Previously
-  // the dropdown listed every individual encoder name (13 after QSV/AMF/MF/
-  // AV1 were added), which is not a choice a user should have to make.
+  // list-codecs output: every concrete encoder, plus "gpu" and "cpu" entries
+  // that say what each would resolve to on this machine.
+  const [availableCodecs, setAvailableCodecs] = useState<{
+    name: string; label: string; available: boolean
+    resolves_to?: string; resolves_label?: string
+  }[]>([])
+  // The encoder each channel's arena_stream process actually opened — can
+  // differ from what was asked for if the first choice failed to open.
+  const [encoderUsed, setEncoderUsed] = useState<Record<string, string>>({})
+  // GPU vs CPU is the only choice the user makes. It's sent to arena_stream
+  // as-is ("gpu" / "cpu") and arena_stream picks the actual encoder (NVENC,
+  // QSV, AMF, Media Foundation, or libx264) — the UI never names one.
   const [hwMode, setHwMode] = useState<'gpu' | 'cpu'>(
     (localStorage.getItem('arenaStream.hwMode') as 'gpu' | 'cpu') || 'gpu')
   const [opts, setOpts] = useState<StreamOpts>({
-    codec: 'libx264', bitrateKbps: 15000, latencyMs: 20,
+    codec: hwMode, bitrateKbps: 15000, latencyMs: 20,
     destIp: '', destPort: 4200, protocol: 'srt', relayUrl: '5.78.236.254:8890', streamName: '',
     srtPassphrase: localStorage.getItem('arenaStream.srtPassphrase') || '',
     audioCodec: 'aac', audioBitrateKbps: 192, audioEnabled: true,
@@ -297,6 +303,11 @@ export default function App() {
       if (!d?.id) return
       setAudioCaptures(prev => ({ ...prev, [d.id]: d.captured }))
     })
+    // Arrives with every stats line, so only update state when it changes.
+    sdi.onEncoderUsed((d: {id: string, encoder: string}) => {
+      if (!d?.id) return
+      setEncoderUsed(prev => prev[d.id] === d.encoder ? prev : { ...prev, [d.id]: d.encoder })
+    })
     // Without this, a channel whose capture process dies (crashed encoder,
     // killed externally, etc.) stays in activeIds forever — clicking it
     // again then takes the "already active, just switch preview" branch in
@@ -310,10 +321,11 @@ export default function App() {
       setActiveIds(prev => { const s = new Set(prev); s.delete(d.id!); return s })
       setCaptureFormats(prev => { const next = { ...prev }; delete next[d.id!]; return next })
       setAudioCaptures(prev => { const next = { ...prev }; delete next[d.id!]; return next })
+      setEncoderUsed(prev => { const next = { ...prev }; delete next[d.id!]; return next })
     })
     return () => {
       ['log','stream-url','stream-stopped','preview-frame','preview-yuv','capture-format',
-       'audio-stats','capture-stopped'].forEach(c =>
+       'audio-stats','encoder-used','capture-stopped'].forEach(c =>
         sdi.removeAllListeners(c))
     }
   }, [])
@@ -340,25 +352,23 @@ export default function App() {
     }).catch(() => {})
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Resolve hwMode ('gpu'/'cpu') + the probed codec list into one concrete
-  // encoder name to actually pass to arena_stream.exe. GPU picks the first
-  // available hardware encoder in list-codecs' own vendor-then-format order
-  // (h264_nvenc, h264_qsv, h264_amf, h264_mf, hevc_*, av1_*); CPU always
-  // resolves to libx264, which is bundled and always available. Runs
-  // whenever the probe result or the user's GPU/CPU choice changes, so the
-  // dropdown never needs to know individual encoder names.
-  useEffect(() => {
-    if (availableCodecs.length === 0) return
-    const isGpu = (name: string) => /_(nvenc|qsv|amf|mf)$/.test(name)
-    const pool = availableCodecs.filter(c => c.available && (hwMode === 'gpu' ? isGpu(c.name) : !isGpu(c.name)))
-    const fallbackPool = availableCodecs.filter(c => c.available)
-    const resolved = pool[0] || fallbackPool[0]
-    if (resolved) setOpts(o => ({ ...o, codec: resolved.name }))
-  }, [availableCodecs, hwMode])
-
   function setHwModePersist(mode: 'gpu' | 'cpu') {
     setHwMode(mode)
+    setOpts(o => ({ ...o, codec: mode }))
     localStorage.setItem('arenaStream.hwMode', mode)
+  }
+
+  // What to show under the ENCODER selector: the encoder the selected channel
+  // actually opened if it's running, otherwise what the request would resolve
+  // to on this machine (GPU falls back to the CPU encoder when no hardware
+  // encoder opened, which is what arena_stream will do).
+  function encoderLabel(): string {
+    const label = (name: string) => availableCodecs.find(c => c.name === name)?.label || name
+    const used = selected ? encoderUsed[selected.id] : undefined
+    if (used) return label(used)
+    const entry = availableCodecs.find(c => c.name === hwMode)
+    if (entry?.resolves_label) return entry.resolves_label
+    return availableCodecs.find(c => c.name === 'cpu')?.resolves_label || ''
   }
 
   async function selectDevice(dev: Device) {
@@ -706,15 +716,13 @@ export default function App() {
               )}
               <label>ENCODER
                 <select value={hwMode} onChange={e => setHwModePersist(e.target.value as 'gpu' | 'cpu')}>
-                  <option value="gpu" disabled={!availableCodecs.some(c => c.available && /_(nvenc|qsv|amf|mf)$/.test(c.name))}>
+                  <option value="gpu" disabled={availableCodecs.length > 0 && !availableCodecs.find(c => c.name === 'gpu')?.available}>
                     GPU (hardware)
                   </option>
                   <option value="cpu">CPU (software)</option>
                 </select>
-                {opts.codec && (
-                  <span className="encoder-resolved">
-                    Using: {availableCodecs.find(c => c.name === opts.codec)?.label || opts.codec}
-                  </span>
+                {encoderLabel() && (
+                  <span className="encoder-resolved">Using: {encoderLabel()}</span>
                 )}
               </label>
               <label>BITRATE
