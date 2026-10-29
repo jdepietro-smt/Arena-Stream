@@ -9,6 +9,24 @@
   var ADMIN = '/comms/admin/'
   var panel, frame, go, current = APP
 
+  // The browser tab should say "Arena Comms" while the panel is open, not the dashboard's own title.
+  var baseTitle = null, titleWatch = null
+  function wantedTitle() { return current === ADMIN ? 'Arena Comms Admin' : 'Arena Comms' }
+  function applyTitle() {
+    if (baseTitle === null) baseTitle = document.title
+    if (document.title !== wantedTitle()) document.title = wantedTitle()
+    // The dashboard may rewrite its title now and then (stream names, refreshes): keep ours while the panel is open.
+    var t = document.querySelector('title')
+    if (t && !titleWatch && window.MutationObserver) {
+      titleWatch = new MutationObserver(function () { if (panel && panel.style.display === 'flex') applyTitle() })
+      titleWatch.observe(t, { childList: true, characterData: true, subtree: true })
+    }
+  }
+  function restoreTitle() {
+    if (titleWatch) { titleWatch.disconnect(); titleWatch = null }
+    if (baseTitle !== null) { document.title = baseTitle; baseTitle = null }
+  }
+
   function build() {
     panel = document.createElement('div')
     panel.id = 'arena-comms-panel'
@@ -37,6 +55,7 @@
       current = src
       if (frame.getAttribute('src') !== src) frame.src = src
       paint()
+      if (panel.style.display === 'flex') applyTitle() // switching between Intercom and Admin
       try { history.replaceState(null, '', src === ADMIN ? '#comms-admin' : '#comms') } catch (e) { /* ignore */ }
     }
     var spacer = document.createElement('span')
@@ -59,9 +78,11 @@
     if (!panel) build()
     go(typeof src === 'string' ? src : current) // loads lazily, only when first opened
     panel.style.display = 'flex'
+    applyTitle()
   }
   function hide() {
     if (panel) panel.style.display = 'none'
+    restoreTitle()
     try { history.replaceState(null, '', location.pathname + location.search) } catch (e) { /* ignore */ }
   }
 
