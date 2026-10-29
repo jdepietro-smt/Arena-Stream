@@ -444,6 +444,7 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
 function MusicKey({ ch, engine, prefs, patch, devices }: {
   ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
 }) {
+  const [opened, setOpened] = useState(false) // the player link was opened from this key
   const senders = engine.musicSendersOn(ch.id)
   const sending = engine.musicSending(ch.id)
   const listening = engine.listen.has(ch.id)
@@ -467,7 +468,9 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
             : engine.ducked && !sending && !ch.noDuck ? <span className="blink">DUCKED · IFB</span>
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
-            : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
+            : ch.canTalk && chosen === 'display' && link.trim()
+              ? <span className="blink">{opened ? '② PRESS START MUSIC, PICK THE WINDOW, TICK SHARE AUDIO' : '① PRESS OPEN, PLAY THE VIDEO, THEN START MUSIC'}</span>
+              : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
         </div>
       </div>
       {ch.canTalk ? (
@@ -484,7 +487,7 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
               <input value={link} onChange={e => patch({ musicLinkBy: { ...prefs.musicLinkBy, [ch.id]: e.target.value } })} spellCheck={false}
                 placeholder="Paste a YouTube / Spotify link" title="Opens the link in its own window. Then press START MUSIC, pick that window and tick Share audio." />
               <button type="button" className="cap sm" disabled={!/^https?:\/\//i.test(link.trim())}
-                onClick={() => window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
+                onClick={() => { window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600'); setOpened(true) }}>OPEN</button>
             </div>
           )}
           <div className="pgm-mid">
