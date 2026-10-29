@@ -28,7 +28,8 @@ the service is integrated or intercepted by the server.
 
 - **On a party-line channel (recommended):** in the admin's Channels, edit the channel (say Program) and tick **Also play
   music on this channel**. Its key keeps TALK / LISTEN / LATCH / CALL and gains a music row for people with the **Music** permission (no Talk needed): the
-  source, the link box with **OPEN** and **START** beside it, and STOP while playing. Everyone listening to the channel
+  source, the link box with one **START** beside it (it opens the link; the next press, **GO LIVE**, shares its audio, because
+  browsers need a separate click for that), and STOP while playing. Everyone listening to the channel
   hears the music on it, with the channel's own level knob, and the LCD shows who is playing. An IFB channel cannot carry
   music.
 - **Music-only channel:** tick **Music-only channel** instead for a dedicated MUSIC key with no talking: Music (or Talk) = may

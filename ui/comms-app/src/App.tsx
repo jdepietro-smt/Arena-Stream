@@ -453,6 +453,8 @@ function MusicControls({ ch, engine, prefs, patch, devices, meter }: {
   ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]; meter?: boolean
 }) {
   const sending = engine.musicSending(ch.id)
+  const [opened, setOpened] = useState(false) // the link was opened by START; the next press shares its audio
+  useEffect(() => { if (sending) setOpened(false) }, [sending])
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
   const inputs = devices.filter(d => d.kind === 'audioinput')
   // Default source: the channel's own stream when it has one, otherwise the computer's audio.
@@ -476,10 +478,17 @@ function MusicControls({ ch, engine, prefs, patch, devices, meter }: {
           <input value={link} onChange={e => patch({ musicLinkBy: { ...prefs.musicLinkBy, [ch.id]: e.target.value } })} spellCheck={false}
             placeholder="Paste a YouTube / Spotify link" title="OPEN shows the link in its own window. Play it there, then press START and pick that window with Share audio ticked." />
           <div className="musicbtns">
-            <button type="button" className="cap sm" disabled={!validLink} title="Open the link in its own window"
-              onClick={() => window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
-            <button type="button" className="cap sm" title="Share that window's audio onto the channel"
-              onClick={() => void engine.startMusic(ch.id, source())}><i className="led green" />START</button>
+            {opened && validLink && (
+              <button type="button" className="cap sm" title="Open the link in its own window again"
+                onClick={() => window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
+            )}
+            <button type="button" className="cap sm"
+              title={validLink && !opened ? 'Open the link in its own window and play it' : "Share that window's audio onto the channel"}
+              onClick={() => {
+                // The browser needs a separate click to share audio, so with a link: START opens it, GO LIVE shares it.
+                if (validLink && !opened) { window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600'); setOpened(true) }
+                else void engine.startMusic(ch.id, source())
+              }}><i className="led green" />{validLink && opened ? 'GO LIVE' : 'START'}</button>
           </div>
         </div>
       )}
@@ -521,7 +530,7 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
             : ch.canMusic && chosen === 'display' && link.trim()
-              ? <span className="blink">OPEN THE LINK, PLAY IT, THEN START</span>
+              ? <span className="blink">PRESS START: THE LINK OPENS. THEN GO LIVE</span>
               : <span className="dim">{ch.canMusic ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
         </div>
       </div>
