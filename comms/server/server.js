@@ -350,6 +350,11 @@ export function createServer(
       if (authMode === 'accounts' && msg.token) {
         user = auth.userForSession(msg.token)
         if (!user) return fail('bad-token', 'Your session expired. Sign in again.')
+      } else if (authMode === 'accounts' && msg.gateway && !msg.password) {
+        try { user = auth.gatewayLogin(msg.username) } catch (e) {
+          if (e instanceof AuthError) return fail(e.code, e.message)
+          throw e
+        }
       } else if (authMode === 'accounts') {
         try {
           user = await auth.authenticate(msg.username, msg.password, `${ip}:${String(msg.username).toLowerCase()}`)

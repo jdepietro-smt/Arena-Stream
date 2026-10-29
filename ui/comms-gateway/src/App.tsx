@@ -66,7 +66,7 @@ export default function App() {
   const connect = () => {
     if (!cfg) return
     void engine.join({
-      url: cfg.server.trim(), auth: 'accounts', username: cfg.username, password: cfg.password,
+      url: cfg.server.trim(), auth: 'accounts', username: cfg.username.trim() || 'gateway', password: '',
       name: '', pin: '', echoCancel: false, gateway: true,
     })
   }
@@ -74,7 +74,7 @@ export default function App() {
 
   // Auto-connect once the stored config has loaded.
   useEffect(() => {
-    if (cfg && cfg.autoConnect && cfg.username && cfg.password && !autoTried.current && engine.status === 'idle') {
+    if (cfg && cfg.autoConnect && cfg.server && !autoTried.current && engine.status === 'idle') {
       autoTried.current = true
       connect()
     }
@@ -134,15 +134,14 @@ export default function App() {
           <h2 className="lcd">Arena server</h2>
           <div className="grid3">
             <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="ws://host:8900" /></label>
-            <label>Gateway account<input value={cfg.username} onChange={e => patch({ username: e.target.value })} autoComplete="username" /></label>
-            <label>Password<input type="password" value={cfg.password} onChange={e => patch({ password: e.target.value })} autoComplete="current-password" /></label>
+            <label>Gateway account (no password)<input placeholder="gateway" value={cfg.username} onChange={e => patch({ username: e.target.value })} autoComplete="username" /></label>
           </div>
           <div className="row">
             <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically at start-up</label>
             <span className="grow" />
             {connected
               ? <button className="btn danger" onClick={disconnect}>Disconnect</button>
-              : <button className="btn primary" disabled={!cfg.username || !cfg.password} onClick={connect}>Connect</button>}
+              : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
           </div>
           {status === 'error' && <div className="error">{engine.error}</div>}
           <p className="hint">Create a user for this gateway in the admin page and put it in groups that can talk and listen on the channels it bridges. The server must be in SFU media mode.</p>
