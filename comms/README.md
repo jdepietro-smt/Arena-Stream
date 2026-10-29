@@ -40,8 +40,10 @@ taken from the A1's own computer, so nothing about the service is integrated or 
   connected user with Talk on the channel can pull it. If the stream freezes the sender reconnects by itself a few
   times, then stops with a message. HLS (.m3u8) is not supported; use a direct stream URL.
   A link to a web page (YouTube, Spotify, Apple Music, SoundCloud and similar) is not an audio stream: setup refuses
-  it with an explanation, and the relay answers 415 if a URL turns out to serve a page. To use such a service, play
-  it on the A1's own computer and share that audio with the "Computer / tab audio" source instead.
+  it with an explanation, and the relay answers 415 if a URL turns out to serve a page. To use such a service, the
+  sender uses the "Computer / tab audio" source: paste the YouTube (or other) link into the box on the MUSIC key and
+  press OPEN, which opens it in its own window; then START MUSIC, pick that window and tick "Share audio". In the
+  desktop app the whole PC's audio is captured, so the window can simply be left playing.
 - **Listening:** the key has the channel's level knob and a LISTEN/MUTED switch, remembered between sessions.
   The server only subscribes a listener to the track while an allowed sender has it on, and stops it the moment a
   sender loses the Talk right.

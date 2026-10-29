@@ -129,7 +129,7 @@ export class Directory {
       if (!url || !/^https?:$/.test(url.protocol)) throw new DirectoryError('Stream URL must start with http:// or https://')
       // Links to a music service's web page are not audio streams and cannot be played here.
       if (/(^|\.)(youtube\.com|youtu\.be|spotify\.com|music\.apple\.com|soundcloud\.com|deezer\.com|tidal\.com|pandora\.com|music\.amazon\.[a-z.]+)$/i.test(url.hostname)) {
-        throw new DirectoryError('That is a web page for a music service, not an audio stream. Use a radio station\'s direct stream address, or play the service on the A1\'s computer and share its audio instead.')
+        throw new DirectoryError('That is a web page for a music service, not an audio stream. Use a radio station\'s direct stream address, or leave this blank and have the sender paste the link into the MUSIC key (Computer / tab audio): it opens in its own window and they share that window\'s audio.')
       }
     }
     // A music channel ducks under IFB talkers by default (its own depth if set); noDuck turns that off.

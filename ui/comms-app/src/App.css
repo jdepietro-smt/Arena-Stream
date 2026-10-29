@@ -157,3 +157,6 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 
 /* Audio held back by the browser until a click (after a reload) */
 .audio-banner { margin: 8px 14px 0; padding: 8px 12px; text-align: center; font: 700 12px var(--mono, monospace); letter-spacing: .12em; text-transform: uppercase; color: #1a1100; background: var(--lcd, #ffb020); border: 0; border-radius: 6px; cursor: pointer; animation: kp-blink 1.2s steps(2) infinite; }
+.musiclink { display: flex; gap: 6px; }
+.musiclink input { flex: 1; min-width: 0; font-size: 11px; padding: 5px 6px; background: #0e1013; color: #cfd3da; border: 1px solid #2f343c; border-radius: 4px; }
+.musiclink .cap.sm { flex: 0 0 auto; padding: 5px 10px; }

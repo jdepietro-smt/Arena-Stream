@@ -37,7 +37,7 @@ interface Prefs {
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
-  musicSrcBy: Record<string, string>
+  musicSrcBy: Record<string, string>; musicLink: string
 }
 
 function loadPrefs(): Prefs {
@@ -49,7 +49,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {},
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLink: '',
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -477,6 +477,14 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
               {inputs.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Input ${i + 1}`}</option>)}
             </select>
           </label>
+          {chosen === 'display' && !sending && (
+            <div className="musiclink">
+              <input value={prefs.musicLink} onChange={e => patch({ musicLink: e.target.value })} spellCheck={false}
+                placeholder="Paste a YouTube / Spotify link" title="Opens the link in its own window. Then press START MUSIC, pick that window and tick Share audio." />
+              <button type="button" className="cap sm" disabled={!/^https?:\/\//i.test(prefs.musicLink.trim())}
+                onClick={() => window.open(prefs.musicLink.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
+            </div>
+          )}
           <div className="pgm-mid">
             <LedMeter engine={engine} source="music" channel={ch.id} />
           </div>
