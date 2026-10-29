@@ -8,7 +8,7 @@
 // Dante Virtual Soundcard shows up as an ASIO driver too, so it works through the same path.
 
 import { app, BrowserWindow, ipcMain } from 'electron'
-import { ChildProcess, fork } from 'child_process'
+import { ChildProcess, ForkOptions, fork } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 
@@ -39,7 +39,7 @@ function start(): ChildProcess | null {
     windowsHide: true, // node.exe is a console program; do not show its window
     serialization: 'advanced', // typed arrays travel as binary
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
-  })
+  } as ForkOptions)
   c.on('message', (m: { id?: number; result?: unknown; type?: string; planar?: Float32Array }) => {
     if (m.id != null) {
       const done = pending.get(m.id)
