@@ -193,7 +193,7 @@ export default function App() {
           {runtime.asioInfo?.ok && <div className="hint">Open: {runtime.asioInfo.driver} · {runtime.asioInfo.openedIn} in / {runtime.asioInfo.openedOut} out used · {runtime.asioInfo.frames}-sample buffer</div>}
         </section>
 
-        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
+        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
@@ -208,7 +208,8 @@ export default function App() {
 }
 
 /** Dante-Controller-style routing: interface channels on one axis, Arena channels on the other. */
-function RoutingGrid({ cfg, asioDev, channels: allChannels, groups, setCfg, setName }: {
+function RoutingGrid({ cfg, asioDev, runtime, channels: allChannels, groups, setCfg, setName }: {
+  runtime: GatewayRuntime
   cfg: GatewayConfig; asioDev: AsioDevice; channels: { id: string; name: string; color?: string }[]
   setCfg: (f: (c: GatewayConfig | null) => GatewayConfig | null) => void
   groups: { id: string; name: string; channels: string[] }[]
@@ -262,7 +263,7 @@ function RoutingGrid({ cfg, asioDev, channels: allChannels, groups, setCfg, setN
               <tbody>
                 {Array.from({ length: count }, (_, i) => (
                   <tr key={i}>
-                    <th className="rname"><b>{i + 1}</b><input value={names[i] ?? ''} onChange={e => setName(tab === 'in' ? 'inputNames' : 'outputNames', i, e.target.value)} placeholder={tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`} /></th>
+                    <th className="rname"><b>{i + 1}</b><input value={names[i] ?? ''} onChange={e => setName(tab === 'in' ? 'inputNames' : 'outputNames', i, e.target.value)} placeholder={tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`} /><span className="chmeter" title="Level on this line"><i style={{ width: pct(runtime.asioLevelDb(tab, i)) }} /></span></th>
                     {channels.map(c => {
                       const on = portFor(c.id)?.[key] === i + 1
                       return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, i + 1)} title={`${names[i]?.trim() || i + 1} ${tab === 'in' ? '→' : '←'} ${c.name}`} /></td>

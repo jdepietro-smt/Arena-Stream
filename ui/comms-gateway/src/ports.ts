@@ -160,11 +160,28 @@ export class GatewayRuntime {
   private rtpBound = false
   asioInfo: AsioOpenResult | null = null
   private asioNodes: AudioNode[] = []
+  /** Peak level (0..1, slowly falling) of every interface input and output, for the routing grid's meters. */
+  private asioInPeak = new Float32Array(0)
+  private asioOutPeak = new Float32Array(0)
+  asioLevelDb(kind: 'in' | 'out', i: number): number {
+    const v = (kind === 'in' ? this.asioInPeak : this.asioOutPeak)[i] ?? 0
+    return v > 1e-5 ? 20 * Math.log10(v) : SILENCE_DB
+  }
 
   constructor(private engine: CommsEngine, private onChange: () => void) {}
 
   get built() { return this.builtKey !== '' }
   isStale(cfg: GatewayConfig) { return this.builtKey !== structuralKey(cfg) }
+
+  /** Fold one planar block (channel-major) into the per-channel peaks: instant rise, slow fall. */
+  private trackPeaks(peaks: Float32Array, planar: Float32Array, chans: number) {
+    const len = Math.floor(planar.length / chans)
+    for (let c = 0; c < chans; c++) {
+      let m = 0
+      for (let i = c * len, e = i + len; i < e; i++) { const a = planar[i] < 0 ? -planar[i] : planar[i]; if (a > m) m = a }
+      peaks[c] = Math.max(m, peaks[c] * 0.97)
+    }
+  }
 
   /** Create the audio graph for every enabled port. Needs the engine connected (its context exists). */
   async build(cfg: GatewayConfig): Promise<void> {
@@ -241,13 +258,14 @@ export class GatewayRuntime {
       // ── ASIO: every channel of the interface, bridged by the desktop app ──
       let asio: AsioGraph | undefined
       const asioPorts = active.filter(p => p.source === 'asio')
-      if (asioPorts.length) {
+      // With a driver chosen the whole interface is opened, even with no port routed yet, so the grid's meters show activity.
+      if (asioPorts.length || (cfg.asio?.deviceId >= 0 && window.gw?.asioOpen)) {
         const a = cfg.asio ?? defaultConfig().asio
         if (!window.gw?.asioOpen) this.deviceError ||= 'ASIO needs the desktop app'
         else if (a.deviceId < 0) this.deviceError ||= 'Pick an ASIO driver in the ASIO interface section'
         else {
-          const wantIn = Math.max(0, ...asioPorts.map(q => q.inCh))
-          const wantOut = Math.max(0, ...asioPorts.map(q => q.outCh))
+          const wantIn = 64
+          const wantOut = 64
           const res = await window.gw.asioOpen({ deviceId: a.deviceId, inputs: wantIn, outputs: wantOut, frames: a.frames })
           this.asioInfo = res
           if (!res.ok) this.deviceError ||= `ASIO: ${res.error}`
@@ -258,7 +276,12 @@ export class GatewayRuntime {
               const inNode = new AudioWorkletNode(ctx, 'asio-in', {
                 numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [res.openedIn!], processorOptions: { targetSamples: 512 },
               })
-              window.gw.onAsioRx(buf => inNode.port.postMessage(buf, [buf.buffer]))
+              const nIn = res.openedIn!
+              this.asioInPeak = new Float32Array(nIn)
+              window.gw.onAsioRx(buf => {
+                this.trackPeaks(this.asioInPeak, buf, nIn)
+                inNode.port.postMessage(buf, [buf.buffer])
+              })
               const splitter = ctx.createChannelSplitter(res.openedIn!)
               inNode.connect(splitter)
               asio.splitter = splitter
@@ -269,7 +292,13 @@ export class GatewayRuntime {
                 numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: res.openedOut!,
                 channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: res.openedOut! },
               })
-              outNode.port.onmessage = e => window.gw?.asioTx(e.data as Float32Array)
+              const nOut = res.openedOut!
+              this.asioOutPeak = new Float32Array(nOut)
+              outNode.port.onmessage = e => {
+                const blk = e.data as Float32Array
+                this.trackPeaks(this.asioOutPeak, blk, nOut)
+                window.gw?.asioTx(blk)
+              }
               const merger = ctx.createChannelMerger(res.openedOut!)
               merger.connect(outNode)
               const sink = ctx.createGain()
