@@ -168,7 +168,7 @@ function PortCard({ cfg, live, engine, connected, dupChannel, onChange, onRemove
   cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; dupChannel: boolean
   onChange: (p: Partial<PortCfg>) => void; onRemove: () => void
 }) {
-  const channels = engine.channels
+  const channels = engine.channels.filter(c => !c.music)
   const rtp = (p: Partial<RtpCfg>) => onChange({ rtp: { ...cfg.rtp, ...p } })
   const num = (v: string, d = 0) => (Number.isFinite(+v) ? +v : d)
   const inDb = live?.inDb() ?? -120

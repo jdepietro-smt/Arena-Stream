@@ -269,7 +269,7 @@ export class GatewayRuntime {
   private voxTick() {
     const now = performance.now()
     let changed = false
-    const chans = this.engine.channels
+    const chans = this.engine.channels.filter(c => !c.music) // music channels are not carried by the gateway
     for (const p of this.ports) {
       const ch = chans.find(c => c.id === p.cfg.channel)
       const access: Port['access'] = !ch ? 'none' : ch.canTalk && ch.canListen ? 'ok' : ch.canTalk ? 'talk-only' : ch.canListen ? 'listen-only' : 'none'

@@ -37,7 +37,7 @@ interface Prefs {
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
-  musicSrc: string; musicVol: number
+  musicSrc: string
 }
 
 function loadPrefs(): Prefs {
@@ -49,7 +49,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrc: 'display', musicVol: 0.6,
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrc: 'display',
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -117,9 +117,6 @@ export default function App() {
   useEffect(() => {
     engine.setSpatial({ on: prefs.spatial, spread: prefs.spread, overrides: prefs.pans })
   }, [engine, prefs.spatial, prefs.spread, prefs.pans])
-
-  // Remember the music level between sessions.
-  useEffect(() => { engine.setMusicVolume(prefs.musicVol) }, [engine]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Release the microphone while idle (OS mic indicator off); it reopens on the first press.
   useEffect(() => {
@@ -333,8 +330,9 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
         )}
         <div className="keys">
           {engine.program && <ProgramKey engine={engine} />}
-          {engine.music && <MusicKey engine={engine} prefs={prefs} patch={patch} devices={devices} />}
-          {engine.channels.map((c, i) => <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} />)}
+          {engine.channels.map((c, i) => (c.music
+            ? <MusicKey key={c.id} ch={c} engine={engine} prefs={prefs} patch={patch} devices={devices} />
+            : <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} />))}
         </div>
         {dock}
       </section>
@@ -440,35 +438,35 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
 }
 
 /**
- * Shared music feed (e.g. the A1's setup music). Everyone who may hear it gets a level knob and a mute;
- * roles allowed to send also get a source picker and a start/stop key. It is ducked by IFB like the program.
+ * A music channel (set up in the admin's Channels, "Music channel"). Whoever may talk on it gets a source picker and
+ * a start/stop key; whoever may listen gets the channel's level knob and listen switch. Ducked by IFB like the program.
  */
-function MusicKey({ engine, prefs, patch, devices }: {
-  engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+function MusicKey({ ch, engine, prefs, patch, devices }: {
+  ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
 }) {
-  const m = engine.music!
-  const senders = [...engine.musicSenders.values()]
-  const sending = engine.musicSending
+  const senders = engine.musicSendersOn(ch.id)
+  const sending = engine.musicSending(ch.id)
+  const listening = engine.listen.has(ch.id)
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
   const inputs = devices.filter(d => d.kind === 'audioinput')
   const source = (): MusicSource => (prefs.musicSrc === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: prefs.musicSrc })
   return (
-    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: '#f472b6' }}>
+    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
         <div className="lg-top">
           <span className="lg-num">♪</span>
-          <span className="lg-name">{m.name}</span>
+          <span className="lg-name">{ch.name}</span>
           <span className={`lg-tag ${senders.length ? 'live' : ''}`}>{senders.length ? 'ON AIR' : 'OFF'}</span>
         </div>
         <div className="lg-sub">
-          {engine.musicError ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
+          {engine.musicError && ch.canTalk ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
             : engine.ducked && !sending ? <span className="blink">DUCKED · IFB</span>
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
-            : <span className="dim">{m.canSend ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
+            : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
         </div>
       </div>
-      {m.canSend ? (
+      {ch.canTalk ? (
         <>
           <label className="musicsrc">
             <select value={prefs.musicSrc} disabled={sending} onChange={e => patch({ musicSrc: e.target.value })} title="Where the music comes from">
@@ -477,10 +475,10 @@ function MusicKey({ engine, prefs, patch, devices }: {
             </select>
           </label>
           <div className="pgm-mid">
-            <LedMeter engine={engine} source="music" />
+            <LedMeter engine={engine} source="music" channel={ch.id} />
           </div>
           <div className="subkeys one">
-            <button className={`cap sm ${sending ? 'on' : ''}`} onClick={() => (sending ? engine.stopMusic() : void engine.startMusic(source()))}>
+            <button className={`cap sm ${sending ? 'on' : ''}`} onClick={() => (sending ? engine.stopMusic(ch.id) : void engine.startMusic(ch.id, source()))}>
               <i className={`led ${sending ? 'red on' : 'green'}`} />{sending ? 'STOP MUSIC' : 'START MUSIC'}
             </button>
           </div>
@@ -488,12 +486,12 @@ function MusicKey({ engine, prefs, patch, devices }: {
       ) : (
         <>
           <div className="pgm-mid">
-            <Knob label="LEVEL" value={engine.musicVolume} min={0} max={1}
-              onChange={v => { engine.setMusicVolume(v); patch({ musicVol: v }) }} readout={`${Math.round(engine.musicVolume * 100)}`} />
+            <Knob label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
+              onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
           </div>
           <div className="subkeys one">
-            <button className="cap sm" onClick={() => engine.setMusicMuted(!engine.musicMuted)}>
-              <i className={`led green ${engine.musicMuted ? '' : 'on'}`} />{engine.musicMuted ? 'MUTED' : 'LISTEN'}
+            <button className="cap sm" disabled={!ch.canListen} onClick={() => engine.setListen(ch.id, !listening)}>
+              <i className={`led green ${listening ? 'on' : ''}`} />{listening ? 'LISTEN' : 'MUTED'}
             </button>
           </div>
         </>
@@ -560,18 +558,18 @@ function Knob({ label, value, min, max, onChange, readout, mini }: {
 }
 
 /** Segmented LED level bar for the microphone or the program feed. */
-function LedMeter({ engine, source }: { engine: CommsEngine; source: 'mic' | 'program' | 'music' }) {
+function LedMeter({ engine, source, channel }: { engine: CommsEngine; source: 'mic' | 'program' | 'music'; channel?: string }) {
   const bar = useRef<HTMLDivElement>(null)
   useEffect(() => {
     let raf = 0
     const tick = () => {
-      const level = source === 'mic' ? engine.micLevel() : source === 'music' ? engine.musicSendLevel() : engine.programLevel()
+      const level = source === 'mic' ? engine.micLevel() : source === 'music' ? engine.musicSendLevel(channel ?? '') : engine.programLevel()
       if (bar.current) bar.current.style.width = `${Math.round(level * 100)}%`
       raf = requestAnimationFrame(tick)
     }
     tick()
     return () => cancelAnimationFrame(raf)
-  }, [engine, source])
+  }, [engine, source, channel])
   return <div className="ledmeter"><div ref={bar} /></div>
 }
 
@@ -632,7 +630,7 @@ function Settings({ engine, prefs, patch, devices, onClose }: {
           <label>Spread: {Math.round(prefs.spread * 100)}%
             <input type="range" min={0.2} max={1} step={0.05} value={prefs.spread} onChange={e => patch({ spread: +e.target.value })} />
           </label>
-          {engine.channels.map(c => (
+          {engine.channels.filter(c => !c.music).map(c => (
             <label key={c.id} className="panrow">
               <span><i className="swatch-dot" style={{ background: c.color }} />{c.name}</span>
               <input type="range" min={-1} max={1} step={0.05} value={prefs.pans[c.id] ?? engine.autoPan(c.id)}

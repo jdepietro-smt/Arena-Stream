@@ -161,7 +161,7 @@ test('SFU: subscriptions follow channel listen, roles and direct calls', async (
   }
 })
 
-test('music feed: only sender roles publish it; listeners are subscribed only while it is on', async () => {
+test('music channel: grants decide who sends and hears; subscribed only while a sender has it on', async () => {
   const subs = new Map()
   const tracksBy = new Map()
   const fake = {
@@ -174,8 +174,17 @@ test('music feed: only sender roles publish it; listeners are subscribed only wh
       subs.set(id, set)
     },
   }
-  const srv = createServer({ ...cfg, pin: '', music: { senderRoles: ['Audio'], listenRoles: ['Audio', 'Camera', 'Director'] } }, { sfu: fake })
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: fake })
   const port = await srv.listen(0)
+  const dir = srv.directory
+  const mus = dir.addChannel({ name: 'MUSIC', music: true, ifb: true })
+  assert.ok(mus.music && !mus.ifb, 'a music channel is never an IFB')
+  const grant = (group, g) => {
+    const grp = dir.groups.find(x => x.name === group)
+    dir.updateGroup(grp.id, { grants: { ...grp.grants, [mus.id]: g } })
+  }
+  grant('Audio', { talk: true, listen: true })
+  grant('Camera', { listen: true })
   const until = async (fn, what) => {
     for (let i = 0; i < 100; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 10)) }
     assert.fail(`timed out: ${what}`)
@@ -191,35 +200,48 @@ test('music feed: only sender roles publish it; listeners are subscribed only wh
     const A1 = await mk('Ann', 'Audio')
     const cam = await mk('Bob', 'Camera')
     const talent = await mk('Tia', 'Talent')
-    assert.deepEqual([A1.welcome.music.canSend, A1.welcome.music.canHear], [true, true])
-    assert.deepEqual([cam.welcome.music.canSend, cam.welcome.music.canHear], [false, true])
-    assert.equal(talent.welcome.music, null, 'a role outside listenRoles is not offered the feed')
+    const chan = w => w.channels.find(c => c.id === mus.id)
+    assert.deepEqual([chan(A1.welcome).canTalk, chan(A1.welcome).canListen, chan(A1.welcome).music], [true, true, true])
+    assert.deepEqual([chan(cam.welcome).canTalk, chan(cam.welcome).canListen], [false, true])
+    assert.equal(chan(talent.welcome), undefined, 'a role with no grant never sees the channel')
 
-    tracksBy.set(A1.id, [{ name: 'music', sid: 'A-music' }])
+    tracksBy.set(A1.id, [{ name: `music:${mus.id}`, sid: 'A-music' }])
     A1.c.send({ type: 'tracks' })
     await new Promise(r => setTimeout(r, 80))
     assert.ok(!has(cam.id, 'A-music'), 'published but switched off: nobody receives it')
 
-    A1.c.send({ type: 'music', on: true })
+    A1.c.send({ type: 'music', channel: mus.id, on: true })
     const notice = await cam.c.next(m => m.type === 'music')
-    assert.deepEqual([notice.id, notice.name, notice.on], [A1.id, 'Ann', true])
+    assert.deepEqual([notice.channel, notice.id, notice.name, notice.on], [mus.id, A1.id, 'Ann', true])
     await until(() => has(cam.id, 'A-music'), 'listener subscribed once the sender turns it on')
-    assert.ok(!has(talent.id, 'A-music'), 'role outside listenRoles never receives it')
+    assert.ok(!has(talent.id, 'A-music'), 'role without a grant never receives it')
     assert.ok(!has(A1.id, 'A-music'), 'never subscribed to own track')
 
-    // A non-sender cannot switch a music feed on, even if it publishes a track with that name.
-    tracksBy.set(cam.id, [{ name: 'music', sid: 'C-music' }])
+    // Muting the channel (listen off) unsubscribes, like any channel.
+    cam.c.send({ type: 'state', talk: [], listen: [] })
+    await until(() => !has(cam.id, 'A-music'), 'listen off unsubscribes')
+    cam.c.send({ type: 'state', talk: [], listen: [mus.id] })
+    await until(() => has(cam.id, 'A-music'), 'listen on subscribes again')
+
+    // Someone without talk on it cannot switch it on, even by publishing a track with that name.
+    tracksBy.set(cam.id, [{ name: `music:${mus.id}`, sid: 'C-music' }])
     cam.c.send({ type: 'tracks' })
-    cam.c.send({ type: 'music', on: true })
+    cam.c.send({ type: 'music', channel: mus.id, on: true })
     await new Promise(r => setTimeout(r, 120))
     assert.ok(!has(A1.id, 'C-music'), 'non-sender music is never forwarded')
 
-    // Someone joining later is told who is sending.
-    const late = await mk('Dee', 'Director')
-    assert.deepEqual(late.welcome.music.senders, [{ id: A1.id, name: 'Ann' }])
+    // Talk state can never name a music channel.
+    A1.c.send({ type: 'state', talk: [mus.id], listen: [mus.id] })
+    const st = await cam.c.next(m => m.type === 'peer-state' && m.id === A1.id)
+    assert.deepEqual(st.talk, [])
 
-    A1.c.send({ type: 'music', on: false })
-    await until(() => !has(cam.id, 'A-music'), 'turning it off unsubscribes listeners')
+    // Someone joining later is told who is sending.
+    const late = await mk('Dee', 'Audio')
+    assert.deepEqual(late.welcome.musicSenders, [{ channel: mus.id, id: A1.id, name: 'Ann' }])
+
+    // Taking away the sender's talk right switches the music off for everyone.
+    grant('Audio', { listen: true })
+    await until(() => !has(cam.id, 'A-music'), 'revoking talk stops the music')
     for (const x of [A1, cam, talent, late]) x.c.ws.close()
   } finally {
     await srv.close()

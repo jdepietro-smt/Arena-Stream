@@ -36,7 +36,8 @@ export async function verifyPassword(pw, stored) {
 export function seedFromConfig(cfg) {
   const channels = cfg.channels.map(c => ({
     id: c.id, name: c.name, color: c.color ?? '#6366f1',
-    ...(c.ifb ? { ifb: true } : {}), ...(c.duck != null ? { duck: c.duck } : {}),
+    ...(c.music ? { music: true } : {}),
+    ...(c.ifb && !c.music ? { ifb: true } : {}), ...(c.duck != null ? { duck: c.duck } : {}),
   }))
   // One self-join group per configured role, granted the channels that role could use before.
   const groups = cfg.roles.map(role => ({
@@ -116,7 +117,10 @@ export class Directory {
     if (!COLOR.test(color)) throw new DirectoryError('Color must look like #rrggbb')
     const duck = src.duck
     if (duck != null && !(duck >= 0 && duck <= 1)) throw new DirectoryError('Duck level must be between 0 and 1')
-    return { id, name, color, ...(src.ifb ? { ifb: true } : {}), ...(src.ifb && duck != null ? { duck: Number(duck) } : {}) }
+    // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
+    const music = !!src.music
+    const ifb = !!src.ifb && !music
+    return { id, name, color, ...(music ? { music: true } : {}), ...(ifb ? { ifb: true } : {}), ...(ifb && duck != null ? { duck: Number(duck) } : {}) }
   }
 
   addChannel(body) {
@@ -133,7 +137,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music']) if (body[k] !== undefined) src[k] = body[k]
     this.channels[i] = this.#cleanChannel(id, src)
     this.#changed()
     return this.channels[i]

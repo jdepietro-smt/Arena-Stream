@@ -8,11 +8,14 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
-export interface MusicInfo { name: string; canSend: boolean; canHear: boolean }
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' }
+interface MusicTx {
+  stream: MediaStream; src: MediaStreamAudioSourceNode; gain: GainNode
+  dest: MediaStreamAudioDestinationNode; an: AnalyserNode; buf: Float32Array<ArrayBuffer>
+}
 export type StreamState = 'unknown' | 'live' | 'down' | 'stalled'
 export interface ArenaStream { id: string; name: string; channel: string | null; state: StreamState }
 export interface ArenaAlert { text: string; level: 'warn' | 'ok'; at: number; stream: string | null }
@@ -101,20 +104,13 @@ export class CommsEngine {
   /** Session token for rejoining after a reload (accounts mode), and the code of the last error. */
   sessionToken: string | null = null
   errorCode = ''
-  /** The shared music feed offered to me (null = unavailable or not permitted), and who is sending it now. */
-  music: MusicInfo | null = null
-  musicSenders = new Map<string, string>()
-  musicVolume = 0.6
-  musicMuted = false
-  musicSending = false
+  /** Who is sending on each music channel I may hear: channel id -> (peer id -> name). */
+  musicSenders = new Map<string, Map<string, string>>()
   musicError = ''
-  private musicRx = new Map<string, { src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
-  private musicRxGain: GainNode | null = null
-  private musicIn: {
-    stream: MediaStream; src: MediaStreamAudioSourceNode; gain: GainNode
-    dest: MediaStreamAudioDestinationNode; an: AnalyserNode; buf: Float32Array<ArrayBuffer>
-  } | null = null
-  private musicPub: LocalTrackPublication | null = null
+  private musicRx = new Map<string, { ch: string; src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
+  private musicRxGain = new Map<string, GainNode>()
+  private musicTx = new Map<string, MusicTx>()
+  private musicPubs = new Map<string, LocalTrackPublication>()
   /** Arena stream health, pushed by the server's stream monitor. */
   streams: ArenaStream[] = []
   /** Latest alert per channel ('' = not tied to a channel). */
@@ -239,10 +235,9 @@ export class CommsEngine {
     this.progGain = null
     this.progAnalyser = null
     this.progOut = null
-    this.stopMusic(false)
-    this.music = null
+    this.stopAllMusic(false)
     this.musicSenders.clear()
-    this.musicRxGain = null
+    this.musicRxGain.clear()
     if (this.micIdleTimer) clearTimeout(this.micIdleTimer)
     this.micIdleTimer = null
     this.closeMic()
@@ -378,7 +373,7 @@ export class CommsEngine {
     this.emit()
   }
 
-  channelLevel(ch: string): number { return this.chLevels.get(ch) ?? 1 }
+  channelLevel(ch: string): number { return this.chLevels.get(ch) ?? (this.isMusic(ch) ? 0.6 : 1) }
 
   setChannelLevel(ch: string, v: number) {
     this.chLevels.set(ch, Math.min(1, Math.max(0, v)))
@@ -436,7 +431,7 @@ export class CommsEngine {
 
   /** Default position: channels spread left→right in key order, within ±spread. */
   autoPan(ch: string): number {
-    const ids = this.channels.map(c => c.id)
+    const ids = this.channels.filter(c => !c.music).map(c => c.id)
     const i = ids.indexOf(ch)
     if (i < 0 || ids.length < 2) return 0
     return -this.spatial.spread + 2 * this.spatial.spread * (i / (ids.length - 1))
@@ -550,8 +545,7 @@ export class CommsEngine {
         this.channels = m.channels
         this.myName = m.me.name
         this.streams = m.streams ?? []
-        this.music = m.music ?? null
-        this.musicSenders = new Map(((m.music?.senders ?? []) as { id: string; name: string }[]).map(x => [x.id, x.name]))
+        this.setMusicSenders(m.musicSenders)
         this.myTitle = m.me.title ?? ''
         this.isAdmin = !!m.me.admin
         this.ice = m.iceServers
@@ -599,6 +593,11 @@ export class CommsEngine {
         // An admin changed this user's channels/permissions: adopt the server's view.
         this.channels = m.channels
         this.listen = new Set(m.listen as string[])
+        this.setMusicSenders(m.musicSenders)
+        for (const ch of [...this.musicTx.keys()]) {
+          const c = this.channels.find(x => x.id === ch)
+          if (!c?.music || !c.canTalk) this.stopMusic(ch, false) // no longer allowed to send here
+        }
         for (const set of [this.held, this.latched]) {
           for (const t of [...set]) if (!isUser(t) && !this.channels.find(c => c.id === t)?.canTalk) set.delete(t)
         }
@@ -614,13 +613,7 @@ export class CommsEngine {
         break
       }
       case 'music':
-        if (m.on) this.musicSenders.set(m.id, m.name); else this.musicSenders.delete(m.id)
-        this.emit()
-        break
-      case 'music-access':
-        this.music = m.music ?? null
-        this.musicSenders = new Map(((m.music?.senders ?? []) as { id: string; name: string }[]).map(x => [x.id, x.name]))
-        if (!this.music?.canSend && this.musicSending) this.stopMusic(false)
+        this.markMusicSender(m.channel, m.id, m.name, !!m.on)
         this.emit()
         break
       case 'streams':
@@ -780,7 +773,7 @@ export class CommsEngine {
         this.gwSrc.set(track.sid, { src, hold })
         return
       }
-      if (pub.trackName === 'music') { this.attachMusic(track); return }
+      if (pub.trackName.startsWith('music:')) { this.attachMusic(pub.trackName.slice(6), track); return }
       const sid = track.sid ?? String(this.sfuVoices.size)
       const ch = pub.trackName.startsWith('ch:') ? pub.trackName.slice(3) : ''
       this.sfuVoices.get(sid) && this.dropVoice(this.sfuVoices.get(sid)!)
@@ -806,11 +799,11 @@ export class CommsEngine {
       if (this.room !== room) return
       await this.syncSfuTracks()
       if (this.room !== room) return
-      if (this.musicSending && this.musicIn) {
+      for (const ch of [...this.musicTx.keys()]) {
         // The server forgot my music state with the old session: publish again and re-announce.
-        this.musicPub = null
-        await this.publishMusic()
-        this.send({ type: 'music', on: true })
+        this.musicPubs.delete(ch)
+        await this.publishMusic(ch)
+        this.send({ type: 'music', channel: ch, on: true })
       }
       this.emit()
     } catch (e) {
@@ -824,7 +817,7 @@ export class CommsEngine {
       const room = this.room
       const ctx = this.ctx
       if (!room || !ctx || !this.micGain || room.state !== 'connected') return
-      const want = new Set(['direct', ...this.channels.filter(c => c.canTalk).map(c => `ch:${c.id}`)])
+      const want = new Set(['direct', ...this.channels.filter(c => c.canTalk && !c.music).map(c => `ch:${c.id}`)])
       for (const [name, gain] of [...this.sfuGains]) {
         if (want.has(name)) continue
         const pub = this.sfuPubs.get(name)
@@ -866,7 +859,7 @@ export class CommsEngine {
     this.sfuVoices.clear()
     for (const mu of this.musicRx.values()) { mu.src.disconnect(); mu.hold.srcObject = null }
     this.musicRx.clear()
-    this.musicPub = null
+    this.musicPubs.clear()
     await room?.disconnect().catch(() => {})
   }
 
@@ -905,18 +898,40 @@ export class CommsEngine {
     this.send({ type: 'state', talk: [...this.talkSet], listen: [...this.listen] })
   }
 
-  // ── shared music feed ──────────────────────────────────────────────────────
-  // Receiving: stereo, own level knob, ducked by IFB like the program feed.
-  // Sending (permitted roles only): an input device or shared tab/system audio, published as stereo
-  // 128 kbps Opus with DTX off (music must not be gated like speech).
-  private attachMusic(track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
+  // ── music channels ─────────────────────────────────────────────────────────
+  // A music channel (admin: Channels, "Music channel") carries stereo music from whoever may talk on it to
+  // everyone who may listen. Each is its own published track `music:<channel>`: 128 kbps stereo Opus with DTX
+  // off (music must not be gated like speech). Received with the channel's own level knob and listen switch,
+  // and ducked by IFB like the program feed.
+  isMusic(ch: string): boolean { return !!this.channels.find(c => c.id === ch)?.music }
+
+  private setMusicSenders(list: { channel: string; id: string; name: string }[] | undefined) {
+    this.musicSenders = new Map()
+    for (const x of list ?? []) this.markMusicSender(x.channel, x.id, x.name, true)
+  }
+
+  private markMusicSender(ch: string, id: string, name: string, on: boolean) {
+    let who = this.musicSenders.get(ch)
+    if (!who) { who = new Map(); this.musicSenders.set(ch, who) }
+    if (on) who.set(id, name); else who.delete(id)
+    if (!who.size) this.musicSenders.delete(ch)
+  }
+
+  /** Names of everyone sending on this music channel right now. */
+  musicSendersOn(ch: string): string[] { return [...(this.musicSenders.get(ch)?.values() ?? [])] }
+
+  musicSending(ch: string): boolean { return this.musicTx.has(ch) }
+
+  private attachMusic(ch: string, track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
     const ctx = this.ctx
     if (!ctx || !track.sid) return
     this.ensureMix()
-    if (!this.musicRxGain) {
-      this.musicRxGain = ctx.createGain()
-      this.musicRxGain.gain.value = 0
-      this.musicRxGain.connect(this.mix!)
+    let gain = this.musicRxGain.get(ch)
+    if (!gain) {
+      gain = ctx.createGain()
+      gain.gain.value = 0
+      gain.connect(this.mix!)
+      this.musicRxGain.set(ch, gain)
     }
     const stream = new MediaStream([track.mediaStreamTrack])
     const hold = new Audio() // Chromium only feeds remote WebRTC audio to WebAudio if an element holds it
@@ -924,33 +939,25 @@ export class CommsEngine {
     hold.srcObject = stream
     void hold.play().catch(() => {})
     const src = ctx.createMediaStreamSource(stream)
-    src.connect(this.musicRxGain)
-    this.musicRx.set(track.sid, { src, hold })
+    src.connect(gain)
+    this.musicRx.set(track.sid, { ch, src, hold })
     this.applyMusicGain()
   }
 
   private applyMusicGain() {
-    if (!this.ctx || !this.musicRxGain) return
-    const target = this.musicMuted ? 0 : this.musicVolume * this.masterVolume * (this.ducked ? this.duckLevel : 1)
-    this.musicRxGain.gain.setTargetAtTime(target, this.ctx.currentTime, this.ducked ? 0.03 : 0.2)
-  }
-
-  setMusicVolume(v: number) {
-    this.musicVolume = Math.min(1, Math.max(0, v))
-    this.applyMusicGain()
-    this.emit()
-  }
-
-  setMusicMuted(m: boolean) {
-    this.musicMuted = m
-    this.applyMusicGain()
-    this.emit()
-  }
-
-  async startMusic(source: MusicSource) {
     const ctx = this.ctx
-    if (!this.music?.canSend || !ctx || this.opts?.gateway) return
-    this.stopMusic(false)
+    if (!ctx) return
+    for (const [ch, gain] of this.musicRxGain) {
+      const target = this.listen.has(ch) ? this.channelLevel(ch) * this.masterVolume * (this.ducked ? this.duckLevel : 1) : 0
+      gain.gain.setTargetAtTime(target, ctx.currentTime, this.ducked ? 0.03 : 0.2)
+    }
+  }
+
+  async startMusic(ch: string, source: MusicSource) {
+    const ctx = this.ctx
+    const c = this.channels.find(x => x.id === ch)
+    if (!c?.music || !c.canTalk || !ctx || this.opts?.gateway) return
+    this.stopMusic(ch, false)
     this.musicError = ''
     let stream: MediaStream
     try {
@@ -984,74 +991,72 @@ export class CommsEngine {
     src.connect(gain)
     gain.connect(dest)
     gain.connect(an)
-    this.musicIn = { stream, src, gain, dest, an, buf: new Float32Array(an.fftSize) }
-    // Sharing stopped from the browser's own bar: switch the feed off.
-    stream.getAudioTracks()[0].addEventListener('ended', () => { if (this.musicIn?.stream === stream) this.stopMusic() })
-    this.musicSending = true
-    await this.publishMusic()
-    this.send({ type: 'music', on: true })
+    this.musicTx.set(ch, { stream, src, gain, dest, an, buf: new Float32Array(an.fftSize) })
+    // Sharing stopped from the browser's own bar: switch the music off.
+    stream.getAudioTracks()[0].addEventListener('ended', () => { if (this.musicTx.get(ch)?.stream === stream) this.stopMusic(ch) })
+    await this.publishMusic(ch)
+    this.send({ type: 'music', channel: ch, on: true })
     this.emit()
   }
 
-  private async publishMusic() {
+  private async publishMusic(ch: string) {
     const room = this.room
-    const inp = this.musicIn
-    if (!room || room.state !== 'connected' || !inp) return
+    const tx = this.musicTx.get(ch)
+    if (!room || room.state !== 'connected' || !tx) return
     try {
       // LiveKit stops local tracks when its connection closes, so after a reconnect the old output
       // track is dead: feed a fresh one from the same source.
-      if (inp.dest.stream.getAudioTracks()[0]?.readyState === 'ended' && this.ctx) {
-        inp.gain.disconnect(inp.dest)
-        inp.dest = this.ctx.createMediaStreamDestination()
-        inp.dest.channelCount = 2
-        inp.dest.channelCountMode = 'explicit'
-        inp.gain.connect(inp.dest)
+      if (tx.dest.stream.getAudioTracks()[0]?.readyState === 'ended' && this.ctx) {
+        tx.gain.disconnect(tx.dest)
+        tx.dest = this.ctx.createMediaStreamDestination()
+        tx.dest.channelCount = 2
+        tx.dest.channelCountMode = 'explicit'
+        tx.gain.connect(tx.dest)
       }
-      if (this.musicPub?.track) await room.localParticipant.unpublishTrack(this.musicPub.track, false).catch(() => {})
-      this.musicPub = await room.localParticipant.publishTrack(inp.dest.stream.getAudioTracks()[0], {
-        name: 'music', source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
+      const old = this.musicPubs.get(ch)
+      if (old?.track) await room.localParticipant.unpublishTrack(old.track, false).catch(() => {})
+      this.musicPubs.set(ch, await room.localParticipant.publishTrack(tx.dest.stream.getAudioTracks()[0], {
+        name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
         audioPreset: { maxBitrate: 128_000 },
-      })
+      }))
       this.send({ type: 'tracks' })
     } catch (e) {
-      this.musicError = `Could not publish the music feed: ${(e as Error).message}`
-      this.stopMusic()
+      this.musicError = `Could not publish the music: ${(e as Error).message}`
+      this.stopMusic(ch)
     }
   }
 
-  stopMusic(notify = true) {
-    const inp = this.musicIn
-    this.musicIn = null
-    if (this.musicSending && notify) this.send({ type: 'music', on: false })
-    this.musicSending = false
-    if (inp) {
-      inp.src.disconnect()
-      inp.gain.disconnect()
-      inp.stream.getTracks().forEach(t => t.stop())
+  stopMusic(ch: string, notify = true) {
+    const tx = this.musicTx.get(ch)
+    this.musicTx.delete(ch)
+    if (tx && notify) this.send({ type: 'music', channel: ch, on: false })
+    if (tx) {
+      tx.src.disconnect()
+      tx.gain.disconnect()
+      tx.stream.getTracks().forEach(t => t.stop())
     }
-    const pub = this.musicPub
-    this.musicPub = null
+    const pub = this.musicPubs.get(ch)
+    this.musicPubs.delete(ch)
     if (pub?.track && this.room) void this.room.localParticipant.unpublishTrack(pub.track, false).catch(() => {})
     if (notify) this.emit()
   }
 
-  /** RMS level 0..1 of the music I am sending, for a meter. */
-  musicSendLevel(): number {
-    const inp = this.musicIn
-    if (!inp) return 0
-    inp.an.getFloatTimeDomainData(inp.buf)
-    let sum = 0
-    for (const v of inp.buf) sum += v * v
-    return Math.min(1, Math.sqrt(sum / inp.buf.length) * 2.5)
-  }
+  stopAllMusic(notify = true) { for (const ch of [...this.musicTx.keys()]) this.stopMusic(ch, notify) }
 
   /** True while the browser is holding audio back until the user clicks (autoplay policy). */
   get audioBlocked(): boolean { return !!this.ctx && this.ctx.state === 'suspended' }
 
   resumeAudio() { if (this.ctx?.state === 'suspended') void this.ctx.resume().catch(() => {}) }
 
-  /** True while anyone is sending the shared music feed. */
-  get musicActive(): boolean { return this.musicSenders.size > 0 }
+  /** RMS level 0..1 of the music I am sending on a channel, for a meter. */
+  musicSendLevel(ch: string): number {
+    const tx = this.musicTx.get(ch)
+    if (!tx) return 0
+    tx.an.getFloatTimeDomainData(tx.buf)
+    let sum = 0
+    for (const v of tx.buf) sum += v * v
+    return Math.min(1, Math.sqrt(sum / tx.buf.length) * 2.5)
+  }
 
   // ── program feed (WHEP) + IFB ducking ──────────────────────────────────────
   private ensureProgGraph() {
@@ -1233,7 +1238,11 @@ export class CommsEngine {
   }
 
   // ── user actions ───────────────────────────────────────────────────────────
-  private mayTalk(target: string) { return isUser(target) || !!this.channels.find(c => c.id === target)?.canTalk }
+  private mayTalk(target: string) {
+    if (isUser(target)) return true
+    const c = this.channels.find(x => x.id === target)
+    return !!c?.canTalk && !c.music // music channels carry music, not talk
+  }
 
   press(target: string) { if (!this.mayTalk(target)) return; this.held.add(target); this.pushState(); this.emit() }
   release(target: string) { this.held.delete(target); this.pushState(); this.emit() }

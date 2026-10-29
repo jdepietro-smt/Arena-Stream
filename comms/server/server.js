@@ -70,8 +70,9 @@ export function createServer(
   /** @type {Map<string, any>} connected peers by connection id */
   const peers = new Map()
 
+  // Music channels are separate SFU tracks, so the mesh cannot carry them: hide them there.
   const visibleChannels = perms => dir.channels
-    .filter(c => perms[c.id])
+    .filter(c => perms[c.id] && (sfu || !c.music))
     .map(c => ({ ...c, canTalk: perms[c.id].talk, canListen: perms[c.id].listen }))
   const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen })
   const titleOf = u => u.title || dir.group(u.groups?.[0])?.name || ''
@@ -107,23 +108,16 @@ export function createServer(
     : null
 
   // ── Music feed ─────────────────────────────────────────────────────────────
-  // An operator (usually the A1) plays music into the room as its own stereo track, named `music`.
-  // Who may send and who may hear it is decided here; clients only ever receive it while a
-  // permitted sender has it switched on. SFU only: the mesh has no separate per-purpose tracks.
-  const musicCfg = cfg.music ?? {}
-  const musicEnabled = !!sfu && musicCfg.enabled !== false
-  const inRoles = (user, roles) => {
-    const names = (user.groups ?? []).map(id => dir.group(id)?.name?.toLowerCase())
-    return roles.some(r => names.includes(String(r).toLowerCase()))
+  // A music channel is a channel an operator (usually the A1) plays stereo music into, as its own track named
+  // `music:<channel>`. Group grants decide who may send (talk) and who may hear (listen); listeners only ever
+  // receive it while a permitted sender has it switched on. SFU only: the mesh has no separate per-purpose tracks.
+  const isMusic = id => !!sfu && !!dir.channel(id)?.music
+  /** Who is sending music on the channels this peer may hear. */
+  const musicSendersFor = L => [...peers.values()].flatMap(p =>
+    [...p.musicOn].filter(ch => L.perms[ch]?.listen).map(ch => ({ channel: ch, id: p.id, name: p.user.name })))
+  const announceMusic = (P, channel, on) => {
+    for (const L of peers.values()) if (L.perms[channel]?.listen) send(L, { type: 'music', channel, id: P.id, name: P.user.name, on })
   }
-  const musicAccess = user => {
-    if (!musicEnabled) return null
-    const canSend = inRoles(user, musicCfg.senderRoles ?? ['Audio'])
-    const canHear = canSend || !musicCfg.listenRoles?.length || inRoles(user, musicCfg.listenRoles)
-    return canHear ? { name: musicCfg.name || 'MUSIC', canSend, canHear } : null
-  }
-  const musicSenders = () => [...peers.values()].filter(p => p.musicOn).map(p => ({ id: p.id, name: p.user.name }))
-  const sendToMusicListeners = msg => { for (const p of peers.values()) if (p.music?.canHear) send(p, msg) }
 
   // ── SFU subscription routing ───────────────────────────────────────────────
   // A listener may receive a publisher's `ch:<id>` track iff the publisher may
@@ -136,8 +130,9 @@ export function createServer(
       for (const [name, sid] of P.tracks) {
         if (name === 'direct') {
           if (P.talk.includes(`u:${L.id}`)) want.add(sid)
-        } else if (name === 'music') {
-          if (P.musicOn && P.music?.canSend && L.music?.canHear) want.add(sid)
+        } else if (name.startsWith('music:')) {
+          const ch = name.slice(6)
+          if (P.musicOn.has(ch) && P.perms[ch]?.talk && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
         } else if (name.startsWith('ch:')) {
           const ch = name.slice(3)
           if (P.perms[ch]?.talk && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
@@ -204,19 +199,14 @@ export function createServer(
         const added = chans.filter(c => !prevIds.has(c.id) && c.canListen).map(c => c.id)
         p.listen = [...new Set([...p.listen, ...added])].filter(id => p.perms[id]?.listen)
         p.talk = p.talk.filter(t => (t.startsWith('u:') ? peers.has(t.slice(2)) : p.perms[t]?.talk))
-        send(p, { type: 'directory', channels: chans, listen: p.listen })
+        // Lost the right to send on a music channel (or it stopped being one): switch it off for everyone.
+        for (const ch of [...p.musicOn]) {
+          if (!isMusic(ch) || !p.perms[ch]?.talk) { p.musicOn.delete(ch); announceMusic(p, ch, false) }
+        }
+        send(p, { type: 'directory', channels: chans, listen: p.listen, musicSenders: musicSendersFor(p) })
         broadcast({ type: 'peer-state', id: p.id, talk: p.talk, listen: p.listen }, p.id)
       }
       if (nameChanged) broadcast({ type: 'peer-update', id: p.id, name: user.name, role: p.title })
-      const music = musicAccess(user)
-      if (JSON.stringify(music) !== JSON.stringify(p.music)) {
-        p.music = music
-        if (p.musicOn && !music?.canSend) {
-          p.musicOn = false
-          sendToMusicListeners({ type: 'music', id: p.id, name: user.name, on: false })
-        }
-        send(p, { type: 'music-access', music: music ? { ...music, senders: musicSenders() } : null })
-      }
     }
     void reconcileAll()
   }
@@ -304,7 +294,7 @@ export function createServer(
         id: randomUUID(), ws, user, title: titleOf(user), perms, talk: [], alive: true,
         listen: chans.filter(c => c.canListen).map(c => c.id),
         tracks: new Map(), subs: new Set(), chansJson: JSON.stringify(chans),
-        music: musicAccess(user), musicOn: false,
+        musicOn: new Set(),
       }
       clearTimeout(joinTimer)
       const others = [...peers.values()].map(publicInfo)
@@ -323,7 +313,7 @@ export function createServer(
         iceServers: cfg.iceServers,
         channels: chans,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,
-        music: joined.music ? { ...joined.music, senders: musicSenders() } : null,
+        musicSenders: musicSendersFor(joined),
         listen: joined.listen,
         streams: arena ? arena.snapshot() : [],
         peers: others,
@@ -349,7 +339,7 @@ export function createServer(
           const prevDirect = me.talk.filter(t => t.startsWith('u:')).join()
           me.listen = [...new Set(asList(msg.listen).filter(id => me.perms[id]?.listen))]
           me.talk = [...new Set(asList(msg.talk).filter(id =>
-            me.perms[id]?.talk || (id.startsWith('u:') && peers.has(id.slice(2)))))]
+            (me.perms[id]?.talk && !isMusic(id)) || (id.startsWith('u:') && peers.has(id.slice(2)))))]
           broadcast({ type: 'peer-state', id: me.id, talk: me.talk, listen: me.listen })
           // Listen changes affect me; a changed direct target affects that listener.
           void reconcile(me)
@@ -362,11 +352,12 @@ export function createServer(
           break
         }
         case 'music': {
-          if (!me.music?.canSend) break
+          const ch = String(msg.channel ?? '')
+          if (!isMusic(ch) || !me.perms[ch]?.talk) break
           const on = !!msg.on
-          if (on === me.musicOn) break
-          me.musicOn = on
-          sendToMusicListeners({ type: 'music', id: me.id, name: me.user.name, on })
+          if (on === me.musicOn.has(ch)) break
+          if (on) me.musicOn.add(ch); else me.musicOn.delete(ch)
+          announceMusic(me, ch, on)
           void reconcileAll()
           break
         }
@@ -394,7 +385,7 @@ export function createServer(
       clearTimeout(joinTimer)
       if (me && peers.get(me.id) === me) {
         peers.delete(me.id)
-        if (me.musicOn) sendToMusicListeners({ type: 'music', id: me.id, name: me.user.name, on: false })
+        for (const ch of me.musicOn) announceMusic(me, ch, false)
         broadcast({ type: 'peer-leave', id: me.id })
       }
     })
