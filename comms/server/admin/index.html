@@ -226,9 +226,9 @@ function channelDialog(c) {
   const f = { name: h('input', { value: c.name }), color: h('input', { type: 'color', value: c.color, style: 'height:34px;padding:2px' }),
     ifb: h('input', { type: 'checkbox', checked: !!c.ifb }), duck: h('input', { type: 'number', min: 0, max: 1, step: 0.01, value: c.duck ?? 0.15 }),
     music: h('input', { type: 'checkbox', checked: !!c.music }),
-    source: h('input', { value: c.source || '', placeholder: 'https://example.com/live.mp3  (optional)', spellcheck: 'false' }),
+    source: h('input', { value: c.source || c.link || '', placeholder: 'https://example.com/live.mp3  or  https://www.youtube.com/watch?v=…  (optional)', spellcheck: 'false' }),
     duckMusic: h('input', { type: 'checkbox', checked: !c.noDuck }) }
-  const sourceRow = h('label', {}, 'Stream URL: a radio station\'s direct MP3 / AAC / Ogg stream the sender can start with one click (not a YouTube or Spotify page link)', f.source)
+  const sourceRow = h('label', {}, 'Stream or player link: a radio station\'s direct MP3 / AAC / Ogg stream (plays when the sender presses START), or a YouTube / Spotify page link (the sender\'s MUSIC key opens it and shares its audio)', f.source)
   const ifbRow = h('label', { class: 'check' }, f.ifb, 'IFB: duck the program feed (and any music) for listeners while someone talks here')
   const duckMusicRow = h('label', { class: 'check' }, f.duckMusic, 'Duck this music while someone talks on an IFB channel')
   const duckText = h('span', {})
@@ -265,7 +265,7 @@ function channelsView() {
     h('table', {}, h('tr', {}, ['', 'Channel', 'ID', 'Type', ''].map(x => h('th', {}, x))),
       S.state.channels.map((c, i) => h('tr', { class: 'row', onclick: () => channelDialog(c) },
         h('td', {}, i + 1), h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', { class: 'mono' }, c.id),
-        h('td', {}, c.music ? h('span', { class: 'chip' }, c.source ? '♪ music · stream' : '♪ music') : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
+        h('td', {}, c.music ? h('span', { class: 'chip' }, c.source ? '♪ music · stream' : c.link ? '♪ music · link' : '♪ music') : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
         h('td', { onclick: e => e.stopPropagation() },
           h('button', { class: 'btn sm', disabled: i === 0, onclick: () => move(i, -1) }, '↑'), ' ',
           h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓')))))]

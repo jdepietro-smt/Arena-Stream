@@ -37,7 +37,7 @@ interface Prefs {
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
-  musicSrcBy: Record<string, string>; musicLink: string
+  musicSrcBy: Record<string, string>; musicLinkBy: Record<string, string>
 }
 
 function loadPrefs(): Prefs {
@@ -49,7 +49,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLink: '',
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {},
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -451,6 +451,8 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
   const inputs = devices.filter(d => d.kind === 'audioinput')
   // Default source: the channel's own stream when it has one, otherwise the computer's audio.
   const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
+  // The link box starts with the channel's player link (set in channel setup); the sender can change it.
+  const link = prefs.musicLinkBy[ch.id] ?? ch.link ?? ''
   const source = (): MusicSource => (chosen === 'stream' ? { kind: 'stream' } : chosen === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: chosen })
   return (
     <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
@@ -479,10 +481,10 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
           </label>
           {chosen === 'display' && !sending && (
             <div className="musiclink">
-              <input value={prefs.musicLink} onChange={e => patch({ musicLink: e.target.value })} spellCheck={false}
+              <input value={link} onChange={e => patch({ musicLinkBy: { ...prefs.musicLinkBy, [ch.id]: e.target.value } })} spellCheck={false}
                 placeholder="Paste a YouTube / Spotify link" title="Opens the link in its own window. Then press START MUSIC, pick that window and tick Share audio." />
-              <button type="button" className="cap sm" disabled={!/^https?:\/\//i.test(prefs.musicLink.trim())}
-                onClick={() => window.open(prefs.musicLink.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
+              <button type="button" className="cap sm" disabled={!/^https?:\/\//i.test(link.trim())}
+                onClick={() => window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
             </div>
           )}
           <div className="pgm-mid">

@@ -33,17 +33,18 @@ taken from the A1's own computer, so nothing about the service is integrated or 
   audio" captures everything the PC plays (Windows loopback), so no virtual cable is needed. In a browser it shares
   a tab's audio (tick "Share audio" in the picker); an audio input device, such as a virtual cable or a mixer
   return, can be chosen instead. Senders never receive their own audio back.
-- **Stream URL (optional):** in the channel's setup, paste an internet radio / Icecast / MP3, AAC or Ogg stream
-  address (or an audio file URL). The sender's key then offers **Channel stream** as its first source: press START
-  MUSIC and the stream plays into the channel, with no computer audio sharing. The server relays the stream to
-  the sender, so browsers do not hit cross-origin blocks, and the URL itself is never sent to clients; only a
-  connected user with Talk on the channel can pull it. If the stream freezes the sender reconnects by itself a few
-  times, then stops with a message. HLS (.m3u8) is not supported; use a direct stream URL.
-  A link to a web page (YouTube, Spotify, Apple Music, SoundCloud and similar) is not an audio stream: setup refuses
-  it with an explanation, and the relay answers 415 if a URL turns out to serve a page. To use such a service, the
-  sender uses the "Computer / tab audio" source: paste the YouTube (or other) link into the box on the MUSIC key and
-  press OPEN, which opens it in its own window; then START MUSIC, pick that window and tick "Share audio". In the
-  desktop app the whole PC's audio is captured, so the window can simply be left playing.
+- **Stream or player link (optional):** one box in the channel's setup, sorted automatically by what you paste.
+  - A **direct audio stream** (internet radio, Icecast, an MP3, AAC or Ogg stream, or an audio file URL) becomes the
+    sender key's first source, **Channel stream**: press START MUSIC and it plays into the channel, with no computer
+    audio sharing. The server relays the stream to the sender, so browsers do not hit cross-origin blocks, and the URL
+    itself is never sent to clients; only a connected user with Talk on the channel can pull it. If the stream freezes
+    the sender reconnects by itself a few times, then stops with a message. HLS (.m3u8) is not supported.
+  - A **music service's web page** (YouTube, Spotify, Apple Music, SoundCloud and similar) is not an audio stream and
+    cannot be played by the server, so it is kept as a **player link**: the sender's MUSIC key (Computer / tab audio)
+    has the link ready in its box. They press **OPEN**, which opens it in its own window, then **START MUSIC**, pick
+    that window and tick "Share audio". In the desktop app the whole PC's audio is captured, so the window can simply
+    be left playing. The sender can paste a different link into the box at any time.
+  - If a URL turns out to serve a web page anyway, the relay answers 415 and the key says so.
 - **Listening:** the key has the channel's level knob and a LISTEN/MUTED switch, remembered between sessions.
   The server only subscribes a listener to the track while an allowed sender has it on, and stops it the moment a
   sender loses the Talk right.

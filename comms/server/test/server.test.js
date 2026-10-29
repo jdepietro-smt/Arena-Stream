@@ -300,13 +300,22 @@ test('music stream: URL stays on the server, relayed only to a key holder with T
   }
 })
 
-test('music channel: web-page links are refused, and the duck settings are kept only where they apply', async () => {
+test('music channel: a service page link is kept as a player link; duck settings are kept only where they apply', async () => {
   const srv = createServer({ ...cfg, pin: '' }, { sfu: { url: 'ws://sfu', token: async () => 't', listTracks: async () => [], updateSubscriptions: async () => {} } })
   const dir = srv.directory
-  for (const bad of ['https://www.youtube.com/watch?v=abc', 'https://youtu.be/abc', 'https://open.spotify.com/track/x', 'https://music.apple.com/us/album/x', 'https://soundcloud.com/a/b']) {
-    assert.throws(() => dir.addChannel({ name: 'Radio', music: true, source: bad }), /not an audio stream/, bad)
+  for (const page of ['https://www.youtube.com/watch?v=abc', 'https://youtu.be/abc', 'https://open.spotify.com/track/x', 'https://music.apple.com/us/album/x', 'https://soundcloud.com/a/b']) {
+    const c = dir.addChannel({ name: 'Radio' + Math.random().toString(36).slice(2, 6), music: true, source: page })
+    assert.deepEqual([c.link, c.source], [page, undefined], page + ' is a player link, not a stream')
+    dir.deleteChannel(c.id)
   }
-  assert.equal(dir.addChannel({ name: 'Station', music: true, source: 'https://radio.example.com/live.mp3' }).source, 'https://radio.example.com/live.mp3')
+  assert.throws(() => dir.addChannel({ name: 'Bad', music: true, source: 'ftp://x/y' }), /http/)
+  const st = dir.addChannel({ name: 'Station', music: true, source: 'https://radio.example.com/live.mp3' })
+  assert.deepEqual([st.source, st.link], ['https://radio.example.com/live.mp3', undefined])
+  // Editing the one field re-sorts it: stream -> player link -> stream -> cleared.
+  assert.deepEqual([dir.updateChannel(st.id, { source: 'https://youtu.be/xyz' }).link, dir.channel(st.id).source], ['https://youtu.be/xyz', undefined])
+  assert.equal(dir.updateChannel(st.id, { name: 'Station2' }).link, 'https://youtu.be/xyz', 'unrelated edits keep the link')
+  assert.deepEqual([dir.updateChannel(st.id, { source: 'https://radio.example.com/b.mp3' }).source, dir.channel(st.id).link], ['https://radio.example.com/b.mp3', undefined])
+  assert.deepEqual([dir.updateChannel(st.id, { source: '' }).source, dir.channel(st.id).link], [undefined, undefined])
 
   // Music ducks under IFB talkers by default; the depth is kept, and noDuck turns it off.
   const a = dir.addChannel({ name: 'Bed', music: true, duck: 0.3 })

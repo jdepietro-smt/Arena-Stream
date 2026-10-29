@@ -18,6 +18,8 @@ export class DirectoryError extends Error {
 
 const CHANNEL_ID = /^[a-z0-9][a-z0-9_-]{0,23}$/
 const COLOR = /^#[0-9a-f]{6}$/i
+/** Music services' web pages: not audio streams, but fine to hand the sender to open and share. */
+const SERVICE_PAGE = /(^|\.)(youtube\.com|youtu\.be|spotify\.com|music\.apple\.com|soundcloud\.com|deezer\.com|tidal\.com|pandora\.com|music\.amazon\.[a-z.]+)$/i
 export const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 24)
 
 export function hashPasswordSync(pw) {
@@ -120,22 +122,25 @@ export class Directory {
     // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
     const music = !!src.music
     const ifb = !!src.ifb && !music
-    // Optional stream (internet radio, Icecast, an MP3/AAC/Ogg stream or file) the A1 can start with one click.
+    // One optional link per music channel, sorted by what it is:
+    //  - an audio stream (internet radio, Icecast, an MP3/AAC/Ogg stream or file): `source`, which the server relays and
+    //    the sender plays with one click;
+    //  - a music service's web page (YouTube, Spotify, ...): `link`, which cannot be played by the server but is handed
+    //    to the sender, whose MUSIC key opens it and shares that window's audio.
     let source = ''
-    if (music && src.source) {
-      source = String(src.source).trim().slice(0, 500)
+    let link = ''
+    const raw = src.source ?? src.link
+    if (music && raw) {
+      const text = String(raw).trim().slice(0, 500)
       let url = null
-      try { url = new URL(source) } catch { /* not a URL */ }
-      if (!url || !/^https?:$/.test(url.protocol)) throw new DirectoryError('Stream URL must start with http:// or https://')
-      // Links to a music service's web page are not audio streams and cannot be played here.
-      if (/(^|\.)(youtube\.com|youtu\.be|spotify\.com|music\.apple\.com|soundcloud\.com|deezer\.com|tidal\.com|pandora\.com|music\.amazon\.[a-z.]+)$/i.test(url.hostname)) {
-        throw new DirectoryError('That is a web page for a music service, not an audio stream. Use a radio station\'s direct stream address, or leave this blank and have the sender paste the link into the MUSIC key (Computer / tab audio): it opens in its own window and they share that window\'s audio.')
-      }
+      try { url = new URL(text) } catch { /* not a URL */ }
+      if (!url || !/^https?:$/.test(url.protocol)) throw new DirectoryError('The link must start with http:// or https://')
+      if (SERVICE_PAGE.test(url.hostname)) link = text; else source = text
     }
     // A music channel ducks under IFB talkers by default (its own depth if set); noDuck turns that off.
     const noDuck = music && !!src.noDuck
     return {
-      id, name, color, ...(music ? { music: true } : {}), ...(source ? { source } : {}),
+      id, name, color, ...(music ? { music: true } : {}), ...(source ? { source } : {}), ...(link ? { link } : {}),
       ...(noDuck ? { noDuck: true } : {}),
       ...(ifb ? { ifb: true } : {}), ...((ifb || (music && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
     }
@@ -155,7 +160,9 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'source', 'noDuck']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'noDuck']) if (body[k] !== undefined) src[k] = body[k]
+    // The stream/link field replaces whatever was stored (either kind); it is re-sorted by #cleanChannel.
+    if (body.source !== undefined) { delete src.link; src.source = body.source } else if (src.link) { src.source = src.link; delete src.link }
     this.channels[i] = this.#cleanChannel(id, src)
     this.#changed()
     return this.channels[i]

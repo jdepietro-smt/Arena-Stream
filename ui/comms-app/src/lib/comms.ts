@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' }
