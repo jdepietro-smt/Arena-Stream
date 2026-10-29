@@ -191,27 +191,9 @@ export default function App() {
           {asioErr && <div className="error">{asioErr}</div>}
           {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
           {runtime.asioInfo?.ok && <div className="hint">Open: {runtime.asioInfo.driver} · {runtime.asioInfo.openedIn} in / {runtime.asioInfo.openedOut} out used · {runtime.asioInfo.frames}-sample buffer</div>}
-          {asioDev && (
-            <details open>
-              <summary>Name the interface channels ({asioDev.inputChannels} in / {asioDev.outputChannels} out)</summary>
-              <div className="hint">Name what is plugged into each channel, for example Mic 3 - Director, or Return - Program. The names appear when you pick a channel for a port below.</div>
-              <h3>Inputs</h3>
-              <div className="chnames">
-                {Array.from({ length: asioDev.inputChannels }, (_, i) => (
-                  <label key={i}>In {i + 1}<input value={cfg.asio.inputNames[i] ?? ''} onChange={e => setChName('inputNames', i, e.target.value)} placeholder={`Input ${i + 1}`} /></label>
-                ))}
-              </div>
-              <h3>Outputs</h3>
-              <div className="chnames">
-                {Array.from({ length: asioDev.outputChannels }, (_, i) => (
-                  <label key={i}>Out {i + 1}<input value={cfg.asio.outputNames[i] ?? ''} onChange={e => setChName('outputNames', i, e.target.value)} placeholder={`Output ${i + 1}`} /></label>
-                ))}
-              </div>
-            </details>
-          )}
         </section>
 
-        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} setCfg={setCfg} />}
+        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
@@ -226,9 +208,10 @@ export default function App() {
 }
 
 /** Dante-Controller-style routing: interface channels on one axis, Arena channels on the other. */
-function RoutingGrid({ cfg, asioDev, channels, setCfg }: {
+function RoutingGrid({ cfg, asioDev, channels, setCfg, setName }: {
   cfg: GatewayConfig; asioDev: AsioDevice; channels: { id: string; name: string; color?: string }[]
   setCfg: (f: (c: GatewayConfig | null) => GatewayConfig | null) => void
+  setName: (kind: 'inputNames' | 'outputNames', i: number, v: string) => void
 }) {
   const [tab, setTab] = useState<'in' | 'out'>('in')
   const key = tab === 'in' ? 'inCh' : 'outCh'
@@ -256,10 +239,9 @@ function RoutingGrid({ cfg, asioDev, channels, setCfg }: {
           <button className={`btn sm ${tab === 'out' ? 'primary' : ''}`} onClick={() => setTab('out')}>Arena → Outputs</button>
         </div>
       </div>
-      {channels.length === 0
-        ? <div className="hint">Connect to the server to see its channels. Each column is an Arena channel.</div>
-        : <>
-          <div className="hint">{tab === 'in'
+      {channels.length === 0 && <div className="hint">Connect to the server to see its channels as columns. You can name the interface channels now.</div>}
+      {<>
+          <div className="hint">Type in the name boxes to name each channel (for example Mic 3 - Director). {tab === 'in'
             ? 'Click where an interface input meets an Arena channel to send that input to the channel. One input per channel; an input can feed several channels.'
             : 'Click where an Arena channel meets an interface output to play the channel out of that output. One output per channel.'}</div>
           <div className="gridwrap">
@@ -269,7 +251,7 @@ function RoutingGrid({ cfg, asioDev, channels, setCfg }: {
               <tbody>
                 {Array.from({ length: count }, (_, i) => (
                   <tr key={i}>
-                    <th className="rname"><b>{i + 1}</b> {names[i]?.trim() || (tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`)}</th>
+                    <th className="rname"><b>{i + 1}</b><input value={names[i] ?? ''} onChange={e => setName(tab === 'in' ? 'inputNames' : 'outputNames', i, e.target.value)} placeholder={tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`} /></th>
                     {channels.map(c => {
                       const on = portFor(c.id)?.[key] === i + 1
                       return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, i + 1)} title={`${names[i]?.trim() || i + 1} ${tab === 'in' ? '→' : '←'} ${c.name}`} /></td>
@@ -279,7 +261,7 @@ function RoutingGrid({ cfg, asioDev, channels, setCfg }: {
               </tbody>
             </table>
           </div>
-        </>}
+      </>}
     </section>
   )
 }
