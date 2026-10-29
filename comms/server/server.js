@@ -9,7 +9,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { WebSocketServer } from 'ws'
 import { createLiveKit } from './sfu.js'
 import { Directory, seedFromConfig } from './directory.js'
@@ -55,7 +55,17 @@ export function createServer(
   const authMode = cfg.auth?.mode === 'open' ? 'open' : 'accounts'
   const dir = Directory.load(cfg.dataFile ?? null, () => seedFromConfig(cfg))
   const bootstrap = dir.ensureAdmin(process.env.COMMS_ADMIN_PASSWORD)
-  const auth = createAuth(dir)
+  // Session tokens are signed with a secret kept next to the directory so they survive restarts.
+  const sessionSecret = (() => {
+    const file = cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'session.key') : null
+    try { if (file && fs.existsSync(file)) return Buffer.from(fs.readFileSync(file, 'utf8').trim(), 'base64url') } catch { /* make a new one */ }
+    const secret = randomBytes(32)
+    try {
+      if (file) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, secret.toString('base64url'), { mode: 0o600 }) }
+    } catch { /* sessions then last until the next restart */ }
+    return secret
+  })()
+  const auth = createAuth(dir, { secret: sessionSecret })
 
   /** @type {Map<string, any>} connected peers by connection id */
   const peers = new Map()
@@ -264,7 +274,10 @@ export function createServer(
 
     async function join(msg) {
       let user
-      if (authMode === 'accounts') {
+      if (authMode === 'accounts' && msg.token) {
+        user = auth.userForSession(msg.token)
+        if (!user) return fail('bad-token', 'Your session expired. Sign in again.')
+      } else if (authMode === 'accounts') {
         try {
           user = await auth.authenticate(msg.username, msg.password, `${ip}:${String(msg.username).toLowerCase()}`)
         } catch (e) {
@@ -306,6 +319,7 @@ export function createServer(
         livekit: sfu ? { url: sfu.url, token } : null,
         id: joined.id,
         me: { name: user.name, title: joined.title, admin: !!user.admin },
+        session: authMode === 'accounts' && !user.ephemeral ? auth.issueSession(user) : null,
         iceServers: cfg.iceServers,
         channels: chans,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,

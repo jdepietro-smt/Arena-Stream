@@ -154,3 +154,6 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .keymod.music.ducked { box-shadow: 0 0 0 1px #ffb020, 0 0 18px -6px #ffb020; }
 .keymod.music .cap.sm.on { color: #ffb4cf; }
 .musicsrc select { width: 100%; font-size: 11px; padding: 5px 6px; background: #0e1013; color: #cfd3da; border: 1px solid #2f343c; border-radius: 4px; }
+
+/* Audio held back by the browser until a click (after a reload) */
+.audio-banner { margin: 8px 14px 0; padding: 8px 12px; text-align: center; font: 700 12px var(--mono, monospace); letter-spacing: .12em; text-transform: uppercase; color: #1a1100; background: var(--lcd, #ffb020); border: 0; border-radius: 6px; cursor: pointer; animation: kp-blink 1.2s steps(2) infinite; }

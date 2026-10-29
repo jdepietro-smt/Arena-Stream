@@ -54,6 +54,18 @@ function loadPrefs(): Prefs {
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
 
+const SESSION_KEY = 'arena-comms-session'
+/** What lets a reload rejoin by itself: the server URL plus a session token (accounts) or just a flag (open mode). */
+interface SavedSession { url: string; token?: string; open?: boolean }
+function loadSession(): SavedSession | null {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) ?? 'null') } catch { return null }
+}
+function saveSession(s: SavedSession | null) {
+  try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY) } catch { /* private mode */ }
+}
+/** Errors after which a saved session must not be retried. */
+const DEAD_SESSION = new Set(['bad-token', 'bad-login', 'account-disabled', 'signed-in-elsewhere', 'kicked', 'bad-pin', 'bad-name', 'bad-group'])
+
 export default function App() {
   const engine = useMemo(() => new CommsEngine(), [])
   useSyncExternalStore(engine.subscribe, engine.getVersion)
@@ -128,11 +140,11 @@ export default function App() {
     return () => window.removeEventListener('blur', off)
   }, [engine])
 
-  const join = () => {
+  const join = (token?: string) => {
     if (!info) return
     const group = info.groups.find(g => g.id === prefs.group)?.id ?? info.groups[0]?.id
     void engine.join(
-      { url: prefs.url.trim(), auth: info.auth, username: prefs.username, password, name: prefs.name, group, pin: prefs.pin,
+      { url: prefs.url.trim(), auth: info.auth, username: prefs.username, password, token, name: prefs.name, group, pin: prefs.pin,
         micId: prefs.micId || undefined, echoCancel: prefs.echoCancel,
         programUrl: prefs.programUrl },
       prefs.muted, prefs.levels,
@@ -143,20 +155,51 @@ export default function App() {
 
   const inSession = engine.status === 'connected' || engine.status === 'reconnecting'
 
+  // Stay signed in across reloads: keep the session while connected, rejoin by itself on load, forget it on
+  // an explicit leave or when the server says it is no longer valid.
+  const autoTried = useRef(false)
+  useEffect(() => {
+    if (autoTried.current || !info) return
+    autoTried.current = true
+    const s = loadSession()
+    if (!s || s.url !== prefs.url.trim()) return
+    if (info.auth === 'accounts' && s.token) join(s.token)
+    else if (info.auth === 'open' && s.open && !info.pin && prefs.name) join()
+  }, [info]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (engine.status === 'connected' && info) {
+      const url = prefs.url.trim()
+      if (info.auth === 'accounts') { if (engine.sessionToken) saveSession({ url, token: engine.sessionToken }) }
+      else saveSession({ url, open: true })
+    } else if (engine.status === 'error' && DEAD_SESSION.has(engine.errorCode)) {
+      saveSession(null)
+    }
+  }, [engine.status, engine.sessionToken, engine.errorCode, info]) // eslint-disable-line react-hooks/exhaustive-deps
+  const leave = () => { saveSession(null); engine.leave() }
+
+  // After a reload the browser may hold audio back until the first click or key press.
+  useEffect(() => {
+    const go = () => engine.resumeAudio()
+    window.addEventListener('pointerdown', go, true)
+    window.addEventListener('keydown', go, true)
+    return () => { window.removeEventListener('pointerdown', go, true); window.removeEventListener('keydown', go, true) }
+  }, [engine])
+
   return (
     <div className="app" data-density={prefs.density}>
       <div className="titlebar">
         <div className="brand"><img src="logo.png" alt="" /><span>ARENA</span><b>COMMS</b></div>
         <div className="title-right">{!inSession && <StatusPill engine={engine} />}</div>
       </div>
+      {inSession && engine.audioBlocked && <button className="audio-banner" onClick={() => engine.resumeAudio()}>Click here to turn on audio</button>}
       {!inSession && engine.status !== 'connecting'
         ? <Login prefs={prefs} patch={patch} devices={devices} info={info} infoErr={infoErr}
                  password={password} setPassword={setPassword}
-                 error={engine.status === 'error' ? engine.error : ''} onJoin={join} />
+                 error={engine.status === 'error' ? engine.error : ''} onJoin={() => join()} />
         : engine.status === 'connecting'
           ? <div className="center muted">Connecting…</div>
           : <Intercom engine={engine} name={engine.myName || prefs.name} prefs={prefs} patch={patch} devices={devices}
-                      onAudio={() => setShowSettings(v => !v)}
+                      onAudio={() => setShowSettings(v => !v)} onLeave={leave}
                       onAdmin={engine.isAdmin ? () => window.open(`${httpBase(prefs.url)}/admin`, '_blank') : undefined} />}
       {showSettings && inSession &&
         <Settings engine={engine} prefs={prefs} patch={patch} devices={devices} onClose={() => setShowSettings(false)} />}
@@ -229,9 +272,9 @@ function Login({ prefs, patch, devices, info, infoErr, password, setPassword, er
 }
 
 // ── Intercom surface ─────────────────────────────────────────────────────────
-function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin }: {
+function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLeave }: {
   engine: CommsEngine; name: string; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
-  onAudio: () => void; onAdmin?: () => void
+  onAudio: () => void; onAdmin?: () => void; onLeave: () => void
 }) {
   const roster = engine.roster()
   const keyed = useRef(new Map<string, string>()) // keyboard code -> target
@@ -264,7 +307,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin }: {
       <span className="grow" />
       <button className="cap sm hw" onClick={onAudio}>AUDIO</button>
       {onAdmin && <button className="cap sm hw" onClick={onAdmin}>ADMIN</button>}
-      <button className="cap sm hw leave" onClick={() => engine.leave()}>LEAVE</button>
+      <button className="cap sm hw leave" onClick={onLeave}>LEAVE</button>
     </div>
   )
 

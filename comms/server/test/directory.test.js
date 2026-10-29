@@ -149,3 +149,44 @@ test('accounts mode: admin API, login, live permission changes, kick', async () 
     await srv.close()
   }
 })
+
+test('session tokens: rejoin without the password; revoked by password change, disabling or tampering', async () => {
+  process.env.COMMS_ADMIN_PASSWORD = 'adminpass1'
+  const srv = createServer({ ...baseCfg(), auth: { mode: 'accounts' } })
+  const port = await srv.listen(0)
+  const dir = srv.directory
+  const g = dir.addGroup({ name: 'Crew', grants: { prod: { talk: true, listen: true } } })
+  const u = dir.addUser({ username: 'dana', name: 'Dana', password: 'danapass12', groups: [g.id] })
+  const join = async msg => {
+    const c = await wsClient(port)
+    c.send({ type: 'join', ...msg })
+    const m = await c.next(x => x.type === 'welcome' || x.type === 'error')
+    return { c, m }
+  }
+  try {
+    const first = await join({ username: 'dana', password: 'danapass12' })
+    assert.equal(first.m.type, 'welcome')
+    const token = first.m.session
+    assert.ok(token && !JSON.stringify(first.m).includes('danapass12'))
+    first.c.ws.close()
+
+    const again = await join({ token })
+    assert.equal(again.m.type, 'welcome')
+    assert.equal(again.m.me.name, 'Dana')
+    assert.ok(again.m.session, 'a fresh token is issued at each use')
+    again.c.ws.close()
+
+    const bad = await join({ token: token.slice(0, -3) + 'abc' })
+    assert.deepEqual([bad.m.type, bad.m.code], ['error', 'bad-token'])
+    assert.equal((await join({ token: 'garbage' })).m.code, 'bad-token')
+
+    dir.updateUser(u.id, { password: 'newpass12345' })
+    assert.equal((await join({ token })).m.code, 'bad-token', 'changing the password invalidates old sessions')
+
+    const fresh = (await join({ username: 'dana', password: 'newpass12345' })).m.session
+    fresh && dir.updateUser(u.id, { disabled: true })
+    assert.equal((await join({ token: fresh })).m.code, 'bad-token', 'a disabled account cannot rejoin')
+  } finally {
+    await srv.close()
+  }
+})

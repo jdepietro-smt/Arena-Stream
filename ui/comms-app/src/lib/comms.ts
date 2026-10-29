@@ -27,6 +27,8 @@ export interface JoinOptions {
   auth: 'accounts' | 'open'
   username?: string
   password?: string
+  /** A session token from an earlier sign-in: rejoin without the password. */
+  token?: string
   group?: string
   pin: string
   micId?: string
@@ -96,6 +98,9 @@ export class CommsEngine {
   /** channel id -> {from, at} of the latest call signal */
   calls = new Map<string, { from: string; at: number }>()
   serverRttMs: number | null = null
+  /** Session token for rejoining after a reload (accounts mode), and the code of the last error. */
+  sessionToken: string | null = null
+  errorCode = ''
   /** The shared music feed offered to me (null = unavailable or not permitted), and who is sending it now. */
   music: MusicInfo | null = null
   musicSenders = new Map<string, string>()
@@ -212,6 +217,7 @@ export class CommsEngine {
     this.chLevels = new Map(Object.entries(levels))
     this.status = 'connecting'
     this.error = ''
+    this.errorCode = ''
     this.emit()
     try {
       await this.initAudio(opts.micId, opts.echoCancel)
@@ -281,7 +287,10 @@ export class CommsEngine {
       this.ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 })
       if (this.spkId && !this.opts?.gateway) void (this.ctx as unknown as SinkCtx).setSinkId?.(this.spkId)?.catch?.(() => {})
     }
-    await this.ctx.resume()
+    // A page reload has no user gesture yet, so the browser may keep the context suspended; resume() would then
+    // wait for the first click. Don't block joining on it: the UI asks for a click (see audioBlocked).
+    this.ctx.onstatechange = () => this.emit()
+    void this.ctx.resume().catch(() => {})
     if (this.opts?.gateway) {
       // Gateways take audio from ports, not a mic; keep a silent micGain so shared code paths still work.
       if (!this.micGain) this.micGain = this.ctx.createGain()
@@ -517,7 +526,7 @@ export class CommsEngine {
     try { ws = new WebSocket(o.url) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
     this.ws = ws
     ws.onopen = () => this.send(o.auth === 'accounts'
-      ? { type: 'join', username: o.username, password: o.password }
+      ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password })
       : { type: 'join', name: o.name, group: o.group, pin: o.pin })
     ws.onmessage = ev => {
       try { this.onMessage(JSON.parse(ev.data as string)) } catch (e) { console.error('[comms] bad message', e) }
@@ -537,6 +546,7 @@ export class CommsEngine {
     switch (m.type) {
       case 'welcome': {
         this.myId = m.id
+        if (m.session) { this.sessionToken = m.session; if (this.opts) this.opts.token = m.session } // renewed at every join
         this.channels = m.channels
         this.myName = m.me.name
         this.streams = m.streams ?? []
@@ -572,6 +582,7 @@ export class CommsEngine {
         break
       }
       case 'error':
+        this.errorCode = m.code ?? ''
         this.fatal(m.message)
         break
       case 'peer-join':
@@ -1033,6 +1044,11 @@ export class CommsEngine {
     for (const v of inp.buf) sum += v * v
     return Math.min(1, Math.sqrt(sum / inp.buf.length) * 2.5)
   }
+
+  /** True while the browser is holding audio back until the user clicks (autoplay policy). */
+  get audioBlocked(): boolean { return !!this.ctx && this.ctx.state === 'suspended' }
+
+  resumeAudio() { if (this.ctx?.state === 'suspended') void this.ctx.resume().catch(() => {}) }
 
   /** True while anyone is sending the shared music feed. */
   get musicActive(): boolean { return this.musicSenders.size > 0 }
