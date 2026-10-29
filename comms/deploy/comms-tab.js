@@ -17,7 +17,7 @@
     bar.style.cssText = 'display:flex;align-items:center;gap:12px;padding:6px 12px;background:#10101a;border-bottom:1px solid #2a2a3a;color:#e8eaf0;font:600 12px system-ui,sans-serif;letter-spacing:.1em'
     bar.innerHTML = '<span>ARENA COMMS</span>'
     // Two sections: the intercom itself, and the server admin (channels, groups, users).
-    var views = [['INTERCOM', APP], ['ADMIN  —  CHANNELS · GROUPS · USERS', ADMIN]]
+    var views = [['INTERCOM', APP], ['ADMIN  \u2014  CHANNELS \u00b7 GROUPS \u00b7 USERS', ADMIN]]
     var btns = views.map(function (v) {
       var b = document.createElement('button')
       b.textContent = v[0]
