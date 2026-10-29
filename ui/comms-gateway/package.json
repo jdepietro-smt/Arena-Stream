@@ -29,8 +29,34 @@
   "build": {
     "appId": "com.smt.arenacommsgateway",
     "productName": "Arena Comms Gateway",
-    "directories": { "output": "release" },
-    "files": ["dist/**", "dist-electron/**", "package.json"],
-    "win": { "target": "portable" }
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "artifactName": "Arena-Comms-Gateway-Setup-${version}.${ext}",
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Arena Comms Gateway"
+    }
   }
 }
