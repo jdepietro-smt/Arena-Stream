@@ -156,7 +156,16 @@ server {
 
     location = /comms-tab.js { alias $WEBROOT/comms-tab.js; add_header Cache-Control no-cache; }
 
-    location = /comms { return 301 /comms/app/; }
+    # The web app connects its websocket to exactly /comms (no trailing slash).
+    location = /comms {
+        proxy_pass http://127.0.0.1:8900/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$arena_conn;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_read_timeout 1h;
+    }
     location /comms/app/ {
         alias $REPO/ui/comms-app/dist/;
         try_files \$uri \$uri/ /comms/app/index.html;
