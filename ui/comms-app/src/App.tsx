@@ -470,7 +470,7 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
             : ch.canTalk && chosen === 'display' && link.trim()
               ? <span className="blink">{opened ? '② PRESS START MUSIC, PICK THE WINDOW, TICK SHARE AUDIO' : '① PRESS OPEN, PLAY THE VIDEO, THEN START MUSIC'}</span>
-              : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
+              : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
         </div>
       </div>
       {ch.canTalk ? (

@@ -257,6 +257,14 @@ function channelDialog(c) {
   }, isNew ? '' : confirmDelete('channel ' + c.name, () => api('DELETE', 'channels/' + c.id)))
 }
 
+/** Who can start a music channel: only people with Talk on it get the Start key. Warn when no group has it. */
+function musicSenders(c) {
+  const names = S.state.groups.filter(g => g.grants?.[c.id]?.talk).map(g => g.name)
+  return names.length
+    ? h('span', { class: 'chip' }, 'can start it: ' + names.join(', '))
+    : h('span', { class: 'chip bad', title: 'Edit a group and tick Talk for this channel' }, 'nobody can start it yet: give a group Talk')
+}
+
 function channelsView() {
   const ids = S.state.channels.map(c => c.id)
   const move = (i, d) => { const a = [...ids]; [a[i], a[i + d]] = [a[i + d], a[i]]; act(() => api('POST', 'channels/reorder', { ids: a })) }
@@ -265,7 +273,7 @@ function channelsView() {
     h('table', {}, h('tr', {}, ['', 'Channel', 'ID', 'Type', ''].map(x => h('th', {}, x))),
       S.state.channels.map((c, i) => h('tr', { class: 'row', onclick: () => channelDialog(c) },
         h('td', {}, i + 1), h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', { class: 'mono' }, c.id),
-        h('td', {}, c.music ? h('span', { class: 'chip' }, c.source ? '♪ music · stream' : c.link ? '♪ music · link' : '♪ music') : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
+        h('td', {}, c.music ? [h('span', { class: 'chip' }, c.source ? '♪ music · stream' : c.link ? '♪ music · link' : '♪ music'), ' ', musicSenders(c)] : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
         h('td', { onclick: e => e.stopPropagation() },
           h('button', { class: 'btn sm', disabled: i === 0, onclick: () => move(i, -1) }, '↑'), ' ',
           h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓')))))]
