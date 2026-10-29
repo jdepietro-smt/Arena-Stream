@@ -231,6 +231,9 @@ export function createServer(
   // ── live directory changes ─────────────────────────────────────────────────
   // After any admin edit: drop disabled/removed users, and push each affected
   // client its new channel list; clamp talk/listen to what is still allowed.
+  // The gateway app filters its routing grid by group: which channels each group can talk or listen on.
+  const groupsInfo = () => dir.groups.map(g => ({ id: g.id, name: g.name, channels: Object.entries(g.grants ?? {}).filter(([ch, gr]) => dir.channel(ch) && (gr.talk || gr.listen || gr.music)).map(([ch]) => ch) }))
+
   function refreshAll() {
     for (const p of [...peers.values()]) {
       const user = p.user.ephemeral ? p.user : dir.user(p.user.id)
@@ -255,6 +258,10 @@ export function createServer(
         }
         send(p, { type: 'directory', channels: chans, listen: p.listen, musicSenders: musicSendersFor(p) })
         broadcast({ type: 'peer-state', id: p.id, talk: p.talk, listen: p.listen }, p.id)
+      }
+      if (p.user.gateway) {
+        const gj = JSON.stringify(groupsInfo())
+        if (gj !== p.groupsJson) { p.groupsJson = gj; send(p, { type: 'groups', groups: JSON.parse(gj) }) }
       }
       if (nameChanged) broadcast({ type: 'peer-update', id: p.id, name: user.name, role: p.title })
     }
@@ -379,7 +386,7 @@ export function createServer(
       me = {
         id: randomUUID(), ws, user, title: titleOf(user), perms, talk: [], alive: true,
         listen: chans.filter(c => c.canListen).map(c => c.id),
-        tracks: new Map(), subs: new Set(), chansJson: JSON.stringify(chans),
+        tracks: new Map(), subs: new Set(), chansJson: JSON.stringify(chans), groupsJson: user.gateway ? JSON.stringify(groupsInfo()) : '',
         musicOn: new Set(), musicKey: randomUUID(),
       }
       clearTimeout(joinTimer)
@@ -398,6 +405,7 @@ export function createServer(
         session: authMode === 'accounts' && !user.ephemeral ? auth.issueSession(user) : null,
         iceServers: cfg.iceServers,
         channels: chans,
+        groups: user.gateway ? groupsInfo() : undefined,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,
         musicSenders: musicSendersFor(joined),
         musicKey: joined.musicKey,

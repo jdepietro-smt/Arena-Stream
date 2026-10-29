@@ -193,7 +193,7 @@ export default function App() {
           {runtime.asioInfo?.ok && <div className="hint">Open: {runtime.asioInfo.driver} · {runtime.asioInfo.openedIn} in / {runtime.asioInfo.openedOut} out used · {runtime.asioInfo.frames}-sample buffer</div>}
         </section>
 
-        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} setCfg={setCfg} setName={setChName} />}
+        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
@@ -208,12 +208,17 @@ export default function App() {
 }
 
 /** Dante-Controller-style routing: interface channels on one axis, Arena channels on the other. */
-function RoutingGrid({ cfg, asioDev, channels, setCfg, setName }: {
+function RoutingGrid({ cfg, asioDev, channels: allChannels, groups, setCfg, setName }: {
   cfg: GatewayConfig; asioDev: AsioDevice; channels: { id: string; name: string; color?: string }[]
   setCfg: (f: (c: GatewayConfig | null) => GatewayConfig | null) => void
+  groups: { id: string; name: string; channels: string[] }[]
   setName: (kind: 'inputNames' | 'outputNames', i: number, v: string) => void
 }) {
   const [tab, setTab] = useState<'in' | 'out'>('in')
+  const [group, setGroup] = useState(() => { try { return localStorage.getItem('gw-grid-group') ?? '' } catch { return '' } })
+  const pickGroup = (g: string) => { setGroup(g); try { localStorage.setItem('gw-grid-group', g) } catch { /* ignore */ } }
+  const grp = groups.find(g => g.id === group)
+  const channels = grp ? allChannels.filter(c => grp.channels.includes(c.id)) : allChannels
   const key = tab === 'in' ? 'inCh' : 'outCh'
   const count = tab === 'in' ? asioDev.inputChannels : asioDev.outputChannels
   const names = tab === 'in' ? cfg.asio.inputNames : cfg.asio.outputNames
@@ -234,6 +239,12 @@ function RoutingGrid({ cfg, asioDev, channels, setCfg, setName }: {
     <section className="card">
       <div className="bar">
         <h2 className="lcd">Routing</h2>
+        <label className="inline">Group
+          <select value={grp ? group : ''} onChange={e => pickGroup(e.target.value)}>
+            <option value="">All channels</option>
+            {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+        </label>
         <div className="tabs">
           <button className={`btn sm ${tab === 'in' ? 'primary' : ''}`} onClick={() => setTab('in')}>Inputs → Arena</button>
           <button className={`btn sm ${tab === 'out' ? 'primary' : ''}`} onClick={() => setTab('out')}>Arena → Outputs</button>

@@ -94,6 +94,8 @@ export class CommsEngine {
   error = ''
   myId = ''
   channels: Channel[] = []
+  /** Gateway only: each group and the channels it can use. */
+  groups: { id: string; name: string; channels: string[] }[] = []
   myName = ''
   myTitle = ''
   isAdmin = false
@@ -548,6 +550,7 @@ export class CommsEngine {
         this.myId = m.id
         if (m.session) { this.sessionToken = m.session; if (this.opts) this.opts.token = m.session } // renewed at every join
         this.channels = m.channels
+        this.groups = m.groups ?? []
         this.myName = m.me.name
         this.streams = m.streams ?? []
         this.setMusicSenders(m.musicSenders)
@@ -593,6 +596,10 @@ export class CommsEngine {
       case 'peer-leave':
         this.pendingInfo.delete(m.id)
         this.dropPeer(m.id)
+        this.emit()
+        break
+      case 'groups':
+        this.groups = m.groups ?? []
         this.emit()
         break
       case 'directory': {
