@@ -53,6 +53,16 @@ if (hasSingleLock) {
     })
     createWindow()
   })
+
+  // A server reached by bare IP address cannot have a public CA certificate, so it runs a
+  // self-signed one. Accept that only for IP literals; named hosts must still verify.
+  app.on('certificate-error', (event, _wc, url, _error, _cert, cb) => {
+    let host = ''
+    try { host = new URL(url).hostname } catch { /* fall through to reject */ }
+    const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')
+    if (isIp) event.preventDefault()
+    cb(isIp)
+  })
 }
 
 app.on('window-all-closed', () => {

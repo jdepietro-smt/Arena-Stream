@@ -41,7 +41,11 @@ interface Prefs {
 
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    url: 'ws://localhost:8900', username: '', name: '', group: '', pin: '',
+    // Served from the server's own dashboard (https://host/comms/app/)? Connect back to it.
+    url: /^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname)
+      ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/comms`
+      : 'ws://localhost:8900',
+    username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
     spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true,

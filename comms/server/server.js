@@ -348,7 +348,7 @@ export function createServer(
     directory: dir,
     bootstrap,
     listen: (port = cfg.port) =>
-      new Promise(resolve => httpServer.listen(port, () => { arena?.start(); resolve(httpServer.address().port) })),
+      new Promise(resolve => httpServer.listen(port, process.env.COMMS_HOST || undefined, () => { arena?.start(); resolve(httpServer.address().port) })),
     close: () => new Promise(resolve => {
       arena?.stop()
       for (const c of wss.clients) c.terminate()

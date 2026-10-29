@@ -63,6 +63,8 @@
 <body>
 <div id="app"></div>
 <script>
+  // Works both at /admin and behind a proxy prefix such as /comms/admin.
+  const BASE = location.pathname.replace(/\/?$/, '/')
 const S = { token: sessionStorage.getItem('arena-comms-admin'), state: null, tab: 'users', timer: null }
 const $app = document.getElementById('app')
 
@@ -84,7 +86,7 @@ function toast(msg, ok) {
 }
 
 async function api(method, path, body) {
-  const r = await fetch('/admin/api/' + path, {
+  const r = await fetch(BASE + 'api/' + path, {
     method, headers: { 'content-type': 'application/json', ...(S.token ? { authorization: 'Bearer ' + S.token } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   })
