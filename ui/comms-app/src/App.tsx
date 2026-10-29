@@ -76,6 +76,7 @@ export default function App() {
     navigator.mediaDevices.addEventListener('devicechange', refreshDevices)
     return () => navigator.mediaDevices.removeEventListener('devicechange', refreshDevices)
   }, [])
+  useEffect(() => { if (showSettings) refreshDevices() }, [showSettings])
 
   // Remember which channels I muted between sessions.
   const mutedNow = engine.channels.filter(c => !engine.listen.has(c.id)).map(c => c.id).join(',')
@@ -133,6 +134,7 @@ export default function App() {
       prefs.muted, prefs.levels,
     )
     if (prefs.spkId) engine.setSpeaker(prefs.spkId)
+    setTimeout(refreshDevices, 1500) // output devices and labels appear once the mic permission is granted
   }
 
   const inSession = engine.status === 'connected' || engine.status === 'reconnecting'
@@ -159,12 +161,16 @@ export default function App() {
 }
 
 // ── Login ────────────────────────────────────────────────────────────────────
+/** Chromium/Electron can route audio to a chosen output device; Firefox and Safari cannot. */
+const canPickSpeaker = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype
+
 function Login({ prefs, patch, devices, info, infoErr, password, setPassword, error, onJoin }: {
   prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
   info: ServerInfo | null; infoErr: string; password: string; setPassword: (v: string) => void
   error: string; onJoin: () => void
 }) {
   const mics = devices.filter(d => d.kind === 'audioinput')
+  const spks = devices.filter(d => d.kind === 'audiooutput')
   const accounts = info?.auth === 'accounts'
   const ok = !!info && prefs.url.trim() && (accounts ? prefs.username.trim() && password : prefs.name.trim())
   return (
@@ -197,6 +203,13 @@ function Login({ prefs, patch, devices, info, infoErr, password, setPassword, er
           <option value="">System default</option>
           {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>)}
         </select>
+      </label>
+      <label>Speaker / headset
+        <select value={prefs.spkId} disabled={!canPickSpeaker} onChange={e => patch({ spkId: e.target.value })}>
+          <option value="">System default</option>
+          {spks.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Speaker ${i + 1}`}</option>)}
+        </select>
+        {!canPickSpeaker && <span className="muted">This browser can only use the system default output. Use Chrome or the desktop app to pick one.</span>}
       </label>
       <label className="check">
         <input type="checkbox" checked={prefs.echoCancel} onChange={e => patch({ echoCancel: e.target.checked })} />
@@ -469,10 +482,11 @@ function Settings({ engine, prefs, patch, devices, onClose }: {
         </select>
       </label>
       <label>Speaker / headset
-        <select value={prefs.spkId} onChange={e => { patch({ spkId: e.target.value }); engine.setSpeaker(e.target.value) }}>
+        <select value={prefs.spkId} disabled={!canPickSpeaker} onChange={e => { patch({ spkId: e.target.value }); engine.setSpeaker(e.target.value) }}>
           <option value="">System default</option>
-          {spks.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Speaker'}</option>)}
+          {spks.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Speaker ${i + 1}`}</option>)}
         </select>
+        {!canPickSpeaker && <span className="muted">This browser can only use the system default output. Use Chrome or the desktop app to pick one.</span>}
       </label>
       <label>Mic gain
         <input type="range" min={0} max={2} step={0.05} value={engine.micVolume} onChange={e => engine.setMicVolume(+e.target.value)} />
