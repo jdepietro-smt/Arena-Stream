@@ -36,6 +36,7 @@ function start(): ChildProcess | null {
   if (app.isPackaged && !exec) return null
   const c = fork(workerPath(), [], {
     ...(exec ? { execPath: exec } : {}),
+    windowsHide: true, // node.exe is a console program; do not show its window
     serialization: 'advanced', // typed arrays travel as binary
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
