@@ -123,6 +123,10 @@ export class CommsEngine {
   private micStream: MediaStream | null = null
   private micSrc: MediaStreamAudioSourceNode | null = null
   private micGain: GainNode | null = null
+  /** Release the microphone device while nobody is being talked to (see syncMic). */
+  micIdleRelease = true
+  private micIdleTimer: ReturnType<typeof setTimeout> | null = null
+  private micOpening: Promise<void> | null = null
   private analyser: AnalyserNode | null = null
   private meterBuf: Float32Array<ArrayBuffer> | null = null
   private spkId = ''
@@ -212,10 +216,9 @@ export class CommsEngine {
     this.progGain = null
     this.progAnalyser = null
     this.progOut = null
-    this.micStream?.getTracks().forEach(t => t.stop())
-    this.micStream = null
-    this.micSrc?.disconnect()
-    this.micSrc = null
+    if (this.micIdleTimer) clearTimeout(this.micIdleTimer)
+    this.micIdleTimer = null
+    this.closeMic()
     this.ctx?.close().catch(() => {})
     this.ctx = null
     this.rxBus.clear()
@@ -290,6 +293,47 @@ export class CommsEngine {
   async setMic(micId: string, echoCancel: boolean) {
     if (this.opts) { this.opts.micId = micId; this.opts.echoCancel = echoCancel }
     if (this.ctx) await this.initAudio(micId, echoCancel)
+    this.syncMic()
+  }
+
+  /**
+   * With micIdleRelease on, the microphone device is only open while I'm talking (held or latched,
+   * on a channel or directly) plus a short linger so quick re-presses don't reopen it. Everything
+   * downstream stays wired to micGain, so reopening just feeds it again. The cost is a small delay
+   * on the first press after idle while the device starts. With it off, the mic stays open as before.
+   */
+  syncMic() {
+    if (!this.ctx || this.opts?.gateway) return
+    const timer = this.micIdleTimer
+    if (!this.micIdleRelease || this.talkSet.size > 0) {
+      if (timer) { clearTimeout(timer); this.micIdleTimer = null }
+      if (!this.micStream) void this.openMic()
+      return
+    }
+    if (this.micStream && !timer) {
+      this.micIdleTimer = setTimeout(() => {
+        this.micIdleTimer = null
+        if (this.micIdleRelease && this.talkSet.size === 0) this.closeMic()
+      }, 1200)
+    }
+  }
+
+  private openMic(): Promise<void> {
+    if (this.micOpening) return this.micOpening
+    this.micOpening = this.initAudio(this.opts?.micId, this.opts?.echoCancel ?? true)
+      .catch(e => {
+        if (!this.ctx) { this.micStream?.getTracks().forEach(t => t.stop()); this.micStream = null } // left while opening
+        else console.warn('[comms] could not reopen the microphone', e)
+      })
+      .finally(() => { this.micOpening = null })
+    return this.micOpening
+  }
+
+  private closeMic() {
+    this.micStream?.getTracks().forEach(t => t.stop())
+    this.micStream = null
+    this.micSrc?.disconnect()
+    this.micSrc = null
   }
 
   setSpeaker(id: string) {
@@ -780,6 +824,7 @@ export class CommsEngine {
   // ── routing ────────────────────────────────────────────────────────────────
   private applyRouting() {
     if (!this.ctx) return
+    this.syncMic()
     this.updateDuck()
     this.applyVolumes()
     const talk = this.talkSet

@@ -36,7 +36,7 @@ interface Prefs {
   levels: Record<string, number>; density: 'compact' | 'comfortable'
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
-  speakAlerts: boolean; alertTones: boolean
+  speakAlerts: boolean; alertTones: boolean; micRelease: boolean
 }
 
 function loadPrefs(): Prefs {
@@ -48,7 +48,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true,
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true,
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -103,6 +103,12 @@ export default function App() {
   useEffect(() => {
     engine.setSpatial({ on: prefs.spatial, spread: prefs.spread, overrides: prefs.pans })
   }, [engine, prefs.spatial, prefs.spread, prefs.pans])
+
+  // Release the microphone while idle (OS mic indicator off); it reopens on the first press.
+  useEffect(() => {
+    engine.micIdleRelease = prefs.micRelease
+    engine.syncMic()
+  }, [engine, prefs.micRelease])
 
   // Alert style (spoken cue / tones) follows the settings.
   useEffect(() => {
@@ -481,6 +487,10 @@ function Settings({ engine, prefs, patch, devices, onClose }: {
         <input type="checkbox" checked={prefs.echoCancel}
           onChange={e => { patch({ echoCancel: e.target.checked }); void engine.setMic(prefs.micId, e.target.checked) }} />
         Echo cancellation &amp; noise suppression
+      </label>
+      <label className="check" title="Your microphone is only open while you are talking. The first press after idle starts the mic, so the very first syllable can be clipped.">
+        <input type="checkbox" checked={prefs.micRelease} onChange={e => patch({ micRelease: e.target.checked })} />
+        Only use the microphone while I am talking
       </label>
       <fieldset className="look">
         <legend>Arena alerts</legend>
