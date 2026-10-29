@@ -149,7 +149,7 @@ export default function App() {
               : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
           </div>
           {status === 'error' && <div className="error">{engine.error}</div>}
-          <p className="hint">Create a user for this gateway in the admin page and put it in groups that can talk and listen on the channels it bridges. The server must be in SFU media mode.</p>
+          <p className="hint">No account needed: enter the server address and connect. The gateway talks and listens on every channel. If it stays on reconnecting, Windows does not trust the server's certificate yet (install it under Trusted Root Certification Authorities).</p>
         </section>
 
         <section className="card">
