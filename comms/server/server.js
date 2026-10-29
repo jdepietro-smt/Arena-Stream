@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { pipeline, Readable } from 'node:stream'
 import { WebSocketServer } from 'ws'
 import { createLiveKit } from './sfu.js'
 import { Directory, seedFromConfig } from './directory.js'
@@ -73,7 +74,8 @@ export function createServer(
   // Music channels are separate SFU tracks, so the mesh cannot carry them: hide them there.
   const visibleChannels = perms => dir.channels
     .filter(c => perms[c.id] && (sfu || !c.music))
-    .map(c => ({ ...c, canTalk: perms[c.id].talk, canListen: perms[c.id].listen }))
+    // The stream URL stays on the server (it may carry credentials); clients only learn that one exists.
+    .map(({ source, ...c }) => ({ ...c, ...(source ? { stream: true } : {}), canTalk: perms[c.id].talk, canListen: perms[c.id].listen }))
   const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen })
   const titleOf = u => u.title || dir.group(u.groups?.[0])?.name || ''
   const send = (p, msg) => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)) }
@@ -219,8 +221,35 @@ export function createServer(
     })),
   })
 
+  // Relays a music channel's configured stream URL to the people who may send on that channel. The browser
+  // plays it from here (same origin, no CORS problems) and publishes it into the channel. Only the URL an
+  // admin saved on the channel is ever fetched, and only for a connected user with the Talk right on it.
+  async function serveMusicStream(ch, key, res) {
+    const cors = { 'access-control-allow-origin': '*' }
+    const P = key ? [...peers.values()].find(p => p.musicKey === key) : null
+    if (!P) return void res.writeHead(403, cors).end()
+    const c = dir.channel(ch)
+    if (!c?.music || !c.source || !P.perms[ch]?.talk) return void res.writeHead(404, cors).end()
+    const ac = new AbortController()
+    res.on('close', () => ac.abort())
+    try {
+      const up = await fetch(c.source, { signal: ac.signal, headers: { 'icy-metadata': '0', 'user-agent': 'ArenaComms/1' } })
+      if (!up.ok || !up.body) return void res.writeHead(502, cors).end()
+      res.writeHead(200, {
+        ...cors, 'content-type': up.headers.get('content-type') || 'audio/mpeg',
+        'cache-control': 'no-store', 'x-accel-buffering': 'no', // tell nginx not to buffer a live stream
+      })
+      pipeline(Readable.fromWeb(up.body), res, () => ac.abort())
+    } catch {
+      if (!res.headersSent) res.writeHead(502, cors)
+      res.end()
+    }
+  }
+
   const httpServer = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
+    const music = url.pathname.match(/^\/music\/([\w-]+)$/)
+    if (music) return void serveMusicStream(music[1], url.searchParams.get('k'), res)
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, peers: peers.size }))
@@ -294,7 +323,7 @@ export function createServer(
         id: randomUUID(), ws, user, title: titleOf(user), perms, talk: [], alive: true,
         listen: chans.filter(c => c.canListen).map(c => c.id),
         tracks: new Map(), subs: new Set(), chansJson: JSON.stringify(chans),
-        musicOn: new Set(),
+        musicOn: new Set(), musicKey: randomUUID(),
       }
       clearTimeout(joinTimer)
       const others = [...peers.values()].map(publicInfo)
@@ -314,6 +343,7 @@ export function createServer(
         channels: chans,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,
         musicSenders: musicSendersFor(joined),
+        musicKey: joined.musicKey,
         listen: joined.listen,
         streams: arena ? arena.snapshot() : [],
         peers: others,

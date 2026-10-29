@@ -8,12 +8,15 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
-export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' }
+export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' }
 interface MusicTx {
-  stream: MediaStream; src: MediaStreamAudioSourceNode; gain: GainNode
+  /** Capture sources have a MediaStream; the channel's stream URL is played through an audio element instead. */
+  stream: MediaStream | null; el: HTMLAudioElement | null; src: AudioNode; gain: GainNode
+  /** Watchdog for the channel stream (see startMusic). */
+  watch?: ReturnType<typeof setInterval>
   dest: MediaStreamAudioDestinationNode; an: AnalyserNode; buf: Float32Array<ArrayBuffer>
 }
 export type StreamState = 'unknown' | 'live' | 'down' | 'stalled'
@@ -107,6 +110,8 @@ export class CommsEngine {
   /** Who is sending on each music channel I may hear: channel id -> (peer id -> name). */
   musicSenders = new Map<string, Map<string, string>>()
   musicError = ''
+  /** Secret that lets the server relay a music channel's stream URL to me (sent at join). */
+  private musicKey = ''
   private musicRx = new Map<string, { ch: string; src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
   private musicRxGain = new Map<string, GainNode>()
   private musicTx = new Map<string, MusicTx>()
@@ -546,6 +551,7 @@ export class CommsEngine {
         this.myName = m.me.name
         this.streams = m.streams ?? []
         this.setMusicSenders(m.musicSenders)
+        if (m.musicKey) this.musicKey = m.musicKey
         this.myTitle = m.me.title ?? ''
         this.isAdmin = !!m.me.admin
         this.ice = m.iceServers
@@ -959,15 +965,26 @@ export class CommsEngine {
     if (!c?.music || !c.canTalk || !ctx || this.opts?.gateway) return
     this.stopMusic(ch, false)
     this.musicError = ''
-    let stream: MediaStream
+    let stream: MediaStream | null = null
+    let el: HTMLAudioElement | null = null
+    let src: AudioNode
     try {
-      if (source.kind === 'display') {
-        stream = await navigator.mediaDevices.getDisplayMedia({
+      if (source.kind === 'stream') {
+        // The channel's stream URL, relayed by the server (same origin: no CORS trouble, URL never reaches the browser).
+        el = new Audio()
+        el.crossOrigin = 'anonymous'
+        el.src = `${httpBase(this.opts!.url)}/music/${encodeURIComponent(ch)}?k=${encodeURIComponent(this.musicKey)}`
+        await el.play() // allowed: this runs from the START click
+        src = ctx.createMediaElementSource(el)
+      } else if (source.kind === 'display') {
+        const shared = await navigator.mediaDevices.getDisplayMedia({
           video: true,
           audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         } as DisplayMediaStreamOptions)
-        stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t) }) // only the audio is wanted
-        if (!stream.getAudioTracks().length) throw new Error('No audio was shared. Choose a tab or screen and tick "Share audio".')
+        shared.getVideoTracks().forEach(t => { t.stop(); shared.removeTrack(t) }) // only the audio is wanted
+        stream = shared
+        if (!shared.getAudioTracks().length) throw new Error('No audio was shared. Choose a tab or screen and tick "Share audio".')
+        src = ctx.createMediaStreamSource(shared)
       } else {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -975,13 +992,18 @@ export class CommsEngine {
             echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000,
           },
         })
+        src = ctx.createMediaStreamSource(stream)
       }
     } catch (e) {
-      this.musicError = (e as Error).message || 'Could not open the music source'
+      stream?.getTracks().forEach(t => t.stop())
+      if (el) { el.pause(); el.removeAttribute('src'); el.load() }
+      const err = e as Error
+      this.musicError = source.kind === 'stream'
+        ? `Could not play the channel stream (${err.name === 'NotAllowedError' ? 'blocked by the browser' : 'is the stream URL live?'})`
+        : err.message || 'Could not open the music source'
       this.emit()
       return
     }
-    const src = ctx.createMediaStreamSource(stream)
     const gain = ctx.createGain()
     const dest = ctx.createMediaStreamDestination()
     dest.channelCount = 2
@@ -991,9 +1013,30 @@ export class CommsEngine {
     src.connect(gain)
     gain.connect(dest)
     gain.connect(an)
-    this.musicTx.set(ch, { stream, src, gain, dest, an, buf: new Float32Array(an.fftSize) })
+    this.musicTx.set(ch, { stream, el, src, gain, dest, an, buf: new Float32Array(an.fftSize) })
     // Sharing stopped from the browser's own bar: switch the music off.
-    stream.getAudioTracks()[0].addEventListener('ended', () => { if (this.musicTx.get(ch)?.stream === stream) this.stopMusic(ch) })
+    stream?.getAudioTracks()[0]?.addEventListener('ended', () => { if (this.musicTx.get(ch)?.stream === stream) this.stopMusic(ch) })
+    if (el) {
+      const url = el.src
+      // A file that finishes ends the music instead of leaving a silent key on air.
+      el.addEventListener('ended', () => { if (this.musicTx.get(ch)?.el === el) { this.musicError = 'The stream ended'; this.stopMusic(ch) } })
+      // A live stream that drops usually does not error, it just freezes. Watch the playback clock: when it stops
+      // advancing, reconnect to the stream; give up (and say so) after a few failed attempts.
+      let last = el.currentTime
+      let frozen = 0
+      let attempts = 0
+      const tx = this.musicTx.get(ch)!
+      tx.watch = setInterval(() => {
+        if (this.musicTx.get(ch)?.el !== el) return
+        if (el.currentTime > last + 0.2) { last = el.currentTime; frozen = 0; attempts = 0; return }
+        frozen += 2
+        if (frozen < 6 && !el.error) return
+        frozen = 0
+        if (++attempts > 4) { this.musicError = 'The stream stopped (connection lost)'; this.stopMusic(ch); return }
+        el.src = url // ask the server for the stream again
+        void el.play().catch(() => {})
+      }, 2000)
+    }
     await this.publishMusic(ch)
     this.send({ type: 'music', channel: ch, on: true })
     this.emit()
@@ -1033,7 +1076,9 @@ export class CommsEngine {
     if (tx) {
       tx.src.disconnect()
       tx.gain.disconnect()
-      tx.stream.getTracks().forEach(t => t.stop())
+      if (tx.watch) clearInterval(tx.watch)
+      tx.stream?.getTracks().forEach(t => t.stop())
+      if (tx.el) { tx.el.pause(); tx.el.removeAttribute('src'); tx.el.load() }
     }
     const pub = this.musicPubs.get(ch)
     this.musicPubs.delete(ch)

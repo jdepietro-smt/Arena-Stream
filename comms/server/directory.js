@@ -36,7 +36,7 @@ export async function verifyPassword(pw, stored) {
 export function seedFromConfig(cfg) {
   const channels = cfg.channels.map(c => ({
     id: c.id, name: c.name, color: c.color ?? '#6366f1',
-    ...(c.music ? { music: true } : {}),
+    ...(c.music ? { music: true } : {}), ...(c.music && c.source ? { source: c.source } : {}),
     ...(c.ifb && !c.music ? { ifb: true } : {}), ...(c.duck != null ? { duck: c.duck } : {}),
   }))
   // One self-join group per configured role, granted the channels that role could use before.
@@ -120,7 +120,18 @@ export class Directory {
     // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
     const music = !!src.music
     const ifb = !!src.ifb && !music
-    return { id, name, color, ...(music ? { music: true } : {}), ...(ifb ? { ifb: true } : {}), ...(ifb && duck != null ? { duck: Number(duck) } : {}) }
+    // Optional stream (internet radio, Icecast, an MP3/AAC/Ogg stream or file) the A1 can start with one click.
+    let source = ''
+    if (music && src.source) {
+      source = String(src.source).trim().slice(0, 500)
+      let ok = false
+      try { ok = /^https?:$/.test(new URL(source).protocol) } catch { /* not a URL */ }
+      if (!ok) throw new DirectoryError('Stream URL must start with http:// or https://')
+    }
+    return {
+      id, name, color, ...(music ? { music: true } : {}), ...(source ? { source } : {}),
+      ...(ifb ? { ifb: true } : {}), ...(ifb && duck != null ? { duck: Number(duck) } : {}),
+    }
   }
 
   addChannel(body) {
@@ -137,7 +148,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'source']) if (body[k] !== undefined) src[k] = body[k]
     this.channels[i] = this.#cleanChannel(id, src)
     this.#changed()
     return this.channels[i]

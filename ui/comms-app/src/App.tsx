@@ -37,7 +37,7 @@ interface Prefs {
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
-  musicSrc: string
+  musicSrcBy: Record<string, string>
 }
 
 function loadPrefs(): Prefs {
@@ -49,7 +49,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrc: 'display',
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {},
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -449,7 +449,9 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
   const listening = engine.listen.has(ch.id)
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
   const inputs = devices.filter(d => d.kind === 'audioinput')
-  const source = (): MusicSource => (prefs.musicSrc === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: prefs.musicSrc })
+  // Default source: the channel's own stream when it has one, otherwise the computer's audio.
+  const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
+  const source = (): MusicSource => (chosen === 'stream' ? { kind: 'stream' } : chosen === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: chosen })
   return (
     <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
@@ -469,7 +471,8 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
       {ch.canTalk ? (
         <>
           <label className="musicsrc">
-            <select value={prefs.musicSrc} disabled={sending} onChange={e => patch({ musicSrc: e.target.value })} title="Where the music comes from">
+            <select value={chosen} disabled={sending} onChange={e => patch({ musicSrcBy: { ...prefs.musicSrcBy, [ch.id]: e.target.value } })} title="Where the music comes from">
+              {ch.stream && <option value="stream">Channel stream</option>}
               {canShare && <option value="display">Computer / tab audio (share)</option>}
               {inputs.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Input ${i + 1}`}</option>)}
             </select>

@@ -247,3 +247,55 @@ test('music channel: grants decide who sends and hears; subscribed only while a 
     await srv.close()
   }
 })
+
+test('music stream: URL stays on the server, relayed only to a key holder with Talk on the channel', async () => {
+  const http = await import('node:http')
+  const radio = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'audio/mpeg' })
+    res.end('FAKE-RADIO-BYTES')
+  })
+  await new Promise(r => radio.listen(0, '127.0.0.1', r))
+  const radioUrl = `http://127.0.0.1:${radio.address().port}/live.mp3`
+  const fake = { url: 'ws://sfu', token: async () => 't', listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  const dir = srv.directory
+  assert.throws(() => dir.addChannel({ name: 'Bad', music: true, source: 'ftp://x/y' }), /http/)
+  assert.equal(dir.addChannel({ name: 'Plain', source: radioUrl }).source, undefined, 'only music channels keep a stream URL')
+  const mus = dir.addChannel({ name: 'Radio', music: true, source: radioUrl })
+  assert.equal(mus.source, radioUrl)
+  const grant = (group, g) => {
+    const grp = dir.groups.find(x => x.name === group)
+    dir.updateGroup(grp.id, { grants: { ...grp.grants, [mus.id]: g } })
+  }
+  grant('Audio', { talk: true, listen: true })
+  grant('Camera', { listen: true })
+  try {
+    const mk = async (name, role) => {
+      const c = await client(port)
+      c.send({ type: 'join', name, role })
+      const w = await c.next(m => m.type === 'welcome')
+      return { c, w }
+    }
+    const A1 = await mk('Ann', 'Audio')
+    const cam = await mk('Bob', 'Camera')
+    const ch = A1.w.channels.find(c => c.id === mus.id)
+    assert.equal(ch.stream, true)
+    assert.equal(JSON.stringify(A1.w).includes('live.mp3'), false, 'the URL is never sent to a client')
+    assert.ok(A1.w.musicKey && A1.w.musicKey !== cam.w.musicKey)
+
+    const get = k => fetch(`http://127.0.0.1:${port}/music/${mus.id}${k === undefined ? '' : `?k=${k}`}`)
+    const ok = await get(A1.w.musicKey)
+    assert.equal(ok.status, 200)
+    assert.equal(ok.headers.get('content-type'), 'audio/mpeg')
+    assert.equal(await ok.text(), 'FAKE-RADIO-BYTES')
+    assert.equal((await get('nope')).status, 403, 'unknown key')
+    assert.equal((await get()).status, 403, 'no key')
+    assert.equal((await get(cam.w.musicKey)).status, 404, 'listen-only user cannot pull the sender stream')
+    assert.equal((await fetch(`http://127.0.0.1:${port}/music/prod?k=${A1.w.musicKey}`)).status, 404, 'channel without a stream')
+    for (const x of [A1, cam]) x.c.ws.close()
+  } finally {
+    await srv.close()
+    await new Promise(r => radio.close(r))
+  }
+})
