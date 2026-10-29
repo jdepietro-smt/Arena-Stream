@@ -224,7 +224,8 @@ curl -fsS --max-time 5 http://127.0.0.1:8900/health && echo
 curl -fsSk --max-time 5 -o /dev/null -w "dashboard via https: %{http_code}\n" "https://127.0.0.1/"
 curl -fsSk --max-time 5 https://127.0.0.1/comms-tab.js -o /dev/null -w "comms-tab.js: %{http_code}\n"
 curl -fsSk --max-time 5 -o /dev/null -w "comms web app: %{http_code}\n" "https://127.0.0.1/comms/app/"
-curl -fsSk --max-time 5 https://127.0.0.1/ | grep -c comms-tab.js | sed 's/^/tab script injected into dashboard: /'
+# The dashboard root redirects to /login when signed out, so look at the login page.
+curl -fsSk --max-time 5 https://127.0.0.1/login | grep -c comms-tab.js | sed 's/^/tab script injected into the dashboard login page: /' || true
 
 echo
 echo "=============================================="
