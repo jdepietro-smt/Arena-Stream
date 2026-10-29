@@ -23,9 +23,15 @@ export interface PortCfg {
   enabled: boolean
   channel: string
   source: SourceKind
-  /** 1-based device channel numbers (source: 'device'). */
+  /** 1-based device channel numbers (source: 'device'), within the device this port uses. */
   inCh: number
   outCh: number
+  /**
+   * Per-port audio devices (source: 'device'); blank = the shared device. This lets an interface that Windows shows as many
+   * stereo devices (a Focusrite: "Analogue 1 + 2", "Analogue 3 + 4", ...) feed many ports: pick the pair, then channel 1 or 2.
+   */
+  inputId?: string
+  outputId?: string
   rtp: RtpCfg
   vox: { thresholdDb: number; hangMs: number; echoGuard: boolean }
   inGainDb: number
@@ -45,7 +51,7 @@ export const defaultRtp = (): RtpCfg => ({
 
 export const newPort = (n: number): PortCfg => ({
   id: `p${Date.now().toString(36)}${n}`, name: `Port ${n}`, enabled: true, channel: '', source: 'device',
-  inCh: n, outCh: n, rtp: defaultRtp(), vox: { thresholdDb: -45, hangMs: 400, echoGuard: true }, inGainDb: 0, outGainDb: 0,
+  inCh: n, outCh: n, inputId: '', outputId: '', rtp: defaultRtp(), vox: { thresholdDb: -45, hangMs: 400, echoGuard: true }, inGainDb: 0, outGainDb: 0,
 })
 
 export const defaultConfig = (): GatewayConfig => ({
@@ -59,7 +65,7 @@ export function structuralKey(cfg: GatewayConfig): string {
   return JSON.stringify({
     d: cfg.device,
     p: cfg.ports.map(p => ({
-      id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh,
+      id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, ii: p.inputId ?? '', oi: p.outputId ?? '',
       r: p.source === 'rtp' ? p.rtp : null,
     })),
   })
@@ -128,7 +134,8 @@ export class GatewayRuntime {
   ports: Port[] = []
   deviceError = ''
   private timer: ReturnType<typeof setInterval> | null = null
-  private stream: MediaStream | null = null
+  private streams: MediaStream[] = []
+  private sinks: HTMLAudioElement[] = []
   private builtKey = ''
   private building = false
   private rtpBound = false
@@ -150,33 +157,64 @@ export class GatewayRuntime {
       const active = cfg.ports.filter(p => p.enabled)
       this.deviceError = ''
 
-      // ── shared device input/output ──
-      let splitter: ChannelSplitterNode | null = null
-      let merger: ChannelMergerNode | null = null
-      let inChans = 0
-      if (active.some(p => p.source === 'device')) {
+      // ── audio devices: the shared one plus any a port picks for itself, each opened once ──
+      type DevIn = { splitter: ChannelSplitterNode; chans: number }
+      type DevOut = { merger: ChannelMergerNode; outs: number }
+      const ins = new Map<string, DevIn>()
+      const outs = new Map<string, DevOut>()
+      const inErr = new Map<string, string>()
+      const outErr = new Map<string, string>()
+      const getIn = async (id: string): Promise<DevIn | undefined> => {
+        if (ins.has(id) || inErr.has(id)) return ins.get(id)
         try {
-          this.stream = await navigator.mediaDevices.getUserMedia({
+          const shared = id === cfg.device.inputId
+          const want = shared ? cfg.device.inputChannels : 2
+          const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
-              deviceId: cfg.device.inputId ? { exact: cfg.device.inputId } : undefined,
-              channelCount: { ideal: cfg.device.inputChannels },
+              deviceId: id ? { exact: id } : undefined,
+              channelCount: { ideal: want },
               echoCancellation: false, noiseSuppression: false, autoGainControl: false,
             },
           })
-          inChans = this.stream.getAudioTracks()[0].getSettings().channelCount ?? 1
-          const src = ctx.createMediaStreamSource(this.stream)
-          splitter = ctx.createChannelSplitter(Math.max(inChans, cfg.device.inputChannels))
+          this.streams.push(stream)
+          const chans = stream.getAudioTracks()[0].getSettings().channelCount ?? 1
+          const src = ctx.createMediaStreamSource(stream)
+          const splitter = ctx.createChannelSplitter(Math.max(chans, want))
           src.connect(splitter)
-          const setSink = (ctx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId
-          if (cfg.device.outputId && setSink) await setSink.call(ctx, cfg.device.outputId)
-          const outCh = Math.max(1, Math.min(ctx.destination.maxChannelCount || 2, cfg.device.outputChannels))
-          ctx.destination.channelCount = outCh
-          ctx.destination.channelInterpretation = 'discrete'
-          merger = ctx.createChannelMerger(outCh)
-          merger.connect(ctx.destination)
-        } catch (e) {
-          this.deviceError = `Audio device: ${(e as Error).message}`
-        }
+          ins.set(id, { splitter, chans })
+        } catch (e) { inErr.set(id, `Input device: ${(e as Error).message}`) }
+        return ins.get(id)
+      }
+      const getOut = async (id: string): Promise<DevOut | undefined> => {
+        if (outs.has(id) || outErr.has(id)) return outs.get(id)
+        try {
+          if (id === cfg.device.outputId) {
+            // The shared output is the audio context's own output, which can carry many channels.
+            const setSink = (ctx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId
+            if (id && setSink) await setSink.call(ctx, id)
+            const n = Math.max(1, Math.min(ctx.destination.maxChannelCount || 2, cfg.device.outputChannels))
+            ctx.destination.channelCount = n
+            ctx.destination.channelInterpretation = 'discrete'
+            const merger = ctx.createChannelMerger(n)
+            merger.connect(ctx.destination)
+            outs.set(id, { merger, outs: n })
+          } else {
+            // Any other output device gets a stereo path through its own audio element.
+            const dest = ctx.createMediaStreamDestination()
+            dest.channelCount = 2
+            dest.channelCountMode = 'explicit'
+            dest.channelInterpretation = 'discrete'
+            const merger = ctx.createChannelMerger(2)
+            merger.connect(dest)
+            const el = new Audio() as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+            el.srcObject = dest.stream
+            if (id && el.setSinkId) await el.setSinkId(id)
+            await el.play().catch(() => { /* started by the first audio */ })
+            this.sinks.push(el)
+            outs.set(id, { merger, outs: 2 })
+          }
+        } catch (e) { outErr.set(id, `Output device: ${(e as Error).message}`) }
+        return outs.get(id)
       }
 
       const needRtp = active.some(p => p.source === 'rtp')
@@ -191,8 +229,17 @@ export class GatewayRuntime {
       for (const cfgPort of active) {
         const p = new Port(cfgPort)
         this.ports.push(p)
-        try { await this.wirePort(ctx, p, splitter, merger, inChans) } catch (e) { p.error = (e as Error).message }
+        try {
+          let inDev: DevIn | undefined
+          let outDev: DevOut | undefined
+          if (cfgPort.source === 'device') {
+            inDev = await getIn(cfgPort.inputId || cfg.device.inputId)
+            outDev = await getOut(cfgPort.outputId || cfg.device.outputId)
+          }
+          await this.wirePort(ctx, p, inDev, outDev)
+        } catch (e) { p.error = (e as Error).message }
       }
+      this.deviceError = [...new Set([...inErr.values(), ...outErr.values()])].join('. ')
 
       this.timer = setInterval(() => this.voxTick(), 20)
     } finally {
@@ -201,7 +248,7 @@ export class GatewayRuntime {
     }
   }
 
-  private async wirePort(ctx: AudioContext, p: Port, splitter: ChannelSplitterNode | null, merger: ChannelMergerNode | null, inChans: number) {
+  private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }) {
     const c = p.cfg
     if (!c.channel) { p.error = 'Pick an Arena channel'; return }
 
@@ -224,11 +271,12 @@ export class GatewayRuntime {
     p.outGain.connect(p.outAn)
 
     if (c.source === 'device') {
-      if (!splitter || !merger) { p.error = 'Audio device not available'; return }
-      if (c.inCh < 1 || c.inCh > inChans) p.error = `Input channel ${c.inCh} not available (device gives ${inChans})`
-      else splitter.connect(p.inGain, c.inCh - 1)
-      if (c.outCh < 1 || c.outCh > merger.numberOfInputs) p.error = p.error || `Output channel ${c.outCh} not available (${merger.numberOfInputs} outputs)`
-      else p.outGain.connect(merger, 0, c.outCh - 1)
+      if (!inDev) p.error = 'Input device not available'
+      else if (c.inCh < 1 || c.inCh > inDev.chans) p.error = `Input channel ${c.inCh} not available (this device gives ${inDev.chans})`
+      else inDev.splitter.connect(p.inGain, c.inCh - 1)
+      if (!outDev) p.error = p.error || 'Output device not available'
+      else if (c.outCh < 1 || c.outCh > outDev.outs) p.error = p.error || `Output channel ${c.outCh} not available (this device has ${outDev.outs} outputs)`
+      else p.outGain.connect(outDev.merger, 0, c.outCh - 1)
     } else if (c.source === 'rtp') {
       const r = c.rtp
       const res = await window.gw!.rtpOpen(c.id, r)
@@ -301,8 +349,10 @@ export class GatewayRuntime {
       p.rxNode?.disconnect()
     }
     this.ports = []
-    this.stream?.getTracks().forEach(t => t.stop())
-    this.stream = null
+    for (const st of this.streams) st.getTracks().forEach(t => t.stop())
+    this.streams = []
+    for (const el of this.sinks) { el.pause(); el.srcObject = null }
+    this.sinks = []
     this.builtKey = ''
   }
 }

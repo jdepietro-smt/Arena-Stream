@@ -128,6 +128,13 @@ anything beyond a trusted network, since passwords travel over the connection.
 - **Audio paths per port:**
   - *Audio interface:* any multichannel device the OS offers (analog/AES3 4-wire interfaces, **Dante Virtual
     Soundcard**, ASIO-to-WASAPI bridges). Map device input channel → Arena, Arena → device output channel.
+    By default every port shares the one input and one output device chosen under *Audio device* (best when the OS shows
+    the interface as a single multichannel device, as macOS does). Each port can also pick **its own input and output
+    device** and a channel within it. That matters on Windows, where USB interfaces such as a **Focusrite Scarlett 18i20**
+    usually appear as many stereo devices ("Analogue 1 + 2", "Analogue 3 + 4", ...; playback "Playback 1 + 2", ...):
+    give each port the pair it needs and channel 1 or 2 within it. The gateway runs in Electron, which uses the Windows
+    audio endpoints (WASAPI), not ASIO, so it sees whatever Windows lists. Use 48 kHz in the interface's own control
+    panel. Other output devices than the shared one carry two channels each.
   - *Network audio:* AES67-style RTP (L24/L16, 48 kHz, multicast or unicast, packet time 1 ms default) to and from
     a Dante-in-AES67-mode device or an IP card on the matrix. No PTP needed; clock drift is absorbed by a small
     receive buffer. Configure addresses/ports/payload type by hand (no SAP/SDP discovery yet).

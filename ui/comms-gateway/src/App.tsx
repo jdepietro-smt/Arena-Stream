@@ -153,7 +153,7 @@ export default function App() {
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
         {cfg.ports.map(p => (
-          <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected}
+          <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected} mics={mics} outs={outs}
             dupChannel={!!p.channel && cfg.ports.some(o => o !== p && o.enabled && p.enabled && o.channel === p.channel)}
             onChange={x => patchPort(p.id, x)} onRemove={() => removePort(p.id)} />
         ))}
@@ -164,8 +164,8 @@ export default function App() {
 
 const pct = (db: number) => `${Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`
 
-function PortCard({ cfg, live, engine, connected, dupChannel, onChange, onRemove }: {
-  cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; dupChannel: boolean
+function PortCard({ cfg, live, engine, connected, mics, outs, dupChannel, onChange, onRemove }: {
+  cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; mics: MediaDeviceInfo[]; outs: MediaDeviceInfo[]; dupChannel: boolean
   onChange: (p: Partial<PortCfg>) => void; onRemove: () => void
 }) {
   const channels = engine.channels.filter(c => !c.music)
@@ -204,8 +204,20 @@ function PortCard({ cfg, live, engine, connected, dupChannel, onChange, onRemove
           </select>
         </label>
         {cfg.source === 'device' && <>
-          <label>Device input ch<input type="number" min={1} value={cfg.inCh} onChange={e => onChange({ inCh: num(e.target.value, 1) })} /></label>
-          <label>Device output ch<input type="number" min={1} value={cfg.outCh} onChange={e => onChange({ outCh: num(e.target.value, 1) })} /></label>
+          <label>Input device
+            <select value={cfg.inputId ?? ''} onChange={e => onChange({ inputId: e.target.value })}>
+              <option value="">Shared device (above)</option>
+              {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Input'}</option>)}
+            </select>
+          </label>
+          <label>Input channel in that device<input type="number" min={1} value={cfg.inCh} onChange={e => onChange({ inCh: num(e.target.value, 1) })} /></label>
+          <label>Output device
+            <select value={cfg.outputId ?? ''} onChange={e => onChange({ outputId: e.target.value })}>
+              <option value="">Shared device (above)</option>
+              {outs.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Output'}</option>)}
+            </select>
+          </label>
+          <label>Output channel in that device<input type="number" min={1} value={cfg.outCh} onChange={e => onChange({ outCh: num(e.target.value, 1) })} /></label>
         </>}
       </div>
       {cfg.source === 'rtp' && (
