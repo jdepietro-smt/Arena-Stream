@@ -15,6 +15,7 @@ import { createLiveKit } from './sfu.js'
 import { Directory, seedFromConfig } from './directory.js'
 import { AuthError, createAuth } from './auth.js'
 import { createAdmin } from './admin.js'
+import { createArenaWatcher } from './arena.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -49,7 +50,7 @@ function safeEqual(a, b) {
 
 export function createServer(
   cfg = loadConfig(),
-  { sfu = cfg.media?.mode === 'sfu' ? createLiveKit(cfg.media.livekit) : null } = {},
+  { sfu = cfg.media?.mode === 'sfu' ? createLiveKit(cfg.media.livekit) : null, arenaFetch } = {},
 ) {
   const authMode = cfg.auth?.mode === 'open' ? 'open' : 'accounts'
   const dir = Directory.load(cfg.dataFile ?? null, () => seedFromConfig(cfg))
@@ -75,6 +76,25 @@ export function createServer(
     p.ws.close(4000, code)
     return true
   }
+
+  // ── Arena stream awareness ─────────────────────────────────────────────────
+  // Feed health from the stream server, announced on the channel each stream belongs to.
+  const arena = cfg.arena?.apiUrl && cfg.arena.streams?.length
+    ? createArenaWatcher({
+        apiUrl: cfg.arena.apiUrl, streams: cfg.arena.streams, pollMs: cfg.arena.pollMs, confirmPolls: cfg.arena.confirmPolls,
+        stallPolls: cfg.arena.stallPolls, fetchImpl: arenaFetch ?? fetch,
+        onChange: (streams, events) => {
+          broadcast({ type: 'streams', streams })
+          for (const ev of events) {
+            const level = ev.kind === 'restored' || ev.kind === 'monitor-online' ? 'ok' : 'warn'
+            for (const p of peers.values()) {
+              if (ev.channel && !(p.perms[ev.channel]?.listen && p.listen.includes(ev.channel))) continue
+              send(p, { type: 'alert', level, kind: ev.kind, stream: ev.stream ?? null, channel: ev.channel, text: ev.text })
+            }
+          }
+        },
+      })
+    : null
 
   // ── SFU subscription routing ───────────────────────────────────────────────
   // A listener may receive a publisher's `ch:<id>` track iff the publisher may
@@ -256,6 +276,7 @@ export function createServer(
         channels: chans,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,
         listen: joined.listen,
+        streams: arena ? arena.snapshot() : [],
         peers: others,
       }), e => fail('sfu', `Media server unavailable: ${e.message}`))
       broadcast({ type: 'peer-join', peer: publicInfo(me) }, me.id)
@@ -327,8 +348,9 @@ export function createServer(
     directory: dir,
     bootstrap,
     listen: (port = cfg.port) =>
-      new Promise(resolve => httpServer.listen(port, () => resolve(httpServer.address().port))),
+      new Promise(resolve => httpServer.listen(port, () => { arena?.start(); resolve(httpServer.address().port) })),
     close: () => new Promise(resolve => {
+      arena?.stop()
       for (const c of wss.clients) c.terminate()
       wss.close(() => httpServer.close(() => resolve()))
     }),

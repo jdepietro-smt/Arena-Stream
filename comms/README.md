@@ -81,3 +81,32 @@ mode: the gateway needs each channel as its own track. Then start the gateway, e
 and tick *connect automatically*. One port per Arena channel per gateway.
 
 Run: `npm run electron --prefix ui/comms-gateway`. Tests: `npm test --prefix ui/comms-gateway` (RTP codec + UDP loopback).
+
+## Spatial channels
+
+Turn on **Spatial audio** in the intercom's Audio drawer to place each channel in the stereo field (headphones
+recommended): by default channels spread left → right in key order, with a *spread* slider and a per-channel
+position slider, and a small marker on each key shows where it sits. In SFU mode every channel is its own track, so
+placement is exact. In mesh mode a person's single stream sits where their loudest-knob active channel sits, and
+direct calls are always centred. A centred voice is exactly as loud as with spatial off; panned voices keep equal
+power. (The same playback path now carries the per-key volume knobs.)
+
+## Arena-aware alerts
+
+The server can watch the Arena stream server and announce feed problems on the channel each stream belongs to. Point
+it at the mediamtx control API (enable it with `api: yes`, default port 9997) in `comms.config.json`:
+
+```json
+"arena": {
+  "apiUrl": "http://<stream-server>:9997",
+  "pollMs": 1000, "confirmPolls": 2, "stallPolls": 6,
+  "streams": [ { "path": "cam1", "name": "Camera 1", "channel": "cam" } ]
+}
+```
+
+- A stream is **live**, **down** (path gone), or **stalled** (ready but no bytes arriving, e.g. a frozen encoder).
+  A change must be seen on `confirmPolls` polls in a row before it is announced, and the first reading is a silent baseline.
+- Listeners of the stream's channel get a flashing key ("▲ CAMERA 2 FEED LOST"), a tone, and a spoken cue; everyone
+  sees a **STREAMS** row of status lights under the display. Alerts never reach people who muted that channel.
+- If the monitor itself can't reach the stream server for 5 polls, everyone gets one "Stream monitor offline" notice,
+  and one when it returns. Spoken cues and tones can be switched off per user in the Audio drawer.

@@ -35,6 +35,17 @@
     "whepUrl": "",
     "roles": []
   },
+  "arena": {
+    "apiUrl": "",
+    "pollMs": 1000,
+    "streams": [
+      {
+        "path": "cam1",
+        "name": "Camera 1",
+        "channel": "cam"
+      }
+    ]
+  },
   "channels": [
     {
       "id": "prod",

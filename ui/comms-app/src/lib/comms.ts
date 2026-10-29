@@ -10,6 +10,9 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 
 export interface Channel { id: string; name: string; color: string; ifb?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
+export type StreamState = 'unknown' | 'live' | 'down' | 'stalled'
+export interface ArenaStream { id: string; name: string; channel: string | null; state: StreamState }
+export interface ArenaAlert { text: string; level: 'warn' | 'ok'; at: number; stream: string | null }
 export type ProgramState = 'off' | 'connecting' | 'live' | 'error'
 export interface PeerInfo { id: string; name: string; role: string; talk: string[]; listen: string[] }
 export type Status = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
@@ -36,13 +39,26 @@ interface Peer {
   pc: RTCPeerConnection
   gain: GainNode
   dest: MediaStreamAudioDestinationNode
-  el: HTMLAudioElement
+  voice: Voice | null
   initiator: boolean
   rttMs: number | null
   connState: RTCPeerConnectionState
 }
 
+type SinkCtx = { setSinkId?: (id: string) => Promise<void> }
 type SinkAudio = HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+
+/** One remote talker as heard here: source -> stereo pan -> level -> output bus. */
+interface Voice {
+  src: MediaStreamAudioSourceNode
+  mono: GainNode
+  pan: StereoPannerNode
+  gain: GainNode
+  hold: HTMLAudioElement // Chromium only feeds remote WebRTC audio to WebAudio if an element holds the stream
+  ch: string             // SFU: the channel this track carries ('' = direct); mesh: unused
+}
+
+export interface SpatialConfig { on: boolean; spread: number; overrides: Record<string, number> }
 
 const isUser = (t: string) => t.startsWith('u:')
 
@@ -68,6 +84,7 @@ export class CommsEngine {
   myId = ''
   channels: Channel[] = []
   myName = ''
+  myTitle = ''
   isAdmin = false
   listen = new Set<string>()
   held = new Set<string>()
@@ -76,6 +93,12 @@ export class CommsEngine {
   /** channel id -> {from, at} of the latest call signal */
   calls = new Map<string, { from: string; at: number }>()
   serverRttMs: number | null = null
+  /** Arena stream health, pushed by the server's stream monitor. */
+  streams: ArenaStream[] = []
+  /** Latest alert per channel ('' = not tied to a channel). */
+  private alerts = new Map<string, ArenaAlert>()
+  speakAlerts = true
+  alertTones = true
   media: MediaMode = 'mesh'
   program: { name: string; url: string } | null = null
   programState: ProgramState = 'off'
@@ -85,6 +108,10 @@ export class CommsEngine {
   /** True while an IFB channel I listen to has a talker: program is ducked. */
   ducked = false
   masterVolume = 1
+  /** Spatial audio: spread channels across the stereo field (key order, or per-channel overrides). */
+  spatial: SpatialConfig = { on: false, spread: 0.7, overrides: {} }
+  /** Per-channel listen level (0..1, default 1): the knob on each key. */
+  private chLevels = new Map<string, number>()
   micVolume = 1
 
   private version = 0
@@ -111,7 +138,10 @@ export class CommsEngine {
   private gwSrc = new Map<string, { src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
   private sfuPubs = new Map<string, LocalTrackPublication>()
   private sfuSync: Promise<void> = Promise.resolve()
-  private sfuEls = new Map<string, SinkAudio>()
+  private sfuVoices = new Map<string, Voice>()
+  private mix: GainNode | null = null
+  private mixAn: [AnalyserNode, AnalyserNode] | null = null
+  private mixBuf = new Float32Array(512)
   private duckLevel = 1
   private duckTimer: ReturnType<typeof setTimeout> | null = null
   private progPc: RTCPeerConnection | null = null
@@ -153,11 +183,12 @@ export class CommsEngine {
   get me(): { id: string } { return { id: this.myId } }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
-  async join(opts: JoinOptions, mutedChannels: string[] = []) {
+  async join(opts: JoinOptions, mutedChannels: string[] = [], levels: Record<string, number> = {}) {
     this.leave()
     this.opts = opts
     this.stopped = false
     this.wantMuted = new Set(mutedChannels)
+    this.chLevels = new Map(Object.entries(levels))
     this.status = 'connecting'
     this.error = ''
     this.emit()
@@ -189,6 +220,10 @@ export class CommsEngine {
     this.ctx = null
     this.rxBus.clear()
     this.txBus.clear()
+    this.mix = null
+    this.mixAn = null
+    this.streams = []
+    this.alerts.clear()
     this.micGain = null
     this.analyser = null
     this.held.clear()
@@ -218,7 +253,10 @@ export class CommsEngine {
 
   // ── audio input / output ───────────────────────────────────────────────────
   private async initAudio(micId: string | undefined, echoCancel: boolean) {
-    if (!this.ctx) this.ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 })
+    if (!this.ctx) {
+      this.ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 })
+      if (this.spkId && !this.opts?.gateway) void (this.ctx as unknown as SinkCtx).setSinkId?.(this.spkId)?.catch?.(() => {})
+    }
     await this.ctx.resume()
     if (this.opts?.gateway) {
       // Gateways take audio from ports, not a mic; keep a silent micGain so shared code paths still work.
@@ -256,17 +294,135 @@ export class CommsEngine {
 
   setSpeaker(id: string) {
     this.spkId = id
-    for (const p of this.peers.values()) (p.el as SinkAudio).setSinkId?.(id).catch(() => {})
+    void (this.ctx as unknown as SinkCtx | null)?.setSinkId?.(id)?.catch?.(() => {})
     this.progOut?.setSinkId?.(id).catch(() => {})
-    this.sfuEls.forEach(e => e.setSinkId?.(id).catch(() => {}))
   }
 
   setMasterVolume(v: number) {
     this.masterVolume = v
-    for (const p of this.peers.values()) p.el.volume = v
-    if (this.progOut) this.progOut.volume = v
-    this.sfuEls.forEach(e => { e.volume = v })
+    this.applyVolumes()
     this.emit()
+  }
+
+  channelLevel(ch: string): number { return this.chLevels.get(ch) ?? 1 }
+
+  setChannelLevel(ch: string, v: number) {
+    this.chLevels.set(ch, Math.min(1, Math.max(0, v)))
+    this.applyVolumes()
+    this.emit()
+  }
+
+  /** Levels by channel, for persisting between sessions. */
+  channelLevels(): Record<string, number> { return Object.fromEntries(this.chLevels) }
+
+  /**
+   * Playback volume = master x channel level. SFU: every remote track is one channel, so it is exact.
+   * Mesh: a peer's single stream carries whatever they are talking on, so use the loudest knob among the
+   * channels they are talking on that I'm listening to (a direct call to me always plays at full level).
+   */
+  private peerLevel(info: PeerInfo): number {
+    if (info.talk.includes(`u:${this.myId}`)) return 1
+    const levels = info.talk.filter(t => !isUser(t) && this.listen.has(t)).map(t => this.channelLevel(t))
+    return levels.length ? Math.max(...levels) : 1
+  }
+
+  private applyVolumes() {
+    const ctx = this.ctx
+    if (ctx) {
+      const t = ctx.currentTime
+      for (const p of this.peers.values()) {
+        if (!p.voice) continue
+        p.voice.gain.gain.setTargetAtTime(this.masterVolume * this.peerLevel(p.info), t, 0.02)
+        p.voice.pan.pan.setTargetAtTime(this.peerPan(p.info), t, 0.02)
+      }
+      for (const v of this.sfuVoices.values()) {
+        v.gain.gain.setTargetAtTime(this.masterVolume * (v.ch ? this.channelLevel(v.ch) : 1), t, 0.02)
+        v.pan.pan.setTargetAtTime(v.ch ? this.channelPan(v.ch) : 0, t, 0.02)
+      }
+    }
+    if (this.progOut) this.progOut.volume = this.masterVolume
+  }
+
+  // ── spatial audio ──────────────────────────────────────────────────────────
+  setSpatial(p: Partial<SpatialConfig>) {
+    this.spatial = { ...this.spatial, ...p }
+    this.applyVolumes()
+    this.emit()
+  }
+
+  /** Stereo position −1 (left) … +1 (right) for a channel. */
+  channelPan(ch: string): number {
+    const { on, spread, overrides } = this.spatial
+    if (!on) return 0
+    const o = overrides[ch]
+    if (typeof o === 'number') return Math.max(-1, Math.min(1, o))
+    return this.autoPan(ch)
+  }
+
+  /** Default position: channels spread left→right in key order, within ±spread. */
+  autoPan(ch: string): number {
+    const ids = this.channels.map(c => c.id)
+    const i = ids.indexOf(ch)
+    if (i < 0 || ids.length < 2) return 0
+    return -this.spatial.spread + 2 * this.spatial.spread * (i / (ids.length - 1))
+  }
+
+  /** Mesh: a peer's one stream sits where its loudest-knob active channel sits; direct calls are centred. */
+  private peerPan(info: PeerInfo): number {
+    if (info.talk.includes(`u:${this.myId}`)) return 0
+    const chans = info.talk.filter(t => !isUser(t) && this.listen.has(t))
+    if (!chans.length) return 0
+    const best = chans.reduce((a, b) => (this.channelLevel(b) > this.channelLevel(a) ? b : a))
+    return this.channelPan(best)
+  }
+
+  private ensureMix() {
+    const ctx = this.ctx!
+    if (this.mix) return
+    this.mix = ctx.createGain()
+    this.mix.connect(ctx.destination)
+    const split = ctx.createChannelSplitter(2)
+    this.mix.connect(split)
+    const l = ctx.createAnalyser(); const r = ctx.createAnalyser()
+    l.fftSize = r.fftSize = 512
+    split.connect(l, 0); split.connect(r, 1)
+    this.mixAn = [l, r]
+  }
+
+  private makeVoice(stream: MediaStream, ch = ''): Voice {
+    const ctx = this.ctx!
+    this.ensureMix()
+    const hold = new Audio()
+    hold.muted = true
+    hold.srcObject = stream
+    void hold.play().catch(() => {})
+    const src = ctx.createMediaStreamSource(stream)
+    // Voices are mono (Opus is upmixed to two identical channels). Fold to mono first, otherwise a hard pan
+    // would sum both copies and play twice as loud; x1.414 makes a centred voice as loud as an unpanned one.
+    const mono = ctx.createGain()
+    mono.channelCount = 1; mono.channelCountMode = 'explicit'; mono.channelInterpretation = 'speakers'
+    mono.gain.value = Math.SQRT2
+    const pan = ctx.createStereoPanner()
+    const gain = ctx.createGain()
+    gain.gain.value = 0 // applyVolumes() raises it; avoids a click on first packets
+    src.connect(mono).connect(pan).connect(gain).connect(this.mix!)
+    return { src, mono, pan, gain, hold, ch }
+  }
+
+  private dropVoice(v: Voice) {
+    v.src.disconnect(); v.mono.disconnect(); v.pan.disconnect(); v.gain.disconnect()
+    v.hold.srcObject = null
+  }
+
+  /** Left/right peak of everything being played to the headset, 0..1 (for meters and tests). */
+  outLevels(): [number, number] {
+    if (!this.mixAn) return [0, 0]
+    return this.mixAn.map(an => {
+      an.getFloatTimeDomainData(this.mixBuf)
+      let peak = 0
+      for (const v of this.mixBuf) { const a = Math.abs(v); if (a > peak) peak = a }
+      return peak
+    }) as [number, number]
   }
 
   setMicVolume(v: number) {
@@ -317,6 +473,8 @@ export class CommsEngine {
         this.myId = m.id
         this.channels = m.channels
         this.myName = m.me.name
+        this.streams = m.streams ?? []
+        this.myTitle = m.me.title ?? ''
         this.isAdmin = !!m.me.admin
         this.ice = m.iceServers
         // Listen to everything the role may access except channels I muted before.
@@ -376,6 +534,13 @@ export class CommsEngine {
         this.emit()
         break
       }
+      case 'streams':
+        this.streams = m.streams
+        this.emit()
+        break
+      case 'alert':
+        this.onAlert(m)
+        break
       case 'peer-state': {
         const p = this.peers.get(m.id)
         const info = p?.info ?? this.pendingInfo.get(m.id)
@@ -419,17 +584,13 @@ export class CommsEngine {
     gain.connect(dest)
     pc.addTrack(dest.stream.getAudioTracks()[0], dest.stream)
 
-    const el = new Audio() as SinkAudio
-    el.autoplay = true
-    el.volume = this.masterVolume
-    if (this.spkId) el.setSinkId?.(this.spkId).catch(() => {})
-
-    const peer: Peer = { info, pc, gain, dest, el, initiator, rttMs: null, connState: pc.connectionState }
+    const peer: Peer = { info, pc, gain, dest, voice: null, initiator, rttMs: null, connState: pc.connectionState }
     this.peers.set(info.id, peer)
 
     pc.ontrack = e => {
-      el.srcObject = e.streams[0] ?? new MediaStream([e.track])
-      el.play().catch(() => {})
+      if (peer.voice) this.dropVoice(peer.voice)
+      peer.voice = this.makeVoice(e.streams[0] ?? new MediaStream([e.track]))
+      this.applyVolumes()
       // Keep the receive jitter buffer tight; SRT-style tuning knob for WebRTC.
       try { (e.receiver as any).jitterBufferTarget = 40 } catch { /* older Chromium */ }
     }
@@ -487,7 +648,7 @@ export class CommsEngine {
     p.pc.onconnectionstatechange = null
     p.pc.close()
     p.gain.disconnect()
-    p.el.srcObject = null
+    if (p.voice) this.dropVoice(p.voice)
   }
 
   private async pollStats() {
@@ -530,18 +691,19 @@ export class CommsEngine {
         this.gwSrc.set(track.sid, { src, hold })
         return
       }
-      const el = track.attach() as SinkAudio
-      el.volume = this.masterVolume
-      if (this.spkId) el.setSinkId?.(this.spkId).catch(() => {})
-      this.sfuEls.set(track.sid ?? String(this.sfuEls.size), el)
+      const sid = track.sid ?? String(this.sfuVoices.size)
+      const ch = pub.trackName.startsWith('ch:') ? pub.trackName.slice(3) : ''
+      this.sfuVoices.get(sid) && this.dropVoice(this.sfuVoices.get(sid)!)
+      this.sfuVoices.set(sid, this.makeVoice(new MediaStream([track.mediaStreamTrack]), ch))
+      this.applyVolumes()
       const rx = (track as RemoteAudioTrack).receiver as (RTCRtpReceiver & { jitterBufferTarget?: number }) | undefined
       if (rx) try { rx.jitterBufferTarget = 40 } catch { /* older Chromium */ }
     })
     room.on(RoomEvent.TrackUnsubscribed, track => {
       const g = track.sid ? this.gwSrc.get(track.sid) : undefined
       if (g) { g.src.disconnect(); g.hold.srcObject = null; this.gwSrc.delete(track.sid!); return }
-      track.detach().forEach(e => e.remove())
-      if (track.sid) this.sfuEls.delete(track.sid)
+      const v = track.sid ? this.sfuVoices.get(track.sid) : undefined
+      if (v) { this.dropVoice(v); this.sfuVoices.delete(track.sid!) }
     })
     room.on(RoomEvent.Disconnected, () => {
       // Unexpected media loss: force a full re-join (fresh identity + token).
@@ -602,8 +764,8 @@ export class CommsEngine {
     this.sfuPubs.clear()
     for (const g of this.gwSrc.values()) { g.src.disconnect(); g.hold.srcObject = null }
     this.gwSrc.clear()
-    this.sfuEls.forEach(e => e.remove())
-    this.sfuEls.clear()
+    this.sfuVoices.forEach(v => this.dropVoice(v))
+    this.sfuVoices.clear()
     await room?.disconnect().catch(() => {})
   }
 
@@ -619,6 +781,7 @@ export class CommsEngine {
   private applyRouting() {
     if (!this.ctx) return
     this.updateDuck()
+    this.applyVolumes()
     const talk = this.talkSet
     if (this.media === 'sfu') {
       const t = this.ctx.currentTime
@@ -840,6 +1003,44 @@ export class CommsEngine {
   }
 
   callChannel(ch: string) { this.send({ type: 'call', channel: ch }) }
+
+  /** The alert currently showing on a channel's key (they fade after 8 s). */
+  activeAlert(ch: string): ArenaAlert | null {
+    const a = this.alerts.get(ch)
+    return a && Date.now() - a.at < 8000 ? a : null
+  }
+
+  private onAlert(m: { text: string; level: 'warn' | 'ok'; channel: string | null; stream: string | null }) {
+    this.alerts.set(m.channel ?? '', { text: m.text, level: m.level, at: Date.now(), stream: m.stream })
+    if (!this.opts?.gateway) {
+      if (this.alertTones) this.alertTone(m.level)
+      if (this.speakAlerts && typeof speechSynthesis !== 'undefined') {
+        speechSynthesis.cancel() // never queue stale news behind fresh news
+        const u = new SpeechSynthesisUtterance(m.text)
+        u.volume = this.masterVolume
+        speechSynthesis.speak(u)
+      }
+    }
+    this.emit()
+    setTimeout(() => this.emit(), 8100) // let the key stop flashing
+  }
+
+  /** Descending pair = something broke; ascending pair = it's back. */
+  private alertTone(level: 'warn' | 'ok') {
+    const ctx = this.ctx
+    if (!ctx) return
+    const notes = level === 'warn' ? [660, 440] : [440, 660]
+    const t = ctx.currentTime
+    notes.forEach((f, i) => {
+      const osc = ctx.createOscillator(); const g = ctx.createGain()
+      osc.type = 'sine'; osc.frequency.value = f
+      g.gain.setValueAtTime(0, t + i * 0.16)
+      g.gain.linearRampToValueAtTime(0.18 * this.masterVolume, t + i * 0.16 + 0.01)
+      g.gain.linearRampToValueAtTime(0, t + i * 0.16 + 0.14)
+      osc.connect(g).connect(ctx.destination)
+      osc.start(t + i * 0.16); osc.stop(t + i * 0.16 + 0.16)
+    })
+  }
 
   private onCall(from: string, channel: string) {
     this.calls.set(channel, { from, at: Date.now() })

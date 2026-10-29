@@ -4,6 +4,7 @@ import {
   GatewayConfig, GatewayRuntime, PortCfg, PortRuntime, RtpCfg, SourceKind,
   defaultConfig, defaultRtp, newPort,
 } from './ports'
+import './kp.css'
 import './App.css'
 
 const LS_KEY = 'arena-comms-gateway-config'
@@ -111,7 +112,7 @@ export default function App() {
       </div>
       <div className="content">
         <section className="card">
-          <h2>Arena server</h2>
+          <h2 className="lcd">Arena server</h2>
           <div className="grid3">
             <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="ws://host:8900" /></label>
             <label>Gateway account<input value={cfg.username} onChange={e => patch({ username: e.target.value })} autoComplete="username" /></label>
@@ -129,7 +130,7 @@ export default function App() {
         </section>
 
         <section className="card">
-          <div className="bar"><h2>Audio device</h2><button className="btn sm" onClick={() => void refreshDevices()}>Refresh devices</button></div>
+          <div className="bar"><h2 className="lcd">Audio device</h2><button className="btn sm" onClick={() => void refreshDevices()}>Refresh devices</button></div>
           <div className="grid4">
             <label>Input (from comms system)
               <select value={cfg.device.inputId} onChange={e => patchDevice({ inputId: e.target.value })}>
@@ -149,7 +150,7 @@ export default function App() {
           {runtime.deviceError && <div className="error">{runtime.deviceError}</div>}
         </section>
 
-        <div className="bar"><h2>Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
+        <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
         {cfg.ports.map(p => (
           <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected}
@@ -181,7 +182,7 @@ function PortCard({ cfg, live, engine, connected, dupChannel, onChange, onRemove
       <div className="bar">
         <input className="pname" value={cfg.name} onChange={e => onChange({ name: e.target.value })} />
         <span className="grow" />
-        {live?.open && <span className="tag live">TALKING TO ARENA</span>}
+        {live?.open && <span className="tag live"><i className="led red on" />TALKING TO ARENA</span>}
         <label className="check"><input type="checkbox" checked={cfg.enabled} onChange={e => onChange({ enabled: e.target.checked })} />Enabled</label>
         <button className="btn sm danger" onClick={() => confirm(`Remove ${cfg.name}?`) && onRemove()}>Remove</button>
       </div>
@@ -231,12 +232,12 @@ function PortCard({ cfg, live, engine, connected, dupChannel, onChange, onRemove
       )}
       <div className="meters">
         <div>
-          <div className="mlabel">From comms system <span className="mono">{inDb > -100 ? `${inDb.toFixed(0)} dB` : '—'}</span></div>
-          <div className="meter"><div className="fill" style={{ width: pct(inDb) }} /><div className="thr" style={{ left: pct(cfg.vox.thresholdDb) }} /></div>
+          <div className="mlabel">From comms system <span className="lcdread">{inDb > -100 ? `${inDb.toFixed(0)} dB` : '—'}</span></div>
+          <div className="mwrap"><div className="ledmeter"><div style={{ width: pct(inDb) }} /></div><div className="thr" style={{ left: pct(cfg.vox.thresholdDb) }} title="VOX threshold" /></div>
         </div>
         <div>
-          <div className="mlabel">To comms system <span className="mono">{outDb > -100 ? `${outDb.toFixed(0)} dB` : '—'}</span></div>
-          <div className="meter"><div className="fill out" style={{ width: pct(outDb) }} /></div>
+          <div className="mlabel">To comms system <span className="lcdread">{outDb > -100 ? `${outDb.toFixed(0)} dB` : '—'}</span></div>
+          <div className="mwrap"><div className="ledmeter out"><div style={{ width: pct(outDb) }} /></div></div>
         </div>
       </div>
       <div className="grid4">
