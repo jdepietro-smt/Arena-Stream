@@ -332,7 +332,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
           {engine.program && <ProgramKey engine={engine} />}
           {engine.channels.map((c, i) => (c.music
             ? <MusicKey key={c.id} ch={c} engine={engine} prefs={prefs} patch={patch} devices={devices} />
-            : <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} />))}
+            : <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} prefs={prefs} patch={patch} devices={devices} />))}
         </div>
         {dock}
       </section>
@@ -354,7 +354,9 @@ function Clock() {
 }
 
 /** One channel key: LCD legend, big illuminated TALK key, and LISTEN / LATCH / CALL keys with LEDs. */
-function ChannelKey({ ch, index, engine, name }: { ch: Channel; index: number; engine: CommsEngine; name: string }) {
+function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
+  ch: Channel; index: number; engine: CommsEngine; name: string; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+}) {
   const listening = engine.listen.has(ch.id)
   const { canTalk, canListen } = ch
   const talking = engine.talkSet.has(ch.id)
@@ -364,6 +366,8 @@ function ChannelKey({ ch, index, engine, name }: { ch: Channel; index: number; e
   const calling = !!call && Date.now() - call.at < 4000
   const caller = calling ? engine.roster().find(p => p.id === call!.from)?.name : ''
   const alert = engine.activeAlert(ch.id)
+  const musicNow = ch.withMusic ? engine.musicSendersOn(ch.id) : []
+  const carriesMusic = !!ch.withMusic && engine.media === 'sfu' // music needs the SFU
   return (
     <div className={`keymod ${talking ? 'talking' : ''} ${calling ? 'calling' : ''} ${alert && !calling ? `alert-${alert.level}` : ''} ${canTalk ? '' : 'rx-only'}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
@@ -377,7 +381,10 @@ function ChannelKey({ ch, index, engine, name }: { ch: Channel; index: number; e
           {calling
             ? <span className="blink">CALL ▸ {(caller || 'SOMEONE').toUpperCase()}</span>
             : alert ? <span className={`blink alert-text ${alert.level}`}>{alert.level === 'warn' ? '▲' : '●'} {alert.text.toUpperCase()}</span>
-            : talkers.length ? talkers.map(t => <span key={t}>{t.toUpperCase()}</span>) : <span className="dim">{canTalk ? 'READY' : 'LISTEN ONLY'}</span>}
+            : engine.musicError && canTalk && carriesMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
+            : talkers.length ? talkers.map(t => <span key={t}>{t.toUpperCase()}</span>)
+            : musicNow.length ? <span>♪ {musicNow.join(', ').toUpperCase()}</span>
+            : <span className="dim">{canTalk ? 'READY' : 'LISTEN ONLY'}</span>}
         </div>
       </div>
       <div className="keyrow">
@@ -403,6 +410,7 @@ function ChannelKey({ ch, index, engine, name }: { ch: Channel; index: number; e
           <i className={`led amber ${calling ? 'on blink' : ''}`} />CALL
         </button>
       </div>
+      {carriesMusic && canTalk && <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} />}
     </div>
   )
 }
@@ -438,23 +446,67 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
 }
 
 /**
- * A music channel (set up in the admin's Channels, "Music channel"). Whoever may talk on it gets a source picker and
- * a start/stop key; whoever may listen gets the channel's level knob and listen switch. Ducked by IFB like the program.
+ * Sender controls for music on a channel: where the music comes from, the player link box with OPEN and START right
+ * beside it, a level meter and STOP. Shown to people with Talk on a channel that carries music.
  */
-function MusicKey({ ch, engine, prefs, patch, devices }: {
-  ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+function MusicControls({ ch, engine, prefs, patch, devices, meter }: {
+  ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]; meter?: boolean
 }) {
-  const [opened, setOpened] = useState(false) // the player link was opened from this key
-  const senders = engine.musicSendersOn(ch.id)
   const sending = engine.musicSending(ch.id)
-  const listening = engine.listen.has(ch.id)
   const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
   const inputs = devices.filter(d => d.kind === 'audioinput')
   // Default source: the channel's own stream when it has one, otherwise the computer's audio.
   const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
   // The link box starts with the channel's player link (set in channel setup); the sender can change it.
   const link = prefs.musicLinkBy[ch.id] ?? ch.link ?? ''
+  const validLink = /^https?:\/\//i.test(link.trim())
   const source = (): MusicSource => (chosen === 'stream' ? { kind: 'stream' } : chosen === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: chosen })
+  const showLinkRow = chosen === 'display' && !sending
+  return (
+    <div className="musiccontrols">
+      <label className="musicsrc">
+        <select value={chosen} disabled={sending} onChange={e => patch({ musicSrcBy: { ...prefs.musicSrcBy, [ch.id]: e.target.value } })} title="Where the music comes from">
+          {ch.stream && <option value="stream">Channel stream</option>}
+          {canShare && <option value="display">Computer / tab audio (share)</option>}
+          {inputs.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Input ${i + 1}`}</option>)}
+        </select>
+      </label>
+      {showLinkRow && (
+        <div className="musiclink">
+          <input value={link} onChange={e => patch({ musicLinkBy: { ...prefs.musicLinkBy, [ch.id]: e.target.value } })} spellCheck={false}
+            placeholder="Paste a YouTube / Spotify link" title="OPEN shows the link in its own window. Play it there, then press START and pick that window with Share audio ticked." />
+          <div className="musicbtns">
+            <button type="button" className="cap sm" disabled={!validLink} title="Open the link in its own window"
+              onClick={() => window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600')}>OPEN</button>
+            <button type="button" className="cap sm" title="Share that window's audio onto the channel"
+              onClick={() => void engine.startMusic(ch.id, source())}><i className="led green" />START</button>
+          </div>
+        </div>
+      )}
+      {meter && <div className="pgm-mid"><LedMeter engine={engine} source="music" channel={ch.id} /></div>}
+      {!showLinkRow && (
+        <div className="subkeys one">
+          <button className={`cap sm ${sending ? 'on' : ''}`} onClick={() => (sending ? engine.stopMusic(ch.id) : void engine.startMusic(ch.id, source()))}>
+            <i className={`led ${sending ? 'red on' : 'green'}`} />{sending ? 'STOP MUSIC' : 'START MUSIC'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * A music-only channel (set up in the admin's Channels, "Music-only channel"). Whoever may talk on it gets the sender
+ * controls; whoever may listen gets the channel's level knob and listen switch. Ducked by IFB like the program.
+ */
+function MusicKey({ ch, engine, prefs, patch, devices }: {
+  ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+}) {
+  const senders = engine.musicSendersOn(ch.id)
+  const sending = engine.musicSending(ch.id)
+  const listening = engine.listen.has(ch.id)
+  const link = prefs.musicLinkBy[ch.id] ?? ch.link ?? ''
+  const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
   return (
     <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
@@ -469,36 +521,12 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
             : ch.canTalk && chosen === 'display' && link.trim()
-              ? <span className="blink">{opened ? '② PRESS START MUSIC, PICK THE WINDOW, TICK SHARE AUDIO' : '① PRESS OPEN, PLAY THE VIDEO, THEN START MUSIC'}</span>
+              ? <span className="blink">OPEN THE LINK, PLAY IT, THEN START</span>
               : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
         </div>
       </div>
       {ch.canTalk ? (
-        <>
-          <label className="musicsrc">
-            <select value={chosen} disabled={sending} onChange={e => patch({ musicSrcBy: { ...prefs.musicSrcBy, [ch.id]: e.target.value } })} title="Where the music comes from">
-              {ch.stream && <option value="stream">Channel stream</option>}
-              {canShare && <option value="display">Computer / tab audio (share)</option>}
-              {inputs.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Input ${i + 1}`}</option>)}
-            </select>
-          </label>
-          {chosen === 'display' && !sending && (
-            <div className="musiclink">
-              <input value={link} onChange={e => patch({ musicLinkBy: { ...prefs.musicLinkBy, [ch.id]: e.target.value } })} spellCheck={false}
-                placeholder="Paste a YouTube / Spotify link" title="Opens the link in its own window. Then press START MUSIC, pick that window and tick Share audio." />
-              <button type="button" className="cap sm" disabled={!/^https?:\/\//i.test(link.trim())}
-                onClick={() => { window.open(link.trim(), 'arena-music-player', 'popup=yes,width=960,height=600'); setOpened(true) }}>OPEN</button>
-            </div>
-          )}
-          <div className="pgm-mid">
-            <LedMeter engine={engine} source="music" channel={ch.id} />
-          </div>
-          <div className="subkeys one">
-            <button className={`cap sm ${sending ? 'on' : ''}`} onClick={() => (sending ? engine.stopMusic(ch.id) : void engine.startMusic(ch.id, source()))}>
-              <i className={`led ${sending ? 'red on' : 'green'}`} />{sending ? 'STOP MUSIC' : 'START MUSIC'}
-            </button>
-          </div>
-        </>
+        <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} meter />
       ) : (
         <>
           <div className="pgm-mid">

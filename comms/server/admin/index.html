@@ -161,8 +161,8 @@ function userDialog(u) {
       h('option', { value: '' }, 'inherit'), h('option', { value: 'true', selected: cur === true }, 'allow'), h('option', { value: 'false', selected: cur === false }, 'deny'))
   }
   const ov = h('table', { class: 'matrix' }, h('tr', {}, h('th', {}, 'Channel'), h('th', {}, 'Talk'), h('th', {}, 'Listen')),
-    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name + (c.music ? ' ♪' : '')), h('td', {}, tri(c.id, 'talk')), h('td', {}, tri(c.id, 'listen')))),
-    st.channels.some(c => c.music) && h('caption', { class: 'muted' }, '♪ music channel: Talk = may send the music, Listen = hears it'))
+    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name + (c.music || c.withMusic ? ' ♪' : '')), h('td', {}, tri(c.id, 'talk')), h('td', {}, tri(c.id, 'listen')))),
+    st.channels.some(c => c.music || c.withMusic) && h('caption', { class: 'muted' }, '♪ carries music: Talk = may start the music (and talk), Listen = hears it'))
   modal(isNew ? 'Add user' : 'Edit ' + u.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
     h('div', { class: 'row2' }, h('label', {}, 'Username (login)', f.username), h('label', {}, 'Display name', f.name)),
     h('div', { class: 'row2' }, h('label', {}, 'Title', f.title), h('label', {}, 'Password', f.password)),
@@ -196,8 +196,8 @@ function groupDialog(g) {
   const name = h('input', { value: g.name }), self = h('input', { type: 'checkbox', checked: !!g.selfJoin })
   const cell = (ch, key) => h('input', { type: 'checkbox', 'data-ch': ch, 'data-key': key, checked: !!g.grants[ch]?.[key] })
   const m = h('table', { class: 'matrix' }, h('tr', {}, h('th', {}, 'Channel'), h('th', {}, 'Talk'), h('th', {}, 'Listen')),
-    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name + (c.music ? ' ♪' : '')), h('td', {}, cell(c.id, 'talk')), h('td', {}, cell(c.id, 'listen')))),
-    st.channels.some(c => c.music) && h('caption', { class: 'muted' }, '♪ music channel: Talk = may send the music, Listen = hears it'))
+    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name + (c.music || c.withMusic ? ' ♪' : '')), h('td', {}, cell(c.id, 'talk')), h('td', {}, cell(c.id, 'listen')))),
+    st.channels.some(c => c.music || c.withMusic) && h('caption', { class: 'muted' }, '♪ carries music: Talk = may start the music (and talk), Listen = hears it'))
   modal(isNew ? 'Add group' : 'Edit ' + g.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
     h('label', {}, 'Group name', name), h('fieldset', {}, h('legend', {}, 'Channel access'), m),
     h('label', { class: 'check' }, self, 'Self-join: offer this as a role in open (no-account) mode')),
@@ -222,37 +222,44 @@ function groupsView() {
 
 // ── channels ─────────────────────────────────────────────────────────────────
 function channelDialog(c) {
-  const isNew = !c; c = c || { name: '', color: '#6366f1', ifb: false, music: false }
+  const isNew = !c; c = c || { name: '', color: '#6366f1', ifb: false, music: false, withMusic: false }
   const f = { name: h('input', { value: c.name }), color: h('input', { type: 'color', value: c.color, style: 'height:34px;padding:2px' }),
     ifb: h('input', { type: 'checkbox', checked: !!c.ifb }), duck: h('input', { type: 'number', min: 0, max: 1, step: 0.01, value: c.duck ?? 0.15 }),
-    music: h('input', { type: 'checkbox', checked: !!c.music }),
+    music: h('input', { type: 'checkbox', checked: !!c.music }), withMusic: h('input', { type: 'checkbox', checked: !!c.withMusic }),
     source: h('input', { value: c.source || c.link || '', placeholder: 'https://example.com/live.mp3  or  https://www.youtube.com/watch?v=…  (optional)', spellcheck: 'false' }),
     duckMusic: h('input', { type: 'checkbox', checked: !c.noDuck }) }
-  const sourceRow = h('label', {}, 'Stream or player link: a radio station\'s direct MP3 / AAC / Ogg stream (plays when the sender presses START), or a YouTube / Spotify page link (the sender\'s MUSIC key opens it and shares its audio)', f.source)
+  const sourceRow = h('label', {}, 'Stream or player link: a radio station's direct MP3 / AAC / Ogg stream (plays when the sender presses START), or a YouTube / Spotify page link (the sender's key opens it and shares its audio)', f.source)
+  const withMusicRow = h('label', { class: 'check' }, f.withMusic, '♪ Also play music on this channel: people with Talk get a link box and START on its key; everyone listening hears the music here')
   const ifbRow = h('label', { class: 'check' }, f.ifb, 'IFB: duck the program feed (and any music) for listeners while someone talks here')
-  const duckMusicRow = h('label', { class: 'check' }, f.duckMusic, 'Duck this music while someone talks on an IFB channel')
+  const duckMusicRow = h('label', { class: 'check' }, f.duckMusic, 'Duck the music while someone talks on an IFB channel')
   const duckText = h('span', {})
   const duckLabel = h('label', {}, duckText, f.duck)
-  // A music channel is one-way stereo music: it is never an IFB itself, but it ducks under the IFB channels.
+  // A music-only channel is one-way stereo music. A normal channel can also carry music. An IFB cannot.
   const sync = () => {
     const music = f.music.checked
-    if (music) f.ifb.checked = false
-    sourceRow.style.display = music ? '' : 'none'
+    if (music) { f.ifb.checked = false; f.withMusic.checked = false }
+    if (f.ifb.checked) f.withMusic.checked = false
+    if (f.withMusic.checked) f.ifb.checked = false
+    const anyMusic = music || f.withMusic.checked
+    withMusicRow.style.display = music ? 'none' : ''
+    f.withMusic.disabled = f.ifb.checked
     ifbRow.style.display = music ? 'none' : ''
-    duckMusicRow.style.display = music ? '' : 'none'
-    const duckOn = music ? f.duckMusic.checked : f.ifb.checked
-    f.duck.disabled = !duckOn
-    duckText.textContent = music ? 'How low the music goes while an IFB channel is talking (0–1, lower is quieter)' : 'Duck level (0–1, lower is quieter)'
+    f.ifb.disabled = f.withMusic.checked
+    sourceRow.style.display = anyMusic ? '' : 'none'
+    duckMusicRow.style.display = anyMusic ? '' : 'none'
+    f.duck.disabled = !(anyMusic ? f.duckMusic.checked : f.ifb.checked)
+    duckText.textContent = anyMusic ? 'How low the music goes while an IFB channel is talking (0–1, lower is quieter)' : 'Duck level (0–1, lower is quieter)'
   }
-  f.music.onchange = sync; f.ifb.onchange = sync; f.duckMusic.onchange = sync; sync()
+  f.music.onchange = sync; f.withMusic.onchange = sync; f.ifb.onchange = sync; f.duckMusic.onchange = sync; sync()
   modal(isNew ? 'Add channel' : 'Edit ' + c.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
     h('div', { class: 'row2' }, h('label', {}, 'Name', f.name), h('label', {}, 'Colour', f.color)),
-    h('label', { class: 'check' }, f.music, '♪ Music channel: a player (e.g. the A1) sends stereo music; Talk = may send it, Listen = hears it'),
+    withMusicRow,
+    h('label', { class: 'check' }, f.music, '♪ Music-only channel: no talking, just music a player (e.g. the A1) sends; Talk = may send it, Listen = hears it'),
     sourceRow, ifbRow, duckMusicRow, duckLabel),
   async () => {
-    const music = f.music.checked
-    const body = { name: f.name.value, color: f.color.value, music, source: music ? f.source.value.trim() : '', ifb: !music && f.ifb.checked,
-      noDuck: music && !f.duckMusic.checked, duck: (music ? f.duckMusic.checked : f.ifb.checked) ? Number(f.duck.value) : undefined }
+    const music = f.music.checked, withMusic = !music && f.withMusic.checked, anyMusic = music || withMusic
+    const body = { name: f.name.value, color: f.color.value, music, withMusic, source: anyMusic ? f.source.value.trim() : '', ifb: !anyMusic && f.ifb.checked,
+      noDuck: anyMusic && !f.duckMusic.checked, duck: (anyMusic ? f.duckMusic.checked : f.ifb.checked) ? Number(f.duck.value) : undefined }
     if (isNew) await api('POST', 'channels', body); else await api('PUT', 'channels/' + c.id, body)
   }, isNew ? '' : confirmDelete('channel ' + c.name, () => api('DELETE', 'channels/' + c.id)))
 }
@@ -273,7 +280,7 @@ function channelsView() {
     h('table', {}, h('tr', {}, ['', 'Channel', 'ID', 'Type', ''].map(x => h('th', {}, x))),
       S.state.channels.map((c, i) => h('tr', { class: 'row', onclick: () => channelDialog(c) },
         h('td', {}, i + 1), h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', { class: 'mono' }, c.id),
-        h('td', {}, c.music ? [h('span', { class: 'chip' }, c.source ? '♪ music · stream' : c.link ? '♪ music · link' : '♪ music'), ' ', musicSenders(c)] : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
+        h('td', {}, c.music || c.withMusic ? [h('span', { class: 'chip' }, (c.music ? '♪ music' : '♪ + music') + (c.source ? ' · stream' : c.link ? ' · link' : '')), ' ', musicSenders(c)] : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
         h('td', { onclick: e => e.stopPropagation() },
           h('button', { class: 'btn sm', disabled: i === 0, onclick: () => move(i, -1) }, '↑'), ' ',
           h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓')))))]

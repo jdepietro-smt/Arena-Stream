@@ -38,7 +38,8 @@ export async function verifyPassword(pw, stored) {
 export function seedFromConfig(cfg) {
   const channels = cfg.channels.map(c => ({
     id: c.id, name: c.name, color: c.color ?? '#6366f1',
-    ...(c.music ? { music: true } : {}), ...(c.music && c.source ? { source: c.source } : {}),
+    ...(c.music ? { music: true } : {}), ...(c.withMusic && !c.music && !c.ifb ? { withMusic: true } : {}),
+    ...((c.music || c.withMusic) && c.source ? { source: c.source } : {}),
     ...(c.ifb && !c.music ? { ifb: true } : {}), ...(c.duck != null ? { duck: c.duck } : {}),
   }))
   // One self-join group per configured role, granted the channels that role could use before.
@@ -122,6 +123,9 @@ export class Directory {
     // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
     const music = !!src.music
     const ifb = !!src.ifb && !music
+    // A party-line channel (the Program channel, say) can also carry music: talk as usual, plus a music source.
+    const withMusic = !music && !ifb && !!src.withMusic
+    const hasMusic = music || withMusic
     // One optional link per music channel, sorted by what it is:
     //  - an audio stream (internet radio, Icecast, an MP3/AAC/Ogg stream or file): `source`, which the server relays and
     //    the sender plays with one click;
@@ -130,7 +134,7 @@ export class Directory {
     let source = ''
     let link = ''
     const raw = src.source ?? src.link
-    if (music && raw) {
+    if (hasMusic && raw) {
       const text = String(raw).trim().slice(0, 500)
       let url = null
       try { url = new URL(text) } catch { /* not a URL */ }
@@ -138,11 +142,11 @@ export class Directory {
       if (SERVICE_PAGE.test(url.hostname)) link = text; else source = text
     }
     // A music channel ducks under IFB talkers by default (its own depth if set); noDuck turns that off.
-    const noDuck = music && !!src.noDuck
+    const noDuck = hasMusic && !!src.noDuck
     return {
-      id, name, color, ...(music ? { music: true } : {}), ...(source ? { source } : {}), ...(link ? { link } : {}),
+      id, name, color, ...(music ? { music: true } : {}), ...(withMusic ? { withMusic: true } : {}), ...(source ? { source } : {}), ...(link ? { link } : {}),
       ...(noDuck ? { noDuck: true } : {}),
-      ...(ifb ? { ifb: true } : {}), ...((ifb || (music && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
+      ...(ifb ? { ifb: true } : {}), ...((ifb || (hasMusic && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
     }
   }
 
@@ -160,7 +164,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'noDuck']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'withMusic', 'noDuck']) if (body[k] !== undefined) src[k] = body[k]
     // The stream/link field replaces whatever was stored (either kind); it is re-sorted by #cleanChannel.
     if (body.source !== undefined) { delete src.link; src.source = body.source } else if (src.link) { src.source = src.link; delete src.link }
     this.channels[i] = this.#cleanChannel(id, src)

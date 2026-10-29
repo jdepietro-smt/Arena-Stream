@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' }
@@ -602,7 +602,7 @@ export class CommsEngine {
         this.setMusicSenders(m.musicSenders)
         for (const ch of [...this.musicTx.keys()]) {
           const c = this.channels.find(x => x.id === ch)
-          if (!c?.music || !c.canTalk) this.stopMusic(ch, false) // no longer allowed to send here
+          if (!(c?.music || c?.withMusic) || !c.canTalk) this.stopMusic(ch, false) // no longer allowed to send here
         }
         for (const set of [this.held, this.latched]) {
           for (const t of [...set]) if (!isUser(t) && !this.channels.find(c => c.id === t)?.canTalk) set.delete(t)
@@ -909,7 +909,11 @@ export class CommsEngine {
   // everyone who may listen. Each is its own published track `music:<channel>`: 128 kbps stereo Opus with DTX
   // off (music must not be gated like speech). Received with the channel's own level knob and listen switch,
   // and ducked by IFB like the program feed.
+  /** A music-only channel (no talking). */
   isMusic(ch: string): boolean { return !!this.channels.find(c => c.id === ch)?.music }
+
+  /** A channel that can carry music: music-only, or a party line that also plays music (e.g. Program). */
+  hasMusic(ch: string): boolean { const c = this.channels.find(x => x.id === ch); return !!(c?.music || c?.withMusic) }
 
   private setMusicSenders(list: { channel: string; id: string; name: string }[] | undefined) {
     this.musicSenders = new Map()
@@ -965,7 +969,7 @@ export class CommsEngine {
   async startMusic(ch: string, source: MusicSource) {
     const ctx = this.ctx
     const c = this.channels.find(x => x.id === ch)
-    if (!c?.music || !c.canTalk || !ctx || this.opts?.gateway) return
+    if (!(c?.music || c?.withMusic) || !c.canTalk || !ctx || this.opts?.gateway) return
     this.stopMusic(ch, false)
     this.musicError = ''
     let stream: MediaStream | null = null

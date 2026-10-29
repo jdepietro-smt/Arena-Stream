@@ -113,7 +113,9 @@ export function createServer(
   // A music channel is a channel an operator (usually the A1) plays stereo music into, as its own track named
   // `music:<channel>`. Group grants decide who may send (talk) and who may hear (listen); listeners only ever
   // receive it while a permitted sender has it switched on. SFU only: the mesh has no separate per-purpose tracks.
+  // A music-only channel never carries talk; a party-line channel with `withMusic` carries both.
   const isMusic = id => !!sfu && !!dir.channel(id)?.music
+  const hasMusic = id => !!sfu && !!(dir.channel(id)?.music || dir.channel(id)?.withMusic)
   /** Who is sending music on the channels this peer may hear. */
   const musicSendersFor = L => [...peers.values()].flatMap(p =>
     [...p.musicOn].filter(ch => L.perms[ch]?.listen).map(ch => ({ channel: ch, id: p.id, name: p.user.name })))
@@ -203,7 +205,7 @@ export function createServer(
         p.talk = p.talk.filter(t => (t.startsWith('u:') ? peers.has(t.slice(2)) : p.perms[t]?.talk))
         // Lost the right to send on a music channel (or it stopped being one): switch it off for everyone.
         for (const ch of [...p.musicOn]) {
-          if (!isMusic(ch) || !p.perms[ch]?.talk) { p.musicOn.delete(ch); announceMusic(p, ch, false) }
+          if (!hasMusic(ch) || !p.perms[ch]?.talk) { p.musicOn.delete(ch); announceMusic(p, ch, false) }
         }
         send(p, { type: 'directory', channels: chans, listen: p.listen, musicSenders: musicSendersFor(p) })
         broadcast({ type: 'peer-state', id: p.id, talk: p.talk, listen: p.listen }, p.id)
@@ -229,7 +231,7 @@ export function createServer(
     const P = key ? [...peers.values()].find(p => p.musicKey === key) : null
     if (!P) return void res.writeHead(403, cors).end()
     const c = dir.channel(ch)
-    if (!c?.music || !c.source || !P.perms[ch]?.talk) return void res.writeHead(404, cors).end()
+    if (!(c?.music || c?.withMusic) || !c.source || !P.perms[ch]?.talk) return void res.writeHead(404, cors).end()
     const ac = new AbortController()
     res.on('close', () => ac.abort())
     try {
@@ -388,7 +390,7 @@ export function createServer(
         }
         case 'music': {
           const ch = String(msg.channel ?? '')
-          if (!isMusic(ch) || !me.perms[ch]?.talk) break
+          if (!hasMusic(ch) || !me.perms[ch]?.talk) break
           const on = !!msg.on
           if (on === me.musicOn.has(ch)) break
           if (on) me.musicOn.add(ch); else me.musicOn.delete(ch)

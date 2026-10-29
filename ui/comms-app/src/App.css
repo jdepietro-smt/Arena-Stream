@@ -160,3 +160,10 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .musiclink { display: flex; gap: 6px; }
 .musiclink input { flex: 1; min-width: 0; font-size: 11px; padding: 5px 6px; background: #0e1013; color: #cfd3da; border: 1px solid #2f343c; border-radius: 4px; }
 .musiclink .cap.sm { flex: 0 0 auto; padding: 5px 10px; }
+
+/* Sender controls: the link box with OPEN and START beside it */
+.musiccontrols { display: flex; flex-direction: column; gap: 8px; }
+.musiclink { display: flex; flex-direction: column; gap: 6px; }
+.musicbtns { display: flex; gap: 6px; }
+.musicbtns .cap.sm { flex: 1; min-width: 0; padding: 7px 4px; flex-direction: row; justify-content: center; gap: 6px; }
+.keymod:not(.music) .musiccontrols { padding-top: 6px; border-top: 1px solid #30343b; }

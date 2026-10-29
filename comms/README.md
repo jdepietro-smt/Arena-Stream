@@ -19,20 +19,26 @@ For users across NATs, add a TURN server (coturn) to `iceServers`.
 - **IFB:** mark a channel `"ifb": true` (optional `"duck"`, linear gain 0–1, default 0.15). While anyone talks on
   an IFB channel a user listens to, that user's program feed ducks (fast attack, 400 ms hold, slow release).
 
-## Music channels (setup music from the A1)
+## Music on a channel (setup music from the A1)
 
-A **music channel** carries stereo music from whoever may play it to everyone who may hear it, for example the A1's
-setup music over the crew's headsets. It works with any music app or service the A1 already uses: the audio is
-taken from the A1's own computer, so nothing about the service is integrated or intercepted by the server.
+Music can ride on a normal party-line channel, such as **Program**, or on a **music-only channel**. It carries stereo
+music from whoever may play it to everyone listening, for example the A1's setup music over the crew's headsets. It
+works with any music app or service the A1 already uses: the audio is taken from the A1's own computer, so nothing about
+the service is integrated or intercepted by the server.
 
-- **Set it up in the admin page:** Channels, Add channel, tick "Music channel". Then grant it to groups like any
-  other channel: **Talk = may send the music, Listen = hears it** (group and per-user overrides both work). It
-  appears on the panel as a MUSIC key in the channel's position, with its name and colour, and only for people
-  with access. Make as many as you like (a "Setup music" channel and a "Break music" channel, say).
-- **Sending:** people with Talk on it get a source picker and **START MUSIC**. In the desktop app, "Computer / tab
-  audio" captures everything the PC plays (Windows loopback), so no virtual cable is needed. In a browser it shares
-  a tab's audio (tick "Share audio" in the picker); an audio input device, such as a virtual cable or a mixer
-  return, can be chosen instead. Senders never receive their own audio back.
+- **On a party-line channel (recommended):** in the admin's Channels, edit the channel (say Program) and tick **Also play
+  music on this channel**. Its key keeps TALK / LISTEN / LATCH / CALL and gains a music row for people with Talk: the
+  source, the link box with **OPEN** and **START** beside it, and STOP while playing. Everyone listening to the channel
+  hears the music on it, with the channel's own level knob, and the LCD shows who is playing. An IFB channel cannot carry
+  music.
+- **Music-only channel:** tick **Music-only channel** instead for a dedicated MUSIC key with no talking: Talk = may send
+  it, Listen = hears it.
+- **Permissions are the normal group grants:** Talk on the channel = may start the music (and talk), Listen = hears it.
+  The Channels list shows who can start each music channel, or a red "nobody can start it yet: give a group Talk".
+  Several channels can carry music; each has its own senders and listeners.
+- **Sending:** in the desktop app, "Computer / tab audio" captures everything the PC plays (Windows loopback), so no virtual
+  cable is needed. In a browser it shares a tab's audio (tick "Share audio" in the picker); an audio input device, such as a
+  virtual cable or a mixer return, can be chosen instead. Senders never receive their own audio back.
 - **Stream or player link (optional):** one box in the channel's setup, sorted automatically by what you paste.
   - A **direct audio stream** (internet radio, Icecast, an MP3, AAC or Ogg stream, or an audio file URL) becomes the
     sender key's first source, **Channel stream**: press START MUSIC and it plays into the channel, with no computer

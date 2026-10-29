@@ -354,3 +354,54 @@ test('music stream relay: a web page behind the URL is refused with 415', async 
     await new Promise(r => page.close(r))
   }
 })
+
+test('party-line channel with music: talk keeps working and music routes by the same grants', async () => {
+  const subs = new Map()
+  const tracksBy = new Map()
+  const fake = {
+    url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async id => tracksBy.get(id) ?? [],
+    updateSubscriptions: async (id, sids, on) => {
+      const set = subs.get(id) ?? new Set()
+      for (const x of sids) on ? set.add(x) : set.delete(x)
+      subs.set(id, set)
+    },
+  }
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  const dir = srv.directory
+  const prog = dir.addChannel({ name: 'Program', withMusic: true, source: 'https://www.youtube.com/watch?v=abc' })
+  assert.deepEqual([prog.withMusic, prog.music, prog.link, prog.source], [true, undefined, 'https://www.youtube.com/watch?v=abc', undefined])
+  assert.equal(dir.addChannel({ name: 'Talkback', ifb: true, withMusic: true }).withMusic, undefined, 'an IFB cannot also carry music')
+  const grant = (group, g) => { const grp = dir.groups.find(x => x.name === group); dir.updateGroup(grp.id, { grants: { ...grp.grants, [prog.id]: g } }) }
+  grant('Audio', { talk: true, listen: true })
+  grant('Camera', { listen: true })
+  const until = async (fn, what) => { for (let i = 0; i < 100; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 10)) } assert.fail('timed out: ' + what) }
+  const has = (id, sid) => subs.get(id)?.has(sid) ?? false
+  try {
+    const mk = async (name, role) => { const c = await client(port); c.send({ type: 'join', name, role }); const w = await c.next(m => m.type === 'welcome'); return { c, id: w.id, w } }
+    const A1 = await mk('Ann', 'Audio')
+    const cam = await mk('Bob', 'Camera')
+    assert.equal(A1.w.channels.find(c => c.id === prog.id).withMusic, true)
+
+    // Talk on the channel still works (unlike a music-only channel).
+    A1.c.send({ type: 'state', talk: [prog.id], listen: [prog.id] })
+    const st = await cam.c.next(m => m.type === 'peer-state' && m.id === A1.id)
+    assert.deepEqual(st.talk, [prog.id])
+
+    // Music: published as music:<channel>, forwarded only while the sender has it on.
+    tracksBy.set(A1.id, [{ name: 'ch:' + prog.id, sid: 'A-talk' }, { name: 'music:' + prog.id, sid: 'A-music' }])
+    A1.c.send({ type: 'tracks' })
+    await until(() => has(cam.id, 'A-talk'), 'talk track forwarded')
+    assert.ok(!has(cam.id, 'A-music'), 'music off: not forwarded')
+    A1.c.send({ type: 'music', channel: prog.id, on: true })
+    await until(() => has(cam.id, 'A-music'), 'music forwarded once on')
+    cam.c.send({ type: 'music', channel: prog.id, on: true }) // listen-only user cannot start it
+    await new Promise(r => setTimeout(r, 100))
+    A1.c.send({ type: 'music', channel: prog.id, on: false })
+    await until(() => !has(cam.id, 'A-music'), 'music stops when switched off')
+    assert.ok(has(cam.id, 'A-talk'), 'the talk track is unaffected')
+    for (const x of [A1, cam]) x.c.ws.close()
+  } finally {
+    await srv.close()
+  }
+})
