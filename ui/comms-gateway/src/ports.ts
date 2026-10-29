@@ -344,9 +344,9 @@ export class GatewayRuntime {
       else p.outGain.connect(outDev.merger, 0, c.outCh - 1)
     } else if (c.source === 'asio') {
       if (!asio) { p.error = 'ASIO interface not available'; return }
-      if (c.inCh < 1 || !asio.splitter || c.inCh > asio.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${asio.devIn})`
+      if (c.inCh < 1) { /* no input routed */ } else if (!asio.splitter || c.inCh > asio.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${asio.devIn})`
       else asio.splitter.connect(p.inGain, c.inCh - 1)
-      if (c.outCh < 1 || !asio.merger || c.outCh > asio.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${asio.devOut})`
+      if (c.outCh < 1) { /* no output routed */ } else if (!asio.merger || c.outCh > asio.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${asio.devOut})`
       else p.outGain.connect(asio.merger, 0, c.outCh - 1)
     } else if (c.source === 'rtp') {
       const r = c.rtp

@@ -211,6 +211,8 @@ export default function App() {
           )}
         </section>
 
+        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} channels={engine.channels.filter(c => !c.music)} setCfg={setCfg} />}
+
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
         {cfg.ports.map(p => (
@@ -220,6 +222,65 @@ export default function App() {
         ))}
       </div>
     </div>
+  )
+}
+
+/** Dante-Controller-style routing: interface channels on one axis, Arena channels on the other. */
+function RoutingGrid({ cfg, asioDev, channels, setCfg }: {
+  cfg: GatewayConfig; asioDev: AsioDevice; channels: { id: string; name: string; color?: string }[]
+  setCfg: (f: (c: GatewayConfig | null) => GatewayConfig | null) => void
+}) {
+  const [tab, setTab] = useState<'in' | 'out'>('in')
+  const key = tab === 'in' ? 'inCh' : 'outCh'
+  const count = tab === 'in' ? asioDev.inputChannels : asioDev.outputChannels
+  const names = tab === 'in' ? cfg.asio.inputNames : cfg.asio.outputNames
+  const portFor = (ch: string) => cfg.ports.find(p => p.source === 'asio' && p.channel === ch)
+  const toggle = (ch: { id: string; name: string }, n: number) => setCfg(c => {
+    if (!c) return c
+    const ex = c.ports.find(p => p.source === 'asio' && p.channel === ch.id)
+    const next = ex?.[key] === n ? 0 : n // clicking the lit cell clears it
+    if (!ex) {
+      const p = { ...newPort(c.ports.length + 1), name: ch.name, source: 'asio' as SourceKind, channel: ch.id, inCh: 0, outCh: 0, [key]: next }
+      return { ...c, ports: [...c.ports, p] }
+    }
+    const upd = { ...ex, [key]: next }
+    // A port with nothing routed either way is dropped, so clearing the last cell leaves no empty card behind.
+    return { ...c, ports: upd.inCh < 1 && upd.outCh < 1 ? c.ports.filter(p => p !== ex) : c.ports.map(p => (p === ex ? upd : p)) }
+  })
+  return (
+    <section className="card">
+      <div className="bar">
+        <h2 className="lcd">Routing</h2>
+        <div className="tabs">
+          <button className={`btn sm ${tab === 'in' ? 'primary' : ''}`} onClick={() => setTab('in')}>Inputs → Arena</button>
+          <button className={`btn sm ${tab === 'out' ? 'primary' : ''}`} onClick={() => setTab('out')}>Arena → Outputs</button>
+        </div>
+      </div>
+      {channels.length === 0
+        ? <div className="hint">Connect to the server to see its channels. Each column is an Arena channel.</div>
+        : <>
+          <div className="hint">{tab === 'in'
+            ? 'Click where an interface input meets an Arena channel to send that input to the channel. One input per channel; an input can feed several channels.'
+            : 'Click where an Arena channel meets an interface output to play the channel out of that output. One output per channel.'}</div>
+          <div className="gridwrap">
+            <table className="rgrid">
+              <thead><tr><th className="corner">{tab === 'in' ? 'Interface input' : 'Interface output'}</th>
+                {channels.map(c => <th key={c.id} className="chead"><span>{c.name}</span></th>)}</tr></thead>
+              <tbody>
+                {Array.from({ length: count }, (_, i) => (
+                  <tr key={i}>
+                    <th className="rname"><b>{i + 1}</b> {names[i]?.trim() || (tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`)}</th>
+                    {channels.map(c => {
+                      const on = portFor(c.id)?.[key] === i + 1
+                      return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, i + 1)} title={`${names[i]?.trim() || i + 1} ${tab === 'in' ? '→' : '←'} ${c.name}`} /></td>
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>}
+    </section>
   )
 }
 
@@ -268,13 +329,15 @@ function PortCard({ cfg, live, engine, connected, mics, outs, asio, asioDev, dup
         {cfg.source === 'asio' && <>
           <label>Interface input
             <select value={cfg.inCh} onChange={e => onChange({ inCh: +e.target.value })}>
-              {!asioDev && <option value={cfg.inCh}>{cfg.inCh}</option>}
+              <option value={0}>— none —</option>
+              {!asioDev && cfg.inCh > 0 && <option value={cfg.inCh}>{cfg.inCh}</option>}
               {Array.from({ length: asioDev?.inputChannels ?? 0 }, (_, i) => <option key={i} value={i + 1}>{i + 1} · {asio.inputNames[i]?.trim() || `Input ${i + 1}`}</option>)}
             </select>
           </label>
           <label>Interface output
             <select value={cfg.outCh} onChange={e => onChange({ outCh: +e.target.value })}>
-              {!asioDev && <option value={cfg.outCh}>{cfg.outCh}</option>}
+              <option value={0}>— none —</option>
+              {!asioDev && cfg.outCh > 0 && <option value={cfg.outCh}>{cfg.outCh}</option>}
               {Array.from({ length: asioDev?.outputChannels ?? 0 }, (_, i) => <option key={i} value={i + 1}>{i + 1} · {asio.outputNames[i]?.trim() || `Output ${i + 1}`}</option>)}
             </select>
           </label>
