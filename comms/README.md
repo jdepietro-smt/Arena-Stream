@@ -135,6 +135,13 @@ anything beyond a trusted network, since passwords travel over the connection.
     give each port the pair it needs and channel 1 or 2 within it. The gateway runs in Electron, which uses the Windows
     audio endpoints (WASAPI), not ASIO, so it sees whatever Windows lists. Use 48 kHz in the interface's own control
     panel. Other output devices than the shared one carry two channels each.
+  - *Audio interface (ASIO, all channels):* the installed gateway can open an **ASIO driver** and use every channel of
+    it (a Scarlett 18i20 shows 26 in / 26 out; **Dante Virtual Soundcard** is an ASIO driver too, which is how you send
+    and receive Dante). Pick the driver and buffer size under *ASIO interface*, name each channel ("Mic 3 - Director"),
+    then choose an input and an output channel per port. ASIO runs in a helper process using a `node.exe` shipped inside
+    the installer (the `audify` native module cannot load inside Electron); `npm run build` copies the local Node for it.
+    Only one app can hold an ASIO driver at a time. After a fresh `npm install`, run `npm install-scripts approve audify`
+    and `npm rebuild audify` if npm blocked its prebuilt download.
   - *Network audio:* AES67-style RTP (L24/L16, 48 kHz, multicast or unicast, packet time 1 ms default) to and from
     a Dante-in-AES67-mode device or an IP card on the matrix. No PTP needed; clock drift is absorbed by a small
     receive buffer. Configure addresses/ports/payload type by hand (no SAP/SDP discovery yet).

@@ -48,3 +48,9 @@ input, select { min-width: 0; }
 .mwrap .ledmeter { height: 14px; }
 .ledmeter.out > div { background: linear-gradient(90deg, #0ea5e9 0 70%, #818cf8 70%); }
 .mwrap .thr { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; box-shadow: 0 0 6px rgba(255,255,255,.7); }
+
+/* ASIO channel names */
+details > summary { cursor: pointer; margin: 10px 0 4px; }
+details h3 { margin: 14px 0 6px; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; opacity: .7; }
+.chnames { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px 12px; }
+.chnames label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }

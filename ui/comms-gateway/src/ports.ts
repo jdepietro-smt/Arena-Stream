@@ -9,7 +9,7 @@
 
 import type { CommsEngine } from '@engine'
 
-export type SourceKind = 'device' | 'rtp' | 'tone'
+export type SourceKind = 'device' | 'asio' | 'rtp' | 'tone'
 export type PcmFormat = 'L24' | 'L16'
 
 export interface RtpCfg {
@@ -37,10 +37,22 @@ export interface PortCfg {
   inGainDb: number
   outGainDb: number
 }
+/** An ASIO driver the desktop app can open (a Focusrite, Dante Virtual Soundcard, ...). */
+export interface AsioDevice { id: number; name: string; inputChannels: number; outputChannels: number; sampleRates: number[] }
+export interface AsioOpenResult {
+  ok: boolean; error?: string; driver?: string
+  /** Channels the driver offers, and how many were opened for the ports in use. */
+  inputChannels?: number; outputChannels?: number; openedIn?: number; openedOut?: number
+  frames?: number; latencyFrames?: number
+}
+/** The ASIO interface: which driver, its buffer size, and your names for its channels (index 0 = channel 1). */
+export interface AsioCfg { deviceId: number; frames: number; inputNames: string[]; outputNames: string[] }
+interface AsioGraph { splitter: ChannelSplitterNode | null; chans: number; merger: ChannelMergerNode | null; outs: number; devIn: number; devOut: number }
 export interface DeviceCfg { inputId: string; outputId: string; inputChannels: number; outputChannels: number }
 export interface GatewayConfig {
   server: string; username: string; password: string; autoConnect: boolean
   device: DeviceCfg
+  asio: AsioCfg
   ports: PortCfg[]
 }
 
@@ -57,6 +69,7 @@ export const newPort = (n: number): PortCfg => ({
 export const defaultConfig = (): GatewayConfig => ({
   server: 'ws://localhost:8900', username: '', password: '', autoConnect: true,
   device: { inputId: '', outputId: '', inputChannels: 2, outputChannels: 2 },
+  asio: { deviceId: -1, frames: 256, inputNames: [], outputNames: [] },
   ports: [],
 })
 
@@ -64,6 +77,7 @@ export const defaultConfig = (): GatewayConfig => ({
 export function structuralKey(cfg: GatewayConfig): string {
   return JSON.stringify({
     d: cfg.device,
+    a: cfg.asio ? { d: cfg.asio.deviceId, f: cfg.asio.frames } : null,
     p: cfg.ports.map(p => ({
       id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, ii: p.inputId ?? '', oi: p.outputId ?? '',
       r: p.source === 'rtp' ? p.rtp : null,
@@ -78,6 +92,11 @@ declare global {
       setConfig(c: GatewayConfig): Promise<void>
       rtpOpen(id: string, c: RtpCfg): Promise<{ ok: boolean; error?: string }>
       rtpClose(id: string): Promise<void>
+      asioList(): Promise<{ ok: boolean; devices?: AsioDevice[]; error?: string }>
+      asioOpen(c: { deviceId: number; inputs: number; outputs: number; frames?: number }): Promise<AsioOpenResult>
+      asioClose(): Promise<void>
+      asioTx(planar: Float32Array): void
+      onAsioRx(cb: ((planar: Float32Array) => void) | null): void
       rtpTx(id: string, samples: Float32Array): void
       onRtpRx(cb: (id: string, s: Float32Array) => void): void
       onRtpStats(cb: (id: string, s: { packets: number; lost: number; late: number }) => void): void
@@ -139,6 +158,8 @@ export class GatewayRuntime {
   private builtKey = ''
   private building = false
   private rtpBound = false
+  asioInfo: AsioOpenResult | null = null
+  private asioNodes: AudioNode[] = []
 
   constructor(private engine: CommsEngine, private onChange: () => void) {}
 
@@ -217,6 +238,50 @@ export class GatewayRuntime {
         return outs.get(id)
       }
 
+      // ── ASIO: every channel of the interface, bridged by the desktop app ──
+      let asio: AsioGraph | undefined
+      const asioPorts = active.filter(p => p.source === 'asio')
+      if (asioPorts.length) {
+        const a = cfg.asio ?? defaultConfig().asio
+        if (!window.gw?.asioOpen) this.deviceError ||= 'ASIO needs the desktop app'
+        else if (a.deviceId < 0) this.deviceError ||= 'Pick an ASIO driver in the ASIO interface section'
+        else {
+          const wantIn = Math.max(0, ...asioPorts.map(q => q.inCh))
+          const wantOut = Math.max(0, ...asioPorts.map(q => q.outCh))
+          const res = await window.gw.asioOpen({ deviceId: a.deviceId, inputs: wantIn, outputs: wantOut, frames: a.frames })
+          this.asioInfo = res
+          if (!res.ok) this.deviceError ||= `ASIO: ${res.error}`
+          else {
+            await ctx.audioWorklet.addModule('asio-worklet.js')
+            asio = { splitter: null, chans: res.openedIn ?? 0, merger: null, outs: res.openedOut ?? 0, devIn: res.inputChannels ?? 0, devOut: res.outputChannels ?? 0 }
+            if ((res.openedIn ?? 0) > 0) {
+              const inNode = new AudioWorkletNode(ctx, 'asio-in', {
+                numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [res.openedIn!], processorOptions: { targetSamples: 512 },
+              })
+              window.gw.onAsioRx(buf => inNode.port.postMessage(buf, [buf.buffer]))
+              const splitter = ctx.createChannelSplitter(res.openedIn!)
+              inNode.connect(splitter)
+              asio.splitter = splitter
+              this.asioNodes.push(inNode, splitter)
+            }
+            if ((res.openedOut ?? 0) > 0) {
+              const outNode = new AudioWorkletNode(ctx, 'asio-out', {
+                numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: res.openedOut!,
+                channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: res.openedOut! },
+              })
+              outNode.port.onmessage = e => window.gw?.asioTx(e.data as Float32Array)
+              const merger = ctx.createChannelMerger(res.openedOut!)
+              merger.connect(outNode)
+              const sink = ctx.createGain()
+              sink.gain.value = 0 // keeps the node pulled by the graph without making any sound
+              outNode.connect(sink).connect(ctx.destination)
+              asio.merger = merger
+              this.asioNodes.push(outNode, sink, merger)
+            }
+          }
+        }
+      }
+
       const needRtp = active.some(p => p.source === 'rtp')
       if (needRtp) {
         if (!window.gw) this.deviceError ||= 'Network audio (RTP) needs the desktop app'
@@ -236,7 +301,7 @@ export class GatewayRuntime {
             inDev = await getIn(cfgPort.inputId || cfg.device.inputId)
             outDev = await getOut(cfgPort.outputId || cfg.device.outputId)
           }
-          await this.wirePort(ctx, p, inDev, outDev)
+          await this.wirePort(ctx, p, inDev, outDev, asio)
         } catch (e) { p.error = (e as Error).message }
       }
       this.deviceError = [...new Set([...inErr.values(), ...outErr.values()])].join('. ')
@@ -248,7 +313,7 @@ export class GatewayRuntime {
     }
   }
 
-  private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }) {
+  private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }, asio?: AsioGraph) {
     const c = p.cfg
     if (!c.channel) { p.error = 'Pick an Arena channel'; return }
 
@@ -277,6 +342,12 @@ export class GatewayRuntime {
       if (!outDev) p.error = p.error || 'Output device not available'
       else if (c.outCh < 1 || c.outCh > outDev.outs) p.error = p.error || `Output channel ${c.outCh} not available (this device has ${outDev.outs} outputs)`
       else p.outGain.connect(outDev.merger, 0, c.outCh - 1)
+    } else if (c.source === 'asio') {
+      if (!asio) { p.error = 'ASIO interface not available'; return }
+      if (c.inCh < 1 || !asio.splitter || c.inCh > asio.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${asio.devIn})`
+      else asio.splitter.connect(p.inGain, c.inCh - 1)
+      if (c.outCh < 1 || !asio.merger || c.outCh > asio.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${asio.devOut})`
+      else p.outGain.connect(asio.merger, 0, c.outCh - 1)
     } else if (c.source === 'rtp') {
       const r = c.rtp
       const res = await window.gw!.rtpOpen(c.id, r)
@@ -353,6 +424,13 @@ export class GatewayRuntime {
     this.streams = []
     for (const el of this.sinks) { el.pause(); el.srcObject = null }
     this.sinks = []
+    if (this.asioNodes.length || this.asioInfo) {
+      window.gw?.onAsioRx(null)
+      void window.gw?.asioClose()
+      for (const n of this.asioNodes) n.disconnect()
+      this.asioNodes = []
+      this.asioInfo = null
+    }
     this.builtKey = ''
   }
 }

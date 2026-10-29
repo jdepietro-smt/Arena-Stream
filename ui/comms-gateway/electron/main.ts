@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { RtpReceiver, RtpSender, RxStats } from './rtp'
 import { PcmFormat } from './rtp-codec'
+import { asioClose, registerAsio } from './asio'
 
 // An unattended gateway has no user to click before audio may start.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -104,6 +105,10 @@ ipcMain.handle('rtp:open', async (_e, id: string, c: RtpPortCfg) => {
 
 ipcMain.on('rtp:tx', (_e, id: string, samples: Float32Array) => { rtpPorts.get(id)?.tx?.push(samples) })
 ipcMain.handle('rtp:close', (_e, id: string) => { closeRtp(id) })
+
+// ── ASIO (every channel of an interface Windows only offers as a stereo pair) ──
+registerAsio(() => win)
+app.on('before-quit', asioClose)
 
 if (hasSingleLock) app.whenReady().then(createWindow)
 
