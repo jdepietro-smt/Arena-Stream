@@ -381,7 +381,7 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
           {calling
             ? <span className="blink">CALL ▸ {(caller || 'SOMEONE').toUpperCase()}</span>
             : alert ? <span className={`blink alert-text ${alert.level}`}>{alert.level === 'warn' ? '▲' : '●'} {alert.text.toUpperCase()}</span>
-            : engine.musicError && canTalk && carriesMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
+            : engine.musicError && ch.canMusic && carriesMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
             : talkers.length ? talkers.map(t => <span key={t}>{t.toUpperCase()}</span>)
             : musicNow.length ? <span>♪ {musicNow.join(', ').toUpperCase()}</span>
             : <span className="dim">{canTalk ? 'READY' : 'LISTEN ONLY'}</span>}
@@ -410,7 +410,7 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
           <i className={`led amber ${calling ? 'on blink' : ''}`} />CALL
         </button>
       </div>
-      {carriesMusic && canTalk && <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} />}
+      {carriesMusic && ch.canMusic && <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} />}
     </div>
   )
 }
@@ -516,16 +516,16 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
           <span className={`lg-tag ${senders.length ? 'live' : ''}`}>{senders.length ? 'ON AIR' : 'OFF'}</span>
         </div>
         <div className="lg-sub">
-          {engine.musicError && ch.canTalk ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
+          {engine.musicError && ch.canMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
             : engine.ducked && !sending && !ch.noDuck ? <span className="blink">DUCKED · IFB</span>
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
-            : ch.canTalk && chosen === 'display' && link.trim()
+            : ch.canMusic && chosen === 'display' && link.trim()
               ? <span className="blink">OPEN THE LINK, PLAY IT, THEN START</span>
-              : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
+              : <span className="dim">{ch.canMusic ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
         </div>
       </div>
-      {ch.canTalk ? (
+      {ch.canMusic ? (
         <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} meter />
       ) : (
         <>

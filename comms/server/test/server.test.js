@@ -355,7 +355,7 @@ test('music stream relay: a web page behind the URL is refused with 415', async 
   }
 })
 
-test('party-line channel with music: talk keeps working and music routes by the same grants', async () => {
+test('party-line channel with music: starting music is its own permission, separate from talk', async () => {
   const subs = new Map()
   const tracksBy = new Map()
   const fake = {
@@ -373,34 +373,77 @@ test('party-line channel with music: talk keeps working and music routes by the 
   assert.deepEqual([prog.withMusic, prog.music, prog.link, prog.source], [true, undefined, 'https://www.youtube.com/watch?v=abc', undefined])
   assert.equal(dir.addChannel({ name: 'Talkback', ifb: true, withMusic: true }).withMusic, undefined, 'an IFB cannot also carry music')
   const grant = (group, g) => { const grp = dir.groups.find(x => x.name === group); dir.updateGroup(grp.id, { grants: { ...grp.grants, [prog.id]: g } }) }
-  grant('Audio', { talk: true, listen: true })
+  // Nobody may talk on Program, but the A1 (Audio) may start music there; Camera only listens; Director can talk but not play music.
+  grant('Audio', { listen: true, music: true })
   grant('Camera', { listen: true })
+  grant('Director', { talk: true, listen: true })
   const until = async (fn, what) => { for (let i = 0; i < 100; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 10)) } assert.fail('timed out: ' + what) }
   const has = (id, sid) => subs.get(id)?.has(sid) ?? false
   try {
     const mk = async (name, role) => { const c = await client(port); c.send({ type: 'join', name, role }); const w = await c.next(m => m.type === 'welcome'); return { c, id: w.id, w } }
     const A1 = await mk('Ann', 'Audio')
     const cam = await mk('Bob', 'Camera')
-    assert.equal(A1.w.channels.find(c => c.id === prog.id).withMusic, true)
+    const dirr = await mk('Dee', 'Director')
+    const ch = w => w.channels.find(c => c.id === prog.id)
+    assert.deepEqual([ch(A1.w).canTalk, ch(A1.w).canListen, ch(A1.w).canMusic], [false, true, true], 'the A1 can start music without any Talk')
+    assert.deepEqual([ch(cam.w).canTalk, ch(cam.w).canMusic], [false, false])
+    assert.deepEqual([ch(dirr.w).canTalk, ch(dirr.w).canMusic], [true, false], 'Talk does not imply music on a party line')
 
-    // Talk on the channel still works (unlike a music-only channel).
-    A1.c.send({ type: 'state', talk: [prog.id], listen: [prog.id] })
-    const st = await cam.c.next(m => m.type === 'peer-state' && m.id === A1.id)
+    // Talk still works for someone who has it.
+    dirr.c.send({ type: 'state', talk: [prog.id], listen: [prog.id] })
+    const st = await cam.c.next(m => m.type === 'peer-state' && m.id === dirr.id)
     assert.deepEqual(st.talk, [prog.id])
 
-    // Music: published as music:<channel>, forwarded only while the sender has it on.
-    tracksBy.set(A1.id, [{ name: 'ch:' + prog.id, sid: 'A-talk' }, { name: 'music:' + prog.id, sid: 'A-music' }])
-    A1.c.send({ type: 'tracks' })
-    await until(() => has(cam.id, 'A-talk'), 'talk track forwarded')
+    // The A1's music routes only while on; the Director cannot switch music on even by publishing the track.
+    tracksBy.set(A1.id, [{ name: 'music:' + prog.id, sid: 'A-music' }])
+    tracksBy.set(dirr.id, [{ name: 'ch:' + prog.id, sid: 'D-talk' }, { name: 'music:' + prog.id, sid: 'D-music' }])
+    A1.c.send({ type: 'tracks' }); dirr.c.send({ type: 'tracks' })
+    await until(() => has(cam.id, 'D-talk'), 'the Director talk track is forwarded')
     assert.ok(!has(cam.id, 'A-music'), 'music off: not forwarded')
     A1.c.send({ type: 'music', channel: prog.id, on: true })
-    await until(() => has(cam.id, 'A-music'), 'music forwarded once on')
-    cam.c.send({ type: 'music', channel: prog.id, on: true }) // listen-only user cannot start it
+    dirr.c.send({ type: 'music', channel: prog.id, on: true })
+    await until(() => has(cam.id, 'A-music'), 'the A1 music forwarded once on')
     await new Promise(r => setTimeout(r, 100))
+    assert.ok(!has(cam.id, 'D-music'), 'a user without the Music permission cannot start music')
     A1.c.send({ type: 'music', channel: prog.id, on: false })
     await until(() => !has(cam.id, 'A-music'), 'music stops when switched off')
-    assert.ok(has(cam.id, 'A-talk'), 'the talk track is unaffected')
-    for (const x of [A1, cam]) x.c.ws.close()
+    assert.ok(has(cam.id, 'D-talk'), 'the talk track is unaffected')
+
+    // Taking the Music permission away stops it live.
+    A1.c.send({ type: 'music', channel: prog.id, on: true })
+    await until(() => has(cam.id, 'A-music'), 'on again')
+    grant('Audio', { listen: true })
+    await until(() => !has(cam.id, 'A-music'), 'revoking Music stops the music')
+    for (const x of [A1, cam, dirr]) x.c.ws.close()
+  } finally {
+    await srv.close()
+  }
+})
+
+test('SFU: a subscription LiveKit loses without telling us is repaired by the periodic resend', async () => {
+  const subs = new Map()
+  const tracksBy = new Map()
+  const fake = {
+    url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async id => tracksBy.get(id) ?? [],
+    updateSubscriptions: async (id, sids, on) => {
+      const set = subs.get(id) ?? new Set()
+      for (const x of sids) on ? set.add(x) : set.delete(x)
+      subs.set(id, set)
+    },
+  }
+  const srv = createServer({ ...cfg, pin: '', sfuHealMs: 20 }, { sfu: fake })
+  const port = await srv.listen(0)
+  const until = async (fn, what) => { for (let i = 0; i < 200; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 10)) } assert.fail('timed out: ' + what) }
+  try {
+    const mk = async (name, role) => { const c = await client(port); c.send({ type: 'join', name, role }); const w = await c.next(m => m.type === 'welcome'); return { c, id: w.id } }
+    const A = await mk('Ann', 'Director')
+    const B = await mk('Bob', 'Camera')
+    tracksBy.set(A.id, [{ name: 'ch:cam', sid: 'A-cam' }])
+    A.c.send({ type: 'tracks' })
+    await until(() => subs.get(B.id)?.has('A-cam'), 'subscribed at first')
+    subs.get(B.id).delete('A-cam') // LiveKit drops it silently
+    await until(() => subs.get(B.id)?.has('A-cam'), 'repaired by the periodic resend')
+    for (const x of [A, B]) x.c.ws.close()
   } finally {
     await srv.close()
   }

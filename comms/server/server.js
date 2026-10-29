@@ -75,7 +75,10 @@ export function createServer(
   const visibleChannels = perms => dir.channels
     .filter(c => perms[c.id] && (sfu || !c.music))
     // The stream URL stays on the server (it may carry credentials); clients only learn that one exists.
-    .map(({ source, ...c }) => ({ ...c, ...(source ? { stream: true } : {}), canTalk: perms[c.id].talk, canListen: perms[c.id].listen }))
+    .map(({ source, ...c }) => ({
+      ...c, ...(source ? { stream: true } : {}), canTalk: perms[c.id].talk, canListen: perms[c.id].listen,
+      canMusic: !!sfu && mayStartMusic(perms, c.id),
+    }))
   const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen })
   const titleOf = u => u.title || dir.group(u.groups?.[0])?.name || ''
   const send = (p, msg) => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)) }
@@ -116,6 +119,13 @@ export function createServer(
   // A music-only channel never carries talk; a party-line channel with `withMusic` carries both.
   const isMusic = id => !!sfu && !!dir.channel(id)?.music
   const hasMusic = id => !!sfu && !!(dir.channel(id)?.music || dir.channel(id)?.withMusic)
+  // Starting music has its own permission, so a channel nobody may talk on (Program) can still have an A1 who plays
+  // music there. On a music-only channel, Talk keeps meaning "may send" for existing setups.
+  function mayStartMusic(perms, id) {
+    const c = dir.channel(id)
+    const p = perms[id]
+    return !!p && !!(c?.music ? (p.music || p.talk) : c?.withMusic && p.music)
+  }
   /** Who is sending music on the channels this peer may hear. */
   const musicSendersFor = L => [...peers.values()].flatMap(p =>
     [...p.musicOn].filter(ch => L.perms[ch]?.listen).map(ch => ({ channel: ch, id: p.id, name: p.user.name })))
@@ -136,7 +146,7 @@ export function createServer(
           if (P.talk.includes(`u:${L.id}`)) want.add(sid)
         } else if (name.startsWith('music:')) {
           const ch = name.slice(6)
-          if (P.musicOn.has(ch) && P.perms[ch]?.talk && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
+          if (P.musicOn.has(ch) && mayStartMusic(P.perms, ch) && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
         } else if (name.startsWith('ch:')) {
           const ch = name.slice(3)
           if (P.perms[ch]?.talk && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
@@ -180,7 +190,15 @@ export function createServer(
   }
 
   // Self-heal: retry anything a transient LiveKit error left unsynced.
-  const healTimer = sfu ? setInterval(reconcileAll, 5_000) : null
+  // Every third tick it also forgets what it believes is subscribed and sends each listener the whole wanted set again
+  // (idempotent), so a subscription LiveKit lost without telling us is repaired within seconds instead of staying silent.
+  let healTick = 0
+  const healTimer = sfu
+    ? setInterval(() => {
+        if (++healTick % 3 === 0) for (const p of peers.values()) p.subs = new Set()
+        void reconcileAll()
+      }, cfg.sfuHealMs ?? 5_000)
+    : null
 
   // ── live directory changes ─────────────────────────────────────────────────
   // After any admin edit: drop disabled/removed users, and push each affected
@@ -205,7 +223,7 @@ export function createServer(
         p.talk = p.talk.filter(t => (t.startsWith('u:') ? peers.has(t.slice(2)) : p.perms[t]?.talk))
         // Lost the right to send on a music channel (or it stopped being one): switch it off for everyone.
         for (const ch of [...p.musicOn]) {
-          if (!hasMusic(ch) || !p.perms[ch]?.talk) { p.musicOn.delete(ch); announceMusic(p, ch, false) }
+          if (!hasMusic(ch) || !mayStartMusic(p.perms, ch)) { p.musicOn.delete(ch); announceMusic(p, ch, false) }
         }
         send(p, { type: 'directory', channels: chans, listen: p.listen, musicSenders: musicSendersFor(p) })
         broadcast({ type: 'peer-state', id: p.id, talk: p.talk, listen: p.listen }, p.id)
@@ -231,7 +249,7 @@ export function createServer(
     const P = key ? [...peers.values()].find(p => p.musicKey === key) : null
     if (!P) return void res.writeHead(403, cors).end()
     const c = dir.channel(ch)
-    if (!(c?.music || c?.withMusic) || !c.source || !P.perms[ch]?.talk) return void res.writeHead(404, cors).end()
+    if (!(c?.music || c?.withMusic) || !c.source || !mayStartMusic(P.perms, ch)) return void res.writeHead(404, cors).end()
     const ac = new AbortController()
     res.on('close', () => ac.abort())
     try {
@@ -390,7 +408,7 @@ export function createServer(
         }
         case 'music': {
           const ch = String(msg.channel ?? '')
-          if (!hasMusic(ch) || !me.perms[ch]?.talk) break
+          if (!hasMusic(ch) || !mayStartMusic(me.perms, ch)) break
           const on = !!msg.on
           if (on === me.musicOn.has(ch)) break
           if (on) me.musicOn.add(ch); else me.musicOn.delete(ch)

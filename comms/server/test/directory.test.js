@@ -12,9 +12,9 @@ test('effective permissions: union of groups, then per-user overrides', () => {
   const a = d.addGroup({ name: 'A', grants: { prod: { talk: true, listen: true } } })
   const b = d.addGroup({ name: 'B', grants: { prod: { listen: true }, eng: { listen: true } } })
   const u = { groups: [a.id, b.id], overrides: {} }
-  assert.deepEqual(d.effective(u), { prod: { talk: true, listen: true }, eng: { talk: false, listen: true } })
+  assert.deepEqual(d.effective(u), { prod: { talk: true, listen: true, music: false }, eng: { talk: false, listen: true, music: false } })
   u.overrides = { prod: { talk: false }, eng: { listen: false }, cam: { listen: true } }
-  assert.deepEqual(d.effective(u), { prod: { talk: false, listen: true }, cam: { talk: false, listen: true } })
+  assert.deepEqual(d.effective(u), { prod: { talk: false, listen: true, music: false }, cam: { talk: false, listen: true, music: false } })
 })
 
 test('deleting a channel or group cleans up everything that referenced it', () => {

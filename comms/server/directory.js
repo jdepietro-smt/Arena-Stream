@@ -90,10 +90,10 @@ export class Directory {
   }
   publicUser(u) { const { passwordHash, ...rest } = u; return rest }
 
-  /** { channelId: {talk, listen} } for every channel the user can use at all. */
+  /** { channelId: {talk, listen, music?} } for every channel the user can use at all. `music` = may start music there. */
   effective(user) {
     const out = {}
-    const slot = ch => (out[ch] ??= { talk: false, listen: false })
+    const slot = ch => (out[ch] ??= { talk: false, listen: false, music: false })
     for (const gid of user.groups ?? []) {
       const g = this.group(gid)
       if (!g) continue
@@ -101,14 +101,16 @@ export class Directory {
         if (!this.channel(ch)) continue
         if (gr.talk) slot(ch).talk = true
         if (gr.listen) slot(ch).listen = true
+        if (gr.music) slot(ch).music = true
       }
     }
     for (const [ch, ov] of Object.entries(user.overrides ?? {})) {
       if (!this.channel(ch)) continue
       if (typeof ov.talk === 'boolean') slot(ch).talk = ov.talk
       if (typeof ov.listen === 'boolean') slot(ch).listen = ov.listen
+      if (typeof ov.music === 'boolean') slot(ch).music = ov.music
     }
-    for (const ch of Object.keys(out)) if (!out[ch].talk && !out[ch].listen) delete out[ch]
+    for (const ch of Object.keys(out)) if (!out[ch].talk && !out[ch].listen && !out[ch].music) delete out[ch]
     return out
   }
 
@@ -194,7 +196,7 @@ export class Directory {
     const out = {}
     for (const [ch, g] of Object.entries(grants)) {
       if (!this.channel(ch)) continue
-      if (g?.talk || g?.listen) out[ch] = { talk: !!g.talk, listen: !!g.listen }
+      if (g?.talk || g?.listen || g?.music) out[ch] = { talk: !!g.talk, listen: !!g.listen, ...(g.music ? { music: true } : {}) }
     }
     return out
   }
@@ -260,6 +262,7 @@ export class Directory {
         const e = {}
         if (typeof o?.talk === 'boolean') e.talk = o.talk
         if (typeof o?.listen === 'boolean') e.listen = o.listen
+        if (typeof o?.music === 'boolean') e.music = o.music
         if (Object.keys(e).length) ov[ch] = e
       }
       out.overrides = ov

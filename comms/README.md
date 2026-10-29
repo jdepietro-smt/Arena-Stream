@@ -27,14 +27,16 @@ works with any music app or service the A1 already uses: the audio is taken from
 the service is integrated or intercepted by the server.
 
 - **On a party-line channel (recommended):** in the admin's Channels, edit the channel (say Program) and tick **Also play
-  music on this channel**. Its key keeps TALK / LISTEN / LATCH / CALL and gains a music row for people with Talk: the
+  music on this channel**. Its key keeps TALK / LISTEN / LATCH / CALL and gains a music row for people with the **Music** permission (no Talk needed): the
   source, the link box with **OPEN** and **START** beside it, and STOP while playing. Everyone listening to the channel
   hears the music on it, with the channel's own level knob, and the LCD shows who is playing. An IFB channel cannot carry
   music.
-- **Music-only channel:** tick **Music-only channel** instead for a dedicated MUSIC key with no talking: Talk = may send
-  it, Listen = hears it.
-- **Permissions are the normal group grants:** Talk on the channel = may start the music (and talk), Listen = hears it.
-  The Channels list shows who can start each music channel, or a red "nobody can start it yet: give a group Talk".
+- **Music-only channel:** tick **Music-only channel** instead for a dedicated MUSIC key with no talking: Music (or Talk) = may
+  send it, Listen = hears it.
+- **Music is its own permission,** next to Talk and Listen, in the group and per-user permission tables (a "Music" column
+  appears for channels that carry music). **Music = may start the music on that channel, with no Talk needed**, so nobody has
+  to be allowed to talk on Program for the A1 to play there. Listen = hears it. The Channels list shows who can start each
+  music channel, or a red "nobody can start it yet: give a group Music".
   Several channels can carry music; each has its own senders and listeners.
 - **Sending:** in the desktop app, "Computer / tab audio" captures everything the PC plays (Windows loopback), so no virtual
   cable is needed. In a browser it shares a tab's audio (tick "Share audio" in the picker); an audio input device, such as a
@@ -43,7 +45,7 @@ the service is integrated or intercepted by the server.
   - A **direct audio stream** (internet radio, Icecast, an MP3, AAC or Ogg stream, or an audio file URL) becomes the
     sender key's first source, **Channel stream**: press START MUSIC and it plays into the channel, with no computer
     audio sharing. The server relays the stream to the sender, so browsers do not hit cross-origin blocks, and the URL
-    itself is never sent to clients; only a connected user with Talk on the channel can pull it. If the stream freezes
+    itself is never sent to clients; only a connected user with the Music permission on the channel can pull it. If the stream freezes
     the sender reconnects by itself a few times, then stops with a message. HLS (.m3u8) is not supported.
   - A **music service's web page** (YouTube, Spotify, Apple Music, SoundCloud and similar) is not an audio stream and
     cannot be played by the server, so it is kept as a **player link**: the sender's MUSIC key (Computer / tab audio)
@@ -53,7 +55,7 @@ the service is integrated or intercepted by the server.
   - If a URL turns out to serve a web page anyway, the relay answers 415 and the key says so.
 - **Listening:** the key has the channel's level knob and a LISTEN/MUTED switch, remembered between sessions.
   The server only subscribes a listener to the track while an allowed sender has it on, and stops it the moment a
-  sender loses the Talk right.
+  sender loses the Music permission.
 - **Quality:** its own stereo track at 128 kbps Opus with DTX off, so music is not gated like speech.
 - **Ducking:** music plays in the same headset mix as the program feed and ducks under IFB talkers the same way
   (fast attack, 400 ms hold, slow release). In the music channel's setup, "Duck this music while someone talks on an
