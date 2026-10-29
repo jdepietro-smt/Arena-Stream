@@ -35,12 +35,16 @@ export DEBIAN_FRONTEND=noninteractive
 need_node=1
 if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 18 ]; then need_node=0; fi
 apt-get update -qq
-apt-get install -y -qq curl openssl nginx ca-certificates >/dev/null
+apt-get install -y -qq curl openssl nginx ca-certificates xz-utils >/dev/null
 if [ "$need_node" = 1 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
-  apt-get install -y -qq nodejs >/dev/null
+  # Official tarball into /usr/local: independent of apt, so it cannot clash with Ubuntu's old
+  # nodejs/libnode packages. /usr/local/bin comes before /usr/bin on PATH, so it wins.
+  case "$(uname -m)" in x86_64) NODE_ARCH=x64 ;; aarch64) NODE_ARCH=arm64 ;; *) echo "unsupported CPU $(uname -m)"; exit 1 ;; esac
+  NODE_VER=v20.18.1
+  curl -fsSL "https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$NODE_ARCH.tar.xz" | tar -xJ -C /usr/local --strip-components=1
+  hash -r
 fi
-echo "node $(node -v)"
+echo "node $(node -v)  npm $(npm -v)"
 
 step "LiveKit"
 if ! command -v livekit-server >/dev/null; then
