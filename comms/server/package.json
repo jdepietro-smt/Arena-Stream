@@ -1,0 +1,18 @@
+{
+  "name": "arena-comms-server",
+  "version": "0.1.0",
+  "description": "SMT Arena Comms — signaling, presence and channel routing server",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.19.2",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

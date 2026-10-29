@@ -1,0 +1,23 @@
+# Run from comms/:  docker compose -f deploy/docker-compose.yml up -d
+# Needs deploy/livekit.yaml edited and comms/server/comms.config.json with
+#   "media": { "mode": "sfu", "livekit": { "url": "wss://<public-host>:7880", "apiUrl": "http://livekit:7880",
+#              "apiKey": "...", "apiSecret": "...", "room": "arena" } }
+# Firewall: 8900/tcp (signaling), 7880/tcp (LiveKit), 7881/tcp, 7882/udp, 3478/udp, 5349/tcp.
+# Put TLS (wss://) in front of 8900 and 7880 for anything outside a trusted LAN.
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    network_mode: host          # simplest way to give WebRTC/TURN real UDP ports
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+      - ./certs:/certs:ro
+    restart: unless-stopped
+  comms:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    network_mode: host
+    volumes:
+      - ../server/comms.config.json:/app/comms.config.json:ro
+    restart: unless-stopped

@@ -34,3 +34,11 @@ Thumbs.db
 
 # Local Claude Code settings (personal, not shared)
 .claude/settings.local.json
+
+# Arena Comms
+ui/comms-app/node_modules/
+ui/comms-app/dist/
+ui/comms-app/dist-electron/
+ui/comms-app/release/
+comms/server/node_modules/
+comms/server/comms.config.json

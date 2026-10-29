@@ -1,0 +1,17 @@
+# LiveKit SFU + built-in TURN for Arena Comms. TEMPLATE: replace the placeholders,
+# then copy next to docker-compose.yml. Not exercised in this repo's tests (the
+# local test ran `livekit-server --dev`); verify TURN from a client on another network.
+port: 7880
+rtc:
+  tcp_port: 7881          # ICE/TCP fallback
+  udp_port: 7882          # media (open in the firewall)
+  use_external_ip: true
+keys:
+  CHANGE_ME_API_KEY: CHANGE_ME_LONG_RANDOM_SECRET   # must match media.livekit in comms.config.json
+turn:
+  enabled: true
+  domain: turn.example.com    # DNS name pointing at this host
+  tls_port: 5349              # TURN over TLS (needs the cert below)
+  udp_port: 3478
+  cert_file: /certs/fullchain.pem
+  key_file: /certs/privkey.pem

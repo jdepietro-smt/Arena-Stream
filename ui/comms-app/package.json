@@ -1,0 +1,45 @@
+{
+  "name": "arena-comms",
+  "version": "0.1.0",
+  "description": "SMT Arena Comms — network-based broadcast intercom",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite --port 5175",
+    "build": "tsc && vite build && tsc -p tsconfig.electron.json && electron-builder",
+    "preview": "vite preview",
+    "electron": "concurrently -k \"vite --port 5175\" \"wait-on tcp:5175 && tsc -p tsconfig.electron.json && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "livekit-client": "^2.23.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "build": {
+    "appId": "com.smt.arenacomms",
+    "productName": "Arena Comms",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable"
+    }
+  }
+}

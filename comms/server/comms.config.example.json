@@ -1,0 +1,75 @@
+{
+  "port": 8900,
+  "pin": "",
+  "iceServers": [
+    {
+      "urls": "stun:stun.l.google.com:19302"
+    }
+  ],
+  "media": {
+    "mode": "mesh",
+    "livekit": {
+      "url": "ws://localhost:7880",
+      "apiUrl": "http://localhost:7880",
+      "apiKey": "devkey",
+      "apiSecret": "secret",
+      "room": "arena"
+    }
+  },
+  "roles": [
+    "Producer",
+    "Director",
+    "TD",
+    "Camera",
+    "Audio",
+    "Graphics",
+    "Engineer",
+    "Talent",
+    "Guest"
+  ],
+  "program": {
+    "name": "PGM",
+    "whepUrl": "",
+    "roles": []
+  },
+  "channels": [
+    {
+      "id": "prod",
+      "name": "PRODUCTION",
+      "color": "#6366f1"
+    },
+    {
+      "id": "eng",
+      "name": "ENGINEERING",
+      "color": "#22c55e"
+    },
+    {
+      "id": "cam",
+      "name": "CAMERAS",
+      "color": "#f59e0b"
+    },
+    {
+      "id": "audio",
+      "name": "AUDIO",
+      "color": "#06b6d4"
+    },
+    {
+      "id": "gfx",
+      "name": "GRAPHICS",
+      "color": "#ec4899"
+    },
+    {
+      "id": "talent",
+      "name": "TALENT IFB",
+      "color": "#ef4444",
+      "roles": [
+        "Producer",
+        "Director",
+        "TD",
+        "Talent"
+      ],
+      "ifb": true,
+      "duck": 0.12
+    }
+  ]
+}
