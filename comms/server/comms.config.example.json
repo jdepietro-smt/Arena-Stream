@@ -35,6 +35,12 @@
     "whepUrl": "",
     "roles": []
   },
+  "music": {
+    "enabled": true,
+    "name": "MUSIC",
+    "senderRoles": ["Audio"],
+    "listenRoles": []
+  },
   "arena": {
     "apiUrl": "",
     "pollMs": 1000,

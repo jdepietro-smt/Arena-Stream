@@ -148,3 +148,9 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .alert-text.ok { color: #7cff7c; text-shadow: 0 0 6px rgba(124,255,124,.45); }
 .keymod.alert-warn { box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 0 0 1px #ff3b30, 0 0 20px -4px #ff3b30; }
 .keymod.alert-ok { box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 0 0 1px #34d058, 0 0 18px -6px #34d058; }
+
+/* Shared music feed key */
+.keymod.music.onair { box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 0 0 1px #f472b6, 0 0 18px -6px #f472b6; }
+.keymod.music.ducked { box-shadow: 0 0 0 1px #ffb020, 0 0 18px -6px #ffb020; }
+.keymod.music .cap.sm.on { color: #ffb4cf; }
+.musicsrc select { width: 100%; font-size: 11px; padding: 5px 6px; background: #0e1013; color: #cfd3da; border: 1px solid #2f343c; border-radius: 4px; }

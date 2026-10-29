@@ -10,6 +10,9 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 
 export interface Channel { id: string; name: string; color: string; ifb?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
+export interface MusicInfo { name: string; canSend: boolean; canHear: boolean }
+/** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
+export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' }
 export type StreamState = 'unknown' | 'live' | 'down' | 'stalled'
 export interface ArenaStream { id: string; name: string; channel: string | null; state: StreamState }
 export interface ArenaAlert { text: string; level: 'warn' | 'ok'; at: number; stream: string | null }
@@ -93,6 +96,20 @@ export class CommsEngine {
   /** channel id -> {from, at} of the latest call signal */
   calls = new Map<string, { from: string; at: number }>()
   serverRttMs: number | null = null
+  /** The shared music feed offered to me (null = unavailable or not permitted), and who is sending it now. */
+  music: MusicInfo | null = null
+  musicSenders = new Map<string, string>()
+  musicVolume = 0.6
+  musicMuted = false
+  musicSending = false
+  musicError = ''
+  private musicRx = new Map<string, { src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
+  private musicRxGain: GainNode | null = null
+  private musicIn: {
+    stream: MediaStream; src: MediaStreamAudioSourceNode; gain: GainNode
+    dest: MediaStreamAudioDestinationNode; an: AnalyserNode; buf: Float32Array<ArrayBuffer>
+  } | null = null
+  private musicPub: LocalTrackPublication | null = null
   /** Arena stream health, pushed by the server's stream monitor. */
   streams: ArenaStream[] = []
   /** Latest alert per channel ('' = not tied to a channel). */
@@ -216,6 +233,10 @@ export class CommsEngine {
     this.progGain = null
     this.progAnalyser = null
     this.progOut = null
+    this.stopMusic(false)
+    this.music = null
+    this.musicSenders.clear()
+    this.musicRxGain = null
     if (this.micIdleTimer) clearTimeout(this.micIdleTimer)
     this.micIdleTimer = null
     this.closeMic()
@@ -385,6 +406,7 @@ export class CommsEngine {
       }
     }
     if (this.progOut) this.progOut.volume = this.masterVolume
+    this.applyMusicGain()
   }
 
   // ── spatial audio ──────────────────────────────────────────────────────────
@@ -518,6 +540,8 @@ export class CommsEngine {
         this.channels = m.channels
         this.myName = m.me.name
         this.streams = m.streams ?? []
+        this.music = m.music ?? null
+        this.musicSenders = new Map(((m.music?.senders ?? []) as { id: string; name: string }[]).map(x => [x.id, x.name]))
         this.myTitle = m.me.title ?? ''
         this.isAdmin = !!m.me.admin
         this.ice = m.iceServers
@@ -578,6 +602,16 @@ export class CommsEngine {
         this.emit()
         break
       }
+      case 'music':
+        if (m.on) this.musicSenders.set(m.id, m.name); else this.musicSenders.delete(m.id)
+        this.emit()
+        break
+      case 'music-access':
+        this.music = m.music ?? null
+        this.musicSenders = new Map(((m.music?.senders ?? []) as { id: string; name: string }[]).map(x => [x.id, x.name]))
+        if (!this.music?.canSend && this.musicSending) this.stopMusic(false)
+        this.emit()
+        break
       case 'streams':
         this.streams = m.streams
         this.emit()
@@ -735,6 +769,7 @@ export class CommsEngine {
         this.gwSrc.set(track.sid, { src, hold })
         return
       }
+      if (pub.trackName === 'music') { this.attachMusic(track); return }
       const sid = track.sid ?? String(this.sfuVoices.size)
       const ch = pub.trackName.startsWith('ch:') ? pub.trackName.slice(3) : ''
       this.sfuVoices.get(sid) && this.dropVoice(this.sfuVoices.get(sid)!)
@@ -746,6 +781,8 @@ export class CommsEngine {
     room.on(RoomEvent.TrackUnsubscribed, track => {
       const g = track.sid ? this.gwSrc.get(track.sid) : undefined
       if (g) { g.src.disconnect(); g.hold.srcObject = null; this.gwSrc.delete(track.sid!); return }
+      const mu = track.sid ? this.musicRx.get(track.sid) : undefined
+      if (mu) { mu.src.disconnect(); mu.hold.srcObject = null; this.musicRx.delete(track.sid!); return }
       const v = track.sid ? this.sfuVoices.get(track.sid) : undefined
       if (v) { this.dropVoice(v); this.sfuVoices.delete(track.sid!) }
     })
@@ -758,6 +795,12 @@ export class CommsEngine {
       if (this.room !== room) return
       await this.syncSfuTracks()
       if (this.room !== room) return
+      if (this.musicSending && this.musicIn) {
+        // The server forgot my music state with the old session: publish again and re-announce.
+        this.musicPub = null
+        await this.publishMusic()
+        this.send({ type: 'music', on: true })
+      }
       this.emit()
     } catch (e) {
       if (this.room === room) this.fatal(`Media server unavailable: ${(e as Error).message}`)
@@ -810,6 +853,9 @@ export class CommsEngine {
     this.gwSrc.clear()
     this.sfuVoices.forEach(v => this.dropVoice(v))
     this.sfuVoices.clear()
+    for (const mu of this.musicRx.values()) { mu.src.disconnect(); mu.hold.srcObject = null }
+    this.musicRx.clear()
+    this.musicPub = null
     await room?.disconnect().catch(() => {})
   }
 
@@ -847,6 +893,149 @@ export class CommsEngine {
     this.applyRouting()
     this.send({ type: 'state', talk: [...this.talkSet], listen: [...this.listen] })
   }
+
+  // ── shared music feed ──────────────────────────────────────────────────────
+  // Receiving: stereo, own level knob, ducked by IFB like the program feed.
+  // Sending (permitted roles only): an input device or shared tab/system audio, published as stereo
+  // 128 kbps Opus with DTX off (music must not be gated like speech).
+  private attachMusic(track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
+    const ctx = this.ctx
+    if (!ctx || !track.sid) return
+    this.ensureMix()
+    if (!this.musicRxGain) {
+      this.musicRxGain = ctx.createGain()
+      this.musicRxGain.gain.value = 0
+      this.musicRxGain.connect(this.mix!)
+    }
+    const stream = new MediaStream([track.mediaStreamTrack])
+    const hold = new Audio() // Chromium only feeds remote WebRTC audio to WebAudio if an element holds it
+    hold.muted = true
+    hold.srcObject = stream
+    void hold.play().catch(() => {})
+    const src = ctx.createMediaStreamSource(stream)
+    src.connect(this.musicRxGain)
+    this.musicRx.set(track.sid, { src, hold })
+    this.applyMusicGain()
+  }
+
+  private applyMusicGain() {
+    if (!this.ctx || !this.musicRxGain) return
+    const target = this.musicMuted ? 0 : this.musicVolume * this.masterVolume * (this.ducked ? this.duckLevel : 1)
+    this.musicRxGain.gain.setTargetAtTime(target, this.ctx.currentTime, this.ducked ? 0.03 : 0.2)
+  }
+
+  setMusicVolume(v: number) {
+    this.musicVolume = Math.min(1, Math.max(0, v))
+    this.applyMusicGain()
+    this.emit()
+  }
+
+  setMusicMuted(m: boolean) {
+    this.musicMuted = m
+    this.applyMusicGain()
+    this.emit()
+  }
+
+  async startMusic(source: MusicSource) {
+    const ctx = this.ctx
+    if (!this.music?.canSend || !ctx || this.opts?.gateway) return
+    this.stopMusic(false)
+    this.musicError = ''
+    let stream: MediaStream
+    try {
+      if (source.kind === 'display') {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        } as DisplayMediaStreamOptions)
+        stream.getVideoTracks().forEach(t => { t.stop(); stream.removeTrack(t) }) // only the audio is wanted
+        if (!stream.getAudioTracks().length) throw new Error('No audio was shared. Choose a tab or screen and tick "Share audio".')
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: source.deviceId ? { exact: source.deviceId } : undefined,
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000,
+          },
+        })
+      }
+    } catch (e) {
+      this.musicError = (e as Error).message || 'Could not open the music source'
+      this.emit()
+      return
+    }
+    const src = ctx.createMediaStreamSource(stream)
+    const gain = ctx.createGain()
+    const dest = ctx.createMediaStreamDestination()
+    dest.channelCount = 2
+    dest.channelCountMode = 'explicit'
+    const an = ctx.createAnalyser()
+    an.fftSize = 1024
+    src.connect(gain)
+    gain.connect(dest)
+    gain.connect(an)
+    this.musicIn = { stream, src, gain, dest, an, buf: new Float32Array(an.fftSize) }
+    // Sharing stopped from the browser's own bar: switch the feed off.
+    stream.getAudioTracks()[0].addEventListener('ended', () => { if (this.musicIn?.stream === stream) this.stopMusic() })
+    this.musicSending = true
+    await this.publishMusic()
+    this.send({ type: 'music', on: true })
+    this.emit()
+  }
+
+  private async publishMusic() {
+    const room = this.room
+    const inp = this.musicIn
+    if (!room || room.state !== 'connected' || !inp) return
+    try {
+      // LiveKit stops local tracks when its connection closes, so after a reconnect the old output
+      // track is dead: feed a fresh one from the same source.
+      if (inp.dest.stream.getAudioTracks()[0]?.readyState === 'ended' && this.ctx) {
+        inp.gain.disconnect(inp.dest)
+        inp.dest = this.ctx.createMediaStreamDestination()
+        inp.dest.channelCount = 2
+        inp.dest.channelCountMode = 'explicit'
+        inp.gain.connect(inp.dest)
+      }
+      if (this.musicPub?.track) await room.localParticipant.unpublishTrack(this.musicPub.track, false).catch(() => {})
+      this.musicPub = await room.localParticipant.publishTrack(inp.dest.stream.getAudioTracks()[0], {
+        name: 'music', source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
+        audioPreset: { maxBitrate: 128_000 },
+      })
+      this.send({ type: 'tracks' })
+    } catch (e) {
+      this.musicError = `Could not publish the music feed: ${(e as Error).message}`
+      this.stopMusic()
+    }
+  }
+
+  stopMusic(notify = true) {
+    const inp = this.musicIn
+    this.musicIn = null
+    if (this.musicSending && notify) this.send({ type: 'music', on: false })
+    this.musicSending = false
+    if (inp) {
+      inp.src.disconnect()
+      inp.gain.disconnect()
+      inp.stream.getTracks().forEach(t => t.stop())
+    }
+    const pub = this.musicPub
+    this.musicPub = null
+    if (pub?.track && this.room) void this.room.localParticipant.unpublishTrack(pub.track, false).catch(() => {})
+    if (notify) this.emit()
+  }
+
+  /** RMS level 0..1 of the music I am sending, for a meter. */
+  musicSendLevel(): number {
+    const inp = this.musicIn
+    if (!inp) return 0
+    inp.an.getFloatTimeDomainData(inp.buf)
+    let sum = 0
+    for (const v of inp.buf) sum += v * v
+    return Math.min(1, Math.sqrt(sum / inp.buf.length) * 2.5)
+  }
+
+  /** True while anyone is sending the shared music feed. */
+  get musicActive(): boolean { return this.musicSenders.size > 0 }
 
   // ── program feed (WHEP) + IFB ducking ──────────────────────────────────────
   private ensureProgGraph() {
@@ -981,6 +1170,7 @@ export class CommsEngine {
   }
 
   private applyProgramGain() {
+    this.applyMusicGain()
     if (!this.progGain || !this.ctx) return
     const target = this.programMuted ? 0 : this.programVolume * (this.ducked ? this.duckLevel : 1)
     // Fast attack so the IFB cuts through immediately; slower release avoids pumping.

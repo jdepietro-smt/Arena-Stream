@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { CommsEngine, Channel, PeerInfo, httpBase } from './lib/comms'
+import { CommsEngine, type MusicSource, Channel, PeerInfo, httpBase } from './lib/comms'
 import './kp.css'
 import './App.css'
 
@@ -37,6 +37,7 @@ interface Prefs {
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
+  musicSrc: string; musicVol: number
 }
 
 function loadPrefs(): Prefs {
@@ -48,7 +49,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true,
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrc: 'display', musicVol: 0.6,
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -105,6 +106,9 @@ export default function App() {
     engine.setSpatial({ on: prefs.spatial, spread: prefs.spread, overrides: prefs.pans })
   }, [engine, prefs.spatial, prefs.spread, prefs.pans])
 
+  // Remember the music level between sessions.
+  useEffect(() => { engine.setMusicVolume(prefs.musicVol) }, [engine]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Release the microphone while idle (OS mic indicator off); it reopens on the first press.
   useEffect(() => {
     engine.micIdleRelease = prefs.micRelease
@@ -151,7 +155,7 @@ export default function App() {
                  error={engine.status === 'error' ? engine.error : ''} onJoin={join} />
         : engine.status === 'connecting'
           ? <div className="center muted">Connecting…</div>
-          : <Intercom engine={engine} name={engine.myName || prefs.name}
+          : <Intercom engine={engine} name={engine.myName || prefs.name} prefs={prefs} patch={patch} devices={devices}
                       onAudio={() => setShowSettings(v => !v)}
                       onAdmin={engine.isAdmin ? () => window.open(`${httpBase(prefs.url)}/admin`, '_blank') : undefined} />}
       {showSettings && inSession &&
@@ -225,7 +229,10 @@ function Login({ prefs, patch, devices, info, infoErr, password, setPassword, er
 }
 
 // ── Intercom surface ─────────────────────────────────────────────────────────
-function Intercom({ engine, name, onAudio, onAdmin }: { engine: CommsEngine; name: string; onAudio: () => void; onAdmin?: () => void }) {
+function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin }: {
+  engine: CommsEngine; name: string; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+  onAudio: () => void; onAdmin?: () => void
+}) {
   const roster = engine.roster()
   const keyed = useRef(new Map<string, string>()) // keyboard code -> target
 
@@ -283,6 +290,7 @@ function Intercom({ engine, name, onAudio, onAdmin }: { engine: CommsEngine; nam
         )}
         <div className="keys">
           {engine.program && <ProgramKey engine={engine} />}
+          {engine.music && <MusicKey engine={engine} prefs={prefs} patch={patch} devices={devices} />}
           {engine.channels.map((c, i) => <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} />)}
         </div>
         {dock}
@@ -388,6 +396,69 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
   )
 }
 
+/**
+ * Shared music feed (e.g. the A1's setup music). Everyone who may hear it gets a level knob and a mute;
+ * roles allowed to send also get a source picker and a start/stop key. It is ducked by IFB like the program.
+ */
+function MusicKey({ engine, prefs, patch, devices }: {
+  engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
+}) {
+  const m = engine.music!
+  const senders = [...engine.musicSenders.values()]
+  const sending = engine.musicSending
+  const canShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+  const inputs = devices.filter(d => d.kind === 'audioinput')
+  const source = (): MusicSource => (prefs.musicSrc === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: prefs.musicSrc })
+  return (
+    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: '#f472b6' }}>
+      <div className="lcd legend">
+        <div className="lg-top">
+          <span className="lg-num">♪</span>
+          <span className="lg-name">{m.name}</span>
+          <span className={`lg-tag ${senders.length ? 'live' : ''}`}>{senders.length ? 'ON AIR' : 'OFF'}</span>
+        </div>
+        <div className="lg-sub">
+          {engine.musicError ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
+            : engine.ducked && !sending ? <span className="blink">DUCKED · IFB</span>
+            : sending ? <span>SENDING TO THE ROOM</span>
+            : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
+            : <span className="dim">{m.canSend ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}
+        </div>
+      </div>
+      {m.canSend ? (
+        <>
+          <label className="musicsrc">
+            <select value={prefs.musicSrc} disabled={sending} onChange={e => patch({ musicSrc: e.target.value })} title="Where the music comes from">
+              {canShare && <option value="display">Computer / tab audio (share)</option>}
+              {inputs.map((d, i) => <option key={d.deviceId} value={d.deviceId}>{d.label || `Input ${i + 1}`}</option>)}
+            </select>
+          </label>
+          <div className="pgm-mid">
+            <LedMeter engine={engine} source="music" />
+          </div>
+          <div className="subkeys one">
+            <button className={`cap sm ${sending ? 'on' : ''}`} onClick={() => (sending ? engine.stopMusic() : void engine.startMusic(source()))}>
+              <i className={`led ${sending ? 'red on' : 'green'}`} />{sending ? 'STOP MUSIC' : 'START MUSIC'}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="pgm-mid">
+            <Knob label="LEVEL" value={engine.musicVolume} min={0} max={1}
+              onChange={v => { engine.setMusicVolume(v); patch({ musicVol: v }) }} readout={`${Math.round(engine.musicVolume * 100)}`} />
+          </div>
+          <div className="subkeys one">
+            <button className="cap sm" onClick={() => engine.setMusicMuted(!engine.musicMuted)}>
+              <i className={`led green ${engine.musicMuted ? '' : 'on'}`} />{engine.musicMuted ? 'MUTED' : 'LISTEN'}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function Person({ p, engine }: { p: PeerInfo; engine: CommsEngine }) {
   const target = `u:${p.id}`
   const direct = engine.talkSet.has(target)
@@ -446,12 +517,12 @@ function Knob({ label, value, min, max, onChange, readout, mini }: {
 }
 
 /** Segmented LED level bar for the microphone or the program feed. */
-function LedMeter({ engine, source }: { engine: CommsEngine; source: 'mic' | 'program' }) {
+function LedMeter({ engine, source }: { engine: CommsEngine; source: 'mic' | 'program' | 'music' }) {
   const bar = useRef<HTMLDivElement>(null)
   useEffect(() => {
     let raf = 0
     const tick = () => {
-      const level = source === 'mic' ? engine.micLevel() : engine.programLevel()
+      const level = source === 'mic' ? engine.micLevel() : source === 'music' ? engine.musicSendLevel() : engine.programLevel()
       if (bar.current) bar.current.style.width = `${Math.round(level * 100)}%`
       raf = requestAnimationFrame(tick)
     }

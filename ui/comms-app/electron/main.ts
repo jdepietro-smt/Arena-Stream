@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, desktopCapturer, session } from 'electron'
 import * as path from 'path'
 
 app.setName('Arena Comms')
@@ -50,6 +50,14 @@ if (hasSingleLock) {
     // Only the microphone (and speaker selection) is needed.
     session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => {
       cb(permission === 'media')
+    })
+    // The A1's music source: "Computer / tab audio" captures everything this PC plays (Windows loopback),
+    // so any music app works without a virtual audio cable. Only the audio is used by the app.
+    session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+      desktopCapturer.getSources({ types: ['screen'] }).then(
+        sources => callback({ video: sources[0], audio: 'loopback' }),
+        () => callback({}),
+      )
     })
     createWindow()
   })

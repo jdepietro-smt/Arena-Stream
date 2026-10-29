@@ -96,6 +96,25 @@ export function createServer(
       })
     : null
 
+  // ── Music feed ─────────────────────────────────────────────────────────────
+  // An operator (usually the A1) plays music into the room as its own stereo track, named `music`.
+  // Who may send and who may hear it is decided here; clients only ever receive it while a
+  // permitted sender has it switched on. SFU only: the mesh has no separate per-purpose tracks.
+  const musicCfg = cfg.music ?? {}
+  const musicEnabled = !!sfu && musicCfg.enabled !== false
+  const inRoles = (user, roles) => {
+    const names = (user.groups ?? []).map(id => dir.group(id)?.name?.toLowerCase())
+    return roles.some(r => names.includes(String(r).toLowerCase()))
+  }
+  const musicAccess = user => {
+    if (!musicEnabled) return null
+    const canSend = inRoles(user, musicCfg.senderRoles ?? ['Audio'])
+    const canHear = canSend || !musicCfg.listenRoles?.length || inRoles(user, musicCfg.listenRoles)
+    return canHear ? { name: musicCfg.name || 'MUSIC', canSend, canHear } : null
+  }
+  const musicSenders = () => [...peers.values()].filter(p => p.musicOn).map(p => ({ id: p.id, name: p.user.name }))
+  const sendToMusicListeners = msg => { for (const p of peers.values()) if (p.music?.canHear) send(p, msg) }
+
   // ── SFU subscription routing ───────────────────────────────────────────────
   // A listener may receive a publisher's `ch:<id>` track iff the publisher may
   // talk there, the listener may listen there and has it switched on, and the
@@ -107,6 +126,8 @@ export function createServer(
       for (const [name, sid] of P.tracks) {
         if (name === 'direct') {
           if (P.talk.includes(`u:${L.id}`)) want.add(sid)
+        } else if (name === 'music') {
+          if (P.musicOn && P.music?.canSend && L.music?.canHear) want.add(sid)
         } else if (name.startsWith('ch:')) {
           const ch = name.slice(3)
           if (P.perms[ch]?.talk && L.perms[ch]?.listen && L.listen.includes(ch)) want.add(sid)
@@ -140,6 +161,9 @@ export function createServer(
   const refreshTracks = async P => {
     try {
       P.tracks = new Map((await sfu.listTracks(P.id)).map(t => [t.name, t.sid]))
+      // P announces its tracks only once it is connected to the SFU. Whatever was subscribed for it before that
+      // point never took effect (it was not in the room yet), so forget it and subscribe from scratch.
+      P.subs = new Set()
       await reconcileAll()
     } catch (e) {
       console.warn(`[arena-comms] track refresh for ${P.user.name} failed: ${e.message}`)
@@ -174,6 +198,15 @@ export function createServer(
         broadcast({ type: 'peer-state', id: p.id, talk: p.talk, listen: p.listen }, p.id)
       }
       if (nameChanged) broadcast({ type: 'peer-update', id: p.id, name: user.name, role: p.title })
+      const music = musicAccess(user)
+      if (JSON.stringify(music) !== JSON.stringify(p.music)) {
+        p.music = music
+        if (p.musicOn && !music?.canSend) {
+          p.musicOn = false
+          sendToMusicListeners({ type: 'music', id: p.id, name: user.name, on: false })
+        }
+        send(p, { type: 'music-access', music: music ? { ...music, senders: musicSenders() } : null })
+      }
     }
     void reconcileAll()
   }
@@ -258,6 +291,7 @@ export function createServer(
         id: randomUUID(), ws, user, title: titleOf(user), perms, talk: [], alive: true,
         listen: chans.filter(c => c.canListen).map(c => c.id),
         tracks: new Map(), subs: new Set(), chansJson: JSON.stringify(chans),
+        music: musicAccess(user), musicOn: false,
       }
       clearTimeout(joinTimer)
       const others = [...peers.values()].map(publicInfo)
@@ -275,6 +309,7 @@ export function createServer(
         iceServers: cfg.iceServers,
         channels: chans,
         program: progOk ? { name: prog.name || 'PGM', whepUrl: prog.whepUrl } : null,
+        music: joined.music ? { ...joined.music, senders: musicSenders() } : null,
         listen: joined.listen,
         streams: arena ? arena.snapshot() : [],
         peers: others,
@@ -312,6 +347,15 @@ export function createServer(
           if (to && to !== me) send(to, { type: 'signal', from: me.id, data: msg.data })
           break
         }
+        case 'music': {
+          if (!me.music?.canSend) break
+          const on = !!msg.on
+          if (on === me.musicOn) break
+          me.musicOn = on
+          sendToMusicListeners({ type: 'music', id: me.id, name: me.user.name, on })
+          void reconcileAll()
+          break
+        }
         case 'tracks':
           // Only a trigger: the real track list is read back from LiveKit.
           if (sfu) void refreshTracks(me)
@@ -336,6 +380,7 @@ export function createServer(
       clearTimeout(joinTimer)
       if (me && peers.get(me.id) === me) {
         peers.delete(me.id)
+        if (me.musicOn) sendToMusicListeners({ type: 'music', id: me.id, name: me.user.name, on: false })
         broadcast({ type: 'peer-leave', id: me.id })
       }
     })

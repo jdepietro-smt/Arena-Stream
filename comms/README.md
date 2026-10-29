@@ -19,6 +19,26 @@ For users across NATs, add a TURN server (coturn) to `iceServers`.
 - **IFB:** mark a channel `"ifb": true` (optional `"duck"`, linear gain 0–1, default 0.15). While anyone talks on
   an IFB channel a user listens to, that user's program feed ducks (fast attack, 400 ms hold, slow release).
 
+## Music feed (setup music from the A1)
+
+An operator, usually the A1, plays music into the room and everyone who may hear it gets a **MUSIC** key with
+its own level knob and mute. It works with any music app or service the A1 already uses: the audio is taken
+from the A1's own computer, so nothing about the service is integrated or intercepted by the server.
+
+- **Who sends / hears:** `music.senderRoles` (default `["Audio"]`) are the group names that get the start/stop
+  key and source picker; `music.listenRoles` limits who hears it (empty = everyone). Senders always hear the
+  key's state but never receive their own audio back. Edit the group names in the admin page; changes apply live.
+- **Sources:** in the desktop app, "Computer / tab audio" captures everything the PC plays (Windows loopback), so
+  no virtual cable is needed. In a browser it shares a tab's audio (tick "Share audio" in the picker); an
+  audio input device, such as a virtual cable or a mixer return, can be chosen instead.
+- **Quality:** its own stereo track at 128 kbps Opus with DTX off, so music is not gated like speech.
+- **Ducking:** it ducks under IFB talkers exactly like the program feed.
+- **Needs the SFU** (`media.mode: "sfu"`). The mesh has no separate per-purpose tracks, so no MUSIC key is offered.
+- The server only subscribes listeners to the track while an allowed sender has it switched on; a user who is not
+  in `senderRoles` cannot turn it on, even by publishing a track of that name.
+- Whether a personal streaming account may be played to a crew this way is a licensing question for the
+  service's own terms; business versions of those services exist for that use.
+
 ## Media modes: mesh vs SFU (+ TURN)
 
 `media.mode` in the server config picks the transport; the UI is identical.
