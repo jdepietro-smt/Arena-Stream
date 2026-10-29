@@ -1,6 +1,9 @@
 {
   "port": 8900,
   "pin": "",
+  "auth": {
+    "mode": "accounts"
+  },
   "iceServers": [
     {
       "urls": "stun:stun.l.google.com:19302"

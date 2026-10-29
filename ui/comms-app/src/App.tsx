@@ -1,17 +1,34 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { CommsEngine, Channel, PeerInfo } from './lib/comms'
+import { CommsEngine, Channel, PeerInfo, httpBase } from './lib/comms'
 import './App.css'
 
-const DEFAULT_ROLES = ['Producer', 'Director', 'TD', 'Camera', 'Audio', 'Graphics', 'Engineer', 'Talent', 'Guest']
+interface ServerInfo { auth: 'accounts' | 'open'; pin: boolean; groups: { id: string; name: string }[] }
+
+/** Ask the server how to sign in, so the form matches (accounts vs. open join). */
+function useServerInfo(url: string) {
+  const [info, setInfo] = useState<ServerInfo | null>(null)
+  const [err, setErr] = useState('')
+  useEffect(() => {
+    setInfo(null); setErr('')
+    const ctl = new AbortController()
+    const t = setTimeout(() => {
+      fetch(`${httpBase(url)}/info`, { signal: ctl.signal })
+        .then(r => r.json()).then(setInfo)
+        .catch(e => { if (!ctl.signal.aborted) setErr(`Can't reach the server (${(e as Error).message})`) })
+    }, 350)
+    return () => { clearTimeout(t); ctl.abort() }
+  }, [url])
+  return { info, err }
+}
 
 interface Prefs {
-  url: string; name: string; role: string; pin: string
+  url: string; username: string; name: string; group: string; pin: string
   micId: string; spkId: string; echoCancel: boolean; muted: string[]; programUrl: string
 }
 
 function loadPrefs(): Prefs {
   const d: Prefs = {
-    url: 'ws://localhost:8900', name: '', role: 'Producer', pin: '',
+    url: 'ws://localhost:8900', username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
@@ -24,6 +41,8 @@ export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [showSettings, setShowSettings] = useState(false)
+  const [password, setPassword] = useState('')
+  const { info, err: infoErr } = useServerInfo(prefs.url)
 
   const patch = (p: Partial<Prefs>) => setPrefs(prev => {
     const next = { ...prev, ...p }
@@ -53,8 +72,10 @@ export default function App() {
   }, [engine])
 
   const join = () => {
+    if (!info) return
+    const group = info.groups.find(g => g.id === prefs.group)?.id ?? info.groups[0]?.id
     void engine.join(
-      { url: prefs.url.trim(), name: prefs.name, role: prefs.role, pin: prefs.pin,
+      { url: prefs.url.trim(), auth: info.auth, username: prefs.username, password, name: prefs.name, group, pin: prefs.pin,
         micId: prefs.micId || undefined, echoCancel: prefs.echoCancel,
         programUrl: prefs.programUrl },
       prefs.muted,
@@ -71,16 +92,18 @@ export default function App() {
         <div className="title-right">
           <StatusPill engine={engine} />
           {inSession && <MicMeter engine={engine} />}
+          {inSession && engine.isAdmin && <button className="btn ghost" onClick={() => window.open(`${httpBase(prefs.url)}/admin`, '_blank')}>Admin</button>}
           {inSession && <button className="btn ghost" onClick={() => setShowSettings(s => !s)}>Audio</button>}
           {inSession && <button className="btn danger" onClick={() => engine.leave()}>Leave</button>}
         </div>
       </div>
       {!inSession && engine.status !== 'connecting'
-        ? <Login prefs={prefs} patch={patch} devices={devices} roles={engine.roles.length ? engine.roles : DEFAULT_ROLES}
+        ? <Login prefs={prefs} patch={patch} devices={devices} info={info} infoErr={infoErr}
+                 password={password} setPassword={setPassword}
                  error={engine.status === 'error' ? engine.error : ''} onJoin={join} />
         : engine.status === 'connecting'
           ? <div className="center muted">Connecting…</div>
-          : <Intercom engine={engine} name={prefs.name} />}
+          : <Intercom engine={engine} name={engine.myName || prefs.name} />}
       {showSettings && inSession &&
         <Settings engine={engine} prefs={prefs} patch={patch} devices={devices} onClose={() => setShowSettings(false)} />}
     </div>
@@ -88,33 +111,45 @@ export default function App() {
 }
 
 // ── Login ────────────────────────────────────────────────────────────────────
-function Login({ prefs, patch, devices, roles, error, onJoin }: {
+function Login({ prefs, patch, devices, info, infoErr, password, setPassword, error, onJoin }: {
   prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
-  roles: string[]; error: string; onJoin: () => void
+  info: ServerInfo | null; infoErr: string; password: string; setPassword: (v: string) => void
+  error: string; onJoin: () => void
 }) {
   const mics = devices.filter(d => d.kind === 'audioinput')
-  const ok = prefs.name.trim() && prefs.url.trim()
+  const accounts = info?.auth === 'accounts'
+  const ok = !!info && prefs.url.trim() && (accounts ? prefs.username.trim() && password : prefs.name.trim())
   return (
     <form className="login" onSubmit={e => { e.preventDefault(); if (ok) onJoin() }}>
       <h1>Join the intercom</h1>
       <label>Server<input value={prefs.url} onChange={e => patch({ url: e.target.value })} placeholder="ws://host:8900" /></label>
-      <div className="row">
-        <label>Your name<input value={prefs.name} onChange={e => patch({ name: e.target.value })} autoFocus /></label>
-        <label>Role
-          <select value={prefs.role} onChange={e => patch({ role: e.target.value })}>
-            {roles.map(r => <option key={r}>{r}</option>)}
-          </select>
-        </label>
-      </div>
-      <div className="row">
-        <label>PIN<input type="password" value={prefs.pin} onChange={e => patch({ pin: e.target.value })} placeholder="if required" /></label>
-        <label>Microphone
-          <select value={prefs.micId} onChange={e => patch({ micId: e.target.value })}>
-            <option value="">System default</option>
-            {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>)}
-          </select>
-        </label>
-      </div>
+      {infoErr && <div className="error">{infoErr}</div>}
+      {!info && !infoErr && <div className="muted">Contacting server…</div>}
+      {accounts && (
+        <div className="row">
+          <label>Username<input value={prefs.username} onChange={e => patch({ username: e.target.value })} autoFocus autoComplete="username" /></label>
+          <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" /></label>
+        </div>
+      )}
+      {info && !accounts && (
+        <>
+          <div className="row">
+            <label>Your name<input value={prefs.name} onChange={e => patch({ name: e.target.value })} autoFocus /></label>
+            <label>Role
+              <select value={prefs.group} onChange={e => patch({ group: e.target.value })}>
+                {info.groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </label>
+          </div>
+          {info.pin && <label>PIN<input type="password" value={prefs.pin} onChange={e => patch({ pin: e.target.value })} /></label>}
+        </>
+      )}
+      <label>Microphone
+        <select value={prefs.micId} onChange={e => patch({ micId: e.target.value })}>
+          <option value="">System default</option>
+          {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Microphone'}</option>)}
+        </select>
+      </label>
       <label className="check">
         <input type="checkbox" checked={prefs.echoCancel} onChange={e => patch({ echoCancel: e.target.checked })} />
         Echo cancellation &amp; noise suppression <span className="muted">(turn off for headset-only use)</span>
@@ -166,6 +201,7 @@ function Intercom({ engine, name }: { engine: CommsEngine; name: string }) {
 
 function Strip({ ch, index, engine, name }: { ch: Channel; index: number; engine: CommsEngine; name: string }) {
   const listening = engine.listen.has(ch.id)
+  const { canTalk, canListen } = ch
   const talking = engine.talkSet.has(ch.id)
   const latched = engine.latched.has(ch.id)
   const talkers = engine.talkersOn(ch.id, name)
@@ -185,16 +221,18 @@ function Strip({ ch, index, engine, name }: { ch: Channel; index: number; engine
       </div>
       <button
         className={`talk ${talking ? 'on' : ''}`}
+        disabled={!canTalk}
+        title={canTalk ? undefined : 'Listen only'}
         onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); engine.press(ch.id) }}
         onPointerUp={() => engine.release(ch.id)}
         onPointerCancel={() => engine.release(ch.id)}
       >TALK</button>
       <div className="strip-foot">
-        <button className={`mini ${listening ? 'on' : ''}`} onClick={() => engine.setListen(ch.id, !listening)}>
-          {listening ? 'LISTEN' : 'MUTED'}
+        <button className={`mini ${listening ? 'on' : ''}`} disabled={!canListen} onClick={() => engine.setListen(ch.id, !listening)}>
+          {!canListen ? 'NO LISTEN' : listening ? 'LISTEN' : 'MUTED'}
         </button>
-        <button className={`mini ${latched ? 'latched' : ''}`} onClick={() => engine.toggleLatch(ch.id)}>LATCH</button>
-        <button className="mini" onClick={() => engine.callChannel(ch.id)}>CALL</button>
+        <button className={`mini ${latched ? 'latched' : ''}`} disabled={!canTalk} onClick={() => engine.toggleLatch(ch.id)}>LATCH</button>
+        <button className="mini" disabled={!canTalk} onClick={() => engine.callChannel(ch.id)}>CALL</button>
       </div>
     </div>
   )

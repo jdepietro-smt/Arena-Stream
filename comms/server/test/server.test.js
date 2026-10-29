@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { WebSocket } from 'ws'
 import { createServer, loadConfig } from '../server.js'
 
-const cfg = { ...loadConfig('/nonexistent.json'), pin: 'sekret' }
+const cfg = { ...loadConfig('/nonexistent.json'), dataFile: null, auth: { mode: 'open' }, pin: 'sekret' }
 
 async function client(port) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`)

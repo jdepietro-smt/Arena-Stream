@@ -1,4 +1,4 @@
-import { Room, RoomEvent, Track, RemoteAudioTrack } from 'livekit-client'
+import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 'livekit-client'
 
 // Arena Comms engine: signaling socket + WebRTC audio mesh + talk/listen routing.
 //
@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack } from 'livekit-client'
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; duck?: number }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 export type ProgramState = 'off' | 'connecting' | 'live' | 'error'
 export interface PeerInfo { id: string; name: string; role: string; talk: string[]; listen: string[] }
@@ -17,10 +17,16 @@ export type Status = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'err
 export interface JoinOptions {
   url: string
   name: string
-  role: string
+  /** 'accounts': sign in with username/password. 'open': pick a name and a group. */
+  auth: 'accounts' | 'open'
+  username?: string
+  password?: string
+  group?: string
   pin: string
   micId?: string
   echoCancel: boolean
+  /** Gateway mode: no microphone/speakers; audio enters and leaves through per-channel buses (SFU only). */
+  gateway?: boolean
   /** Overrides the server-provided program feed (WHEP URL). */
   programUrl?: string
 }
@@ -51,12 +57,18 @@ export function tuneOpus(sdp: string): string {
   return sdp.replace(m[0], `${m[0]}\r\na=fmtp:${pt} ${params}`)
 }
 
+/** ws://host:8900 -> http://host:8900 (for /info and the admin page). */
+export function httpBase(wsUrl: string): string {
+  return wsUrl.trim().replace(/^ws(s?):/i, 'http$1:').replace(/\/+$/, '')
+}
+
 export class CommsEngine {
   status: Status = 'idle'
   error = ''
   myId = ''
   channels: Channel[] = []
-  roles: string[] = []
+  myName = ''
+  isAdmin = false
   listen = new Set<string>()
   held = new Set<string>()
   latched = new Set<string>()
@@ -94,6 +106,11 @@ export class CommsEngine {
   private stopped = true
   private room: Room | null = null
   private sfuGains = new Map<string, GainNode>()
+  private rxBus = new Map<string, GainNode>()
+  private txBus = new Map<string, GainNode>()
+  private gwSrc = new Map<string, { src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
+  private sfuPubs = new Map<string, LocalTrackPublication>()
+  private sfuSync: Promise<void> = Promise.resolve()
   private sfuEls = new Map<string, SinkAudio>()
   private duckLevel = 1
   private duckTimer: ReturnType<typeof setTimeout> | null = null
@@ -114,6 +131,23 @@ export class CommsEngine {
   subscribe = (fn: () => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn) } }
   getVersion = () => this.version
   private emit() { this.version++; this.listeners.forEach(f => f()) }
+
+  /** The audio context (gateways wire ports and devices straight into it). */
+  get audioContext(): AudioContext | null { return this.ctx }
+
+  /** Gateway: mix of everyone talking on this channel, as heard by the gateway. */
+  channelRx(ch: string): GainNode {
+    let g = this.rxBus.get(ch)
+    if (!g) { g = this.ctx!.createGain(); this.rxBus.set(ch, g) }
+    return g
+  }
+
+  /** Gateway: connect a port's input here; it is sent to the channel while the gateway is keyed (press/release). */
+  channelTx(ch: string): GainNode {
+    let g = this.txBus.get(ch)
+    if (!g) { g = this.ctx!.createGain(); this.txBus.set(ch, g) }
+    return g
+  }
 
   get talkSet(): Set<string> { return new Set([...this.held, ...this.latched]) }
   get me(): { id: string } { return { id: this.myId } }
@@ -153,6 +187,8 @@ export class CommsEngine {
     this.micSrc = null
     this.ctx?.close().catch(() => {})
     this.ctx = null
+    this.rxBus.clear()
+    this.txBus.clear()
     this.micGain = null
     this.analyser = null
     this.held.clear()
@@ -184,6 +220,11 @@ export class CommsEngine {
   private async initAudio(micId: string | undefined, echoCancel: boolean) {
     if (!this.ctx) this.ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 })
     await this.ctx.resume()
+    if (this.opts?.gateway) {
+      // Gateways take audio from ports, not a mic; keep a silent micGain so shared code paths still work.
+      if (!this.micGain) this.micGain = this.ctx.createGain()
+      return
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: micId ? { exact: micId } : undefined,
@@ -253,7 +294,9 @@ export class CommsEngine {
     let ws: WebSocket
     try { ws = new WebSocket(o.url) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
     this.ws = ws
-    ws.onopen = () => this.send({ type: 'join', name: o.name, role: o.role, pin: o.pin })
+    ws.onopen = () => this.send(o.auth === 'accounts'
+      ? { type: 'join', username: o.username, password: o.password }
+      : { type: 'join', name: o.name, group: o.group, pin: o.pin })
     ws.onmessage = ev => {
       try { this.onMessage(JSON.parse(ev.data as string)) } catch (e) { console.error('[comms] bad message', e) }
     }
@@ -273,7 +316,8 @@ export class CommsEngine {
       case 'welcome': {
         this.myId = m.id
         this.channels = m.channels
-        this.roles = m.roles
+        this.myName = m.me.name
+        this.isAdmin = !!m.me.admin
         this.ice = m.iceServers
         // Listen to everything the role may access except channels I muted before.
         this.listen = new Set((m.listen as string[]).filter(id => !this.wantMuted.has(id)))
@@ -282,6 +326,10 @@ export class CommsEngine {
         this.held.clear()
         this.pushState()
         this.media = m.media === 'sfu' ? 'sfu' : 'mesh'
+        if (this.opts?.gateway && this.media !== 'sfu') {
+          this.fatal('Gateway needs the server in SFU media mode (each channel must be its own track)')
+          break
+        }
         if (this.media === 'sfu') {
           for (const info of m.peers as PeerInfo[]) this.pendingInfo.set(info.id, info)
           void this.connectSfu(m.livekit)
@@ -289,7 +337,7 @@ export class CommsEngine {
           for (const info of m.peers as PeerInfo[]) this.createPeer(info, true)
         }
         const url = this.opts?.programUrl?.trim() || m.program?.whepUrl
-        this.program = url ? { name: m.program?.name ?? 'PGM', url } : null
+        this.program = url && !this.opts?.gateway ? { name: m.program?.name ?? 'PGM', url } : null
         if (this.program && !this.progWanted) this.startProgram()
         this.updateDuck()
         this.statsTimer = setInterval(() => this.pollStats(), 2000)
@@ -310,6 +358,24 @@ export class CommsEngine {
         this.dropPeer(m.id)
         this.emit()
         break
+      case 'directory': {
+        // An admin changed this user's channels/permissions: adopt the server's view.
+        this.channels = m.channels
+        this.listen = new Set(m.listen as string[])
+        for (const set of [this.held, this.latched]) {
+          for (const t of [...set]) if (!isUser(t) && !this.channels.find(c => c.id === t)?.canTalk) set.delete(t)
+        }
+        this.applyRouting()
+        if (this.media === 'sfu') void this.syncSfuTracks()
+        this.emit()
+        break
+      }
+      case 'peer-update': {
+        const info = this.peers.get(m.id)?.info ?? this.pendingInfo.get(m.id)
+        if (info) { info.name = m.name; info.role = m.role }
+        this.emit()
+        break
+      }
       case 'peer-state': {
         const p = this.peers.get(m.id)
         const info = p?.info ?? this.pendingInfo.get(m.id)
@@ -449,8 +515,21 @@ export class CommsEngine {
     await this.closeSfu()
     const room = new Room({ adaptiveStream: false, dynacast: false, stopLocalTrackOnUnpublish: false })
     this.room = room
-    room.on(RoomEvent.TrackSubscribed, track => {
+    room.on(RoomEvent.TrackSubscribed, (track, pub) => {
       if (track.kind !== Track.Kind.Audio) return
+      if (this.opts?.gateway) {
+        // Route into the channel's receive bus (mixing everyone talking there); direct calls are ignored.
+        if (!pub.trackName.startsWith('ch:') || !track.sid) return
+        const ms = new MediaStream([track.mediaStreamTrack])
+        const hold = new Audio() // Chromium only feeds remote WebRTC audio to WebAudio if an element holds it
+        hold.muted = true
+        hold.srcObject = ms
+        void hold.play().catch(() => {})
+        const src = ctx.createMediaStreamSource(ms)
+        src.connect(this.channelRx(pub.trackName.slice(3)))
+        this.gwSrc.set(track.sid, { src, hold })
+        return
+      }
       const el = track.attach() as SinkAudio
       el.volume = this.masterVolume
       if (this.spkId) el.setSinkId?.(this.spkId).catch(() => {})
@@ -459,6 +538,8 @@ export class CommsEngine {
       if (rx) try { rx.jitterBufferTarget = 40 } catch { /* older Chromium */ }
     })
     room.on(RoomEvent.TrackUnsubscribed, track => {
+      const g = track.sid ? this.gwSrc.get(track.sid) : undefined
+      if (g) { g.src.disconnect(); g.hold.srcObject = null; this.gwSrc.delete(track.sid!); return }
       track.detach().forEach(e => e.remove())
       if (track.sid) this.sfuEls.delete(track.sid)
     })
@@ -469,26 +550,48 @@ export class CommsEngine {
     try {
       await room.connect(lk.url, lk.token, { autoSubscribe: false })
       if (this.room !== room) return
-      const targets = [...this.channels.map(c => `ch:${c.id}`), 'direct']
-      for (const name of targets) {
-        const gain = ctx.createGain()
-        gain.gain.value = 0
-        const dest = ctx.createMediaStreamDestination()
-        this.micGain.connect(gain)
-        gain.connect(dest)
-        this.sfuGains.set(name, gain)
-        await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
-          name, source: Track.Source.Unknown, dtx: true, red: false,
-          audioPreset: { maxBitrate: 32_000 },
-        })
-      }
+      await this.syncSfuTracks()
       if (this.room !== room) return
-      this.send({ type: 'tracks' })
-      this.applyRouting()
       this.emit()
     } catch (e) {
       if (this.room === room) this.fatal(`Media server unavailable: ${(e as Error).message}`)
     }
+  }
+
+  /** Publish a track for every channel I may talk on (plus `direct`); retire the rest. Serialised. */
+  private syncSfuTracks(): Promise<void> {
+    this.sfuSync = this.sfuSync.then(async () => {
+      const room = this.room
+      const ctx = this.ctx
+      if (!room || !ctx || !this.micGain || room.state !== 'connected') return
+      const want = new Set(['direct', ...this.channels.filter(c => c.canTalk).map(c => `ch:${c.id}`)])
+      for (const [name, gain] of [...this.sfuGains]) {
+        if (want.has(name)) continue
+        const pub = this.sfuPubs.get(name)
+        if (pub?.track) await room.localParticipant.unpublishTrack(pub.track, false).catch(() => {})
+        gain.disconnect()
+        this.sfuGains.delete(name)
+        this.sfuPubs.delete(name)
+      }
+      for (const name of want) {
+        if (this.sfuGains.has(name)) continue
+        const gain = ctx.createGain()
+        gain.gain.value = 0
+        const dest = ctx.createMediaStreamDestination()
+        if (!this.opts?.gateway) this.micGain.connect(gain)
+        else if (name !== 'direct') this.channelTx(name.slice(3)).connect(gain)
+        gain.connect(dest)
+        this.sfuGains.set(name, gain)
+        this.sfuPubs.set(name, await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
+          name, source: Track.Source.Unknown, dtx: true, red: false,
+          audioPreset: { maxBitrate: 32_000 },
+        }))
+      }
+      if (this.room !== room) return
+      this.send({ type: 'tracks' })
+      this.applyRouting()
+    }).catch(e => console.warn('[comms] track sync failed', e))
+    return this.sfuSync
   }
 
   private async closeSfu() {
@@ -496,6 +599,9 @@ export class CommsEngine {
     this.room = null
     for (const g of this.sfuGains.values()) g.disconnect()
     this.sfuGains.clear()
+    this.sfuPubs.clear()
+    for (const g of this.gwSrc.values()) { g.src.disconnect(); g.hold.srcObject = null }
+    this.gwSrc.clear()
     this.sfuEls.forEach(e => e.remove())
     this.sfuEls.clear()
     await room?.disconnect().catch(() => {})
@@ -713,17 +819,21 @@ export class CommsEngine {
   }
 
   // ── user actions ───────────────────────────────────────────────────────────
-  press(target: string) { this.held.add(target); this.pushState(); this.emit() }
+  private mayTalk(target: string) { return isUser(target) || !!this.channels.find(c => c.id === target)?.canTalk }
+
+  press(target: string) { if (!this.mayTalk(target)) return; this.held.add(target); this.pushState(); this.emit() }
   release(target: string) { this.held.delete(target); this.pushState(); this.emit() }
   releaseAll() { if (this.held.size) { this.held.clear(); this.pushState(); this.emit() } }
 
   toggleLatch(target: string) {
+    if (!this.mayTalk(target)) return
     if (!this.latched.delete(target)) this.latched.add(target)
     this.pushState()
     this.emit()
   }
 
   setListen(ch: string, on: boolean) {
+    if (on && !this.channels.find(c => c.id === ch)?.canListen) return
     if (on) this.listen.add(ch); else this.listen.delete(ch)
     this.pushState()
     this.emit()
@@ -740,7 +850,7 @@ export class CommsEngine {
 
   private beep() {
     const ctx = this.ctx
-    if (!ctx) return
+    if (!ctx || this.opts?.gateway) return // a gateway's destination is a multichannel interface, not speakers
     const t = ctx.currentTime
     for (let i = 0; i < 3; i++) {
       const osc = ctx.createOscillator()

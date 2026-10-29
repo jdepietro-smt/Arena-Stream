@@ -42,3 +42,12 @@ ui/comms-app/dist-electron/
 ui/comms-app/release/
 comms/server/node_modules/
 comms/server/comms.config.json
+
+# Arena Comms runtime data (users, password hashes)
+comms/server/data/
+
+# Arena Comms Gateway
+ui/comms-gateway/node_modules/
+ui/comms-gateway/dist/
+ui/comms-gateway/dist-electron/
+ui/comms-gateway/release/

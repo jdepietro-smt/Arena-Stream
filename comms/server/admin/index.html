@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Arena Comms Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { --bg:#07070d; --surface:#0c0c18; --panel:#0f0f1c; --lift:#141425; --border:rgba(255,255,255,.08);
+    --accent:#6366f1; --accent2:#818cf8; --ok:#22c55e; --danger:#ef4444; --warn:#f59e0b; --text:#e8eaf0; --muted:#64748b;
+    --font:'Inter','Segoe UI',system-ui,sans-serif; --mono:Consolas,monospace; }
+  body { font-family:var(--font); background:var(--bg); color:var(--text); font-size:13px; -webkit-font-smoothing:antialiased; min-height:100vh; }
+  button,input,select { font:inherit; color:inherit; }
+  header { display:flex; align-items:center; gap:18px; padding:0 20px; height:48px; border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:2; }
+  .brand { letter-spacing:.14em; font-size:12px; } .brand b { color:var(--accent2); }
+  nav { display:flex; gap:4px; flex:1; }
+  nav button { background:none; border:0; padding:6px 12px; border-radius:6px; color:var(--muted); cursor:pointer; }
+  nav button.on { background:var(--lift); color:var(--text); }
+  main { max-width:980px; margin:0 auto; padding:22px 20px 60px; }
+  h2 { font-size:15px; font-weight:600; } .bar { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .sub { color:var(--muted); font-size:12px; margin-top:3px; }
+  .btn { border:1px solid var(--border); background:var(--lift); border-radius:6px; padding:6px 12px; cursor:pointer; }
+  .btn:hover { border-color:var(--accent); } .btn.primary { background:var(--accent); border-color:var(--accent); font-weight:600; }
+  .btn.danger:hover { border-color:var(--danger); color:var(--danger); } .btn.sm { padding:3px 8px; font-size:12px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  th { text-align:left; font-weight:500; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); padding:9px 12px; border-bottom:1px solid var(--border); }
+  td { padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:middle; } tr:last-child td { border-bottom:0; }
+  tr.row { cursor:pointer; } tr.row:hover td { background:var(--lift); }
+  .chip { display:inline-block; padding:1px 8px; margin:1px 3px 1px 0; border-radius:99px; background:var(--lift); color:var(--accent2); font-size:11px; }
+  .chip.warn { color:var(--warn); } .chip.bad { color:var(--danger); } .chip.ok { color:var(--ok); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#334155; margin-right:6px; } .dot.on { background:var(--ok); }
+  .swatch { display:inline-block; width:12px; height:12px; border-radius:3px; vertical-align:-2px; margin-right:8px; }
+  .muted { color:var(--muted); } .mono { font-family:var(--mono); font-size:12px; }
+  .center { min-height:100vh; display:grid; place-items:center; }
+  form.card { width:340px; display:flex; flex-direction:column; gap:12px; }
+  label { display:flex; flex-direction:column; gap:5px; font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+  label.check { flex-direction:row; align-items:center; gap:8px; text-transform:none; letter-spacing:0; font-size:13px; color:var(--text); }
+  input[type=text],input[type=password],input[type=number],input:not([type]),select { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:8px 10px; text-transform:none; letter-spacing:0; font-size:13px; }
+  input:focus,select:focus { outline:0; border-color:var(--accent); }
+  dialog { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:12px; padding:20px; width:min(560px,94vw); margin:auto; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  dialog form { display:flex; flex-direction:column; gap:14px; max-height:82vh; overflow:auto; }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; } .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; } .actions .sp { flex:1; }
+  .matrix { width:100%; } .matrix td, .matrix th { padding:6px 10px; } .matrix select { padding:4px 6px; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#3b1219; color:#fecaca; border:1px solid var(--danger); padding:10px 16px; border-radius:8px; z-index:9; }
+  .toast.ok { background:#10281a; color:#bbf7d0; border-color:var(--ok); }
+  fieldset { border:1px solid var(--border); border-radius:8px; padding:10px 12px; } legend { font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); padding:0 6px; }
+  .grid { display:flex; flex-wrap:wrap; gap:6px 16px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const S = { token: sessionStorage.getItem('arena-comms-admin'), state: null, tab: 'users', timer: null }
+const $app = document.getElementById('app')
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag)
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+    else if (k === 'class') el.className = v
+    else if (v === true) el.setAttribute(k, '')
+    else if (v !== false && v != null) el.setAttribute(k, v)
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : document.createTextNode(String(k)))
+  return el
+}
+
+function toast(msg, ok) {
+  const t = h('div', { class: 'toast' + (ok ? ' ok' : '') }, msg)
+  document.body.append(t); setTimeout(() => t.remove(), 3500)
+}
+
+async function api(method, path, body) {
+  const r = await fetch('/admin/api/' + path, {
+    method, headers: { 'content-type': 'application/json', ...(S.token ? { authorization: 'Bearer ' + S.token } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const data = await r.json().catch(() => ({}))
+  if (r.status === 401 && path !== 'login') { signOut(); throw new Error('Session expired — sign in again') }
+  if (!r.ok) throw new Error(data.error || 'Request failed (' + r.status + ')')
+  return data
+}
+
+const act = async (fn, okMsg) => {
+  try { await fn(); if (okMsg) toast(okMsg, true); await refresh() } catch (e) { toast(e.message) }
+}
+
+function signOut() {
+  S.token = null; sessionStorage.removeItem('arena-comms-admin'); clearInterval(S.timer); render()
+}
+
+async function refresh() {
+  S.state = await api('GET', 'state')
+  render()
+}
+
+// ── login ────────────────────────────────────────────────────────────────────
+function login() {
+  const u = h('input', { autofocus: true, autocomplete: 'username' }), p = h('input', { type: 'password', autocomplete: 'current-password' })
+  const err = h('div', { class: 'muted' })
+  return h('div', { class: 'center' }, h('form', { class: 'card', onsubmit: async e => {
+    e.preventDefault()
+    try {
+      const r = await api('POST', 'login', { username: u.value, password: p.value })
+      S.token = r.token; sessionStorage.setItem('arena-comms-admin', r.token)
+      await refresh(); S.timer = setInterval(() => refresh().catch(() => {}), 5000)
+    } catch (ex) { err.textContent = ex.message; err.style.color = 'var(--danger)' }
+  } },
+    h('div', { class: 'brand' }, 'ARENA ', h('b', {}, 'COMMS'), ' · ADMIN'),
+    h('label', {}, 'Username', u), h('label', {}, 'Password', p), err,
+    h('button', { class: 'btn primary' }, 'Sign in')))
+}
+
+// ── shared bits ──────────────────────────────────────────────────────────────
+const chanName = id => S.state.channels.find(c => c.id === id)?.name ?? id
+const groupName = id => S.state.groups.find(g => g.id === id)?.name ?? id
+const onlineFor = userId => S.state.online.filter(o => o.userId === userId)
+
+function modal(title, body, onSave, extra) {
+  const dlg = h('dialog', {})
+  const form = h('form', { method: 'dialog', onsubmit: async e => {
+    e.preventDefault()
+    try { await onSave(); dlg.close(); await refresh() } catch (ex) { toast(ex.message) }
+  } }, h('h2', {}, title), body,
+    h('div', { class: 'actions' }, extra || '', h('span', { class: 'sp' }),
+      h('button', { type: 'button', class: 'btn', onclick: () => dlg.close() }, 'Cancel'),
+      h('button', { class: 'btn primary' }, 'Save')))
+  dlg.append(form); dlg.addEventListener('close', () => dlg.remove())
+  document.body.append(dlg); dlg.showModal()
+}
+
+const confirmDelete = (what, fn) => h('button', { type: 'button', class: 'btn danger', onclick: () => { if (confirm('Delete ' + what + '?')) { document.querySelector('dialog')?.close(); act(fn, 'Deleted') } } }, 'Delete')
+
+// ── users ────────────────────────────────────────────────────────────────────
+function userDialog(u) {
+  const st = S.state, isNew = !u; u = u || { groups: [], overrides: {}, admin: false, disabled: false }
+  const f = {
+    username: h('input', { value: u.username || '' }), name: h('input', { value: u.name || '' }), title: h('input', { value: u.title || '', placeholder: 'defaults to first group' }),
+    password: h('input', { type: 'password', placeholder: isNew ? 'min. 8 characters' : 'leave blank to keep', autocomplete: 'new-password' }),
+    admin: h('input', { type: 'checkbox', checked: !!u.admin }), disabled: h('input', { type: 'checkbox', checked: !!u.disabled }),
+  }
+  const groupBoxes = st.groups.map(g => [g, h('input', { type: 'checkbox', checked: u.groups.includes(g.id) })])
+  const tri = (ch, key) => {
+    const cur = u.overrides?.[ch]?.[key]
+    return h('select', { 'data-ch': ch, 'data-key': key },
+      h('option', { value: '' }, 'inherit'), h('option', { value: 'true', selected: cur === true }, 'allow'), h('option', { value: 'false', selected: cur === false }, 'deny'))
+  }
+  const ov = h('table', { class: 'matrix' }, h('tr', {}, h('th', {}, 'Channel'), h('th', {}, 'Talk'), h('th', {}, 'Listen')),
+    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', {}, tri(c.id, 'talk')), h('td', {}, tri(c.id, 'listen')))))
+  modal(isNew ? 'Add user' : 'Edit ' + u.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
+    h('div', { class: 'row2' }, h('label', {}, 'Username (login)', f.username), h('label', {}, 'Display name', f.name)),
+    h('div', { class: 'row2' }, h('label', {}, 'Title', f.title), h('label', {}, 'Password', f.password)),
+    h('fieldset', {}, h('legend', {}, 'Groups'), h('div', { class: 'grid' }, groupBoxes.map(([g, b]) => h('label', { class: 'check' }, b, g.name)), !st.groups.length && h('span', { class: 'muted' }, 'No groups yet'))),
+    h('fieldset', {}, h('legend', {}, 'Per-user overrides (on top of groups)'), ov),
+    h('div', { class: 'grid' }, h('label', { class: 'check' }, f.admin, 'Administrator'), h('label', { class: 'check' }, f.disabled, 'Disabled'))),
+  async () => {
+    const overrides = {}
+    ov.querySelectorAll('select').forEach(s => { if (s.value) (overrides[s.dataset.ch] ??= {})[s.dataset.key] = s.value === 'true' })
+    const body = { username: f.username.value, name: f.name.value || f.username.value, title: f.title.value, groups: groupBoxes.filter(([, b]) => b.checked).map(([g]) => g.id),
+      overrides, admin: f.admin.checked, disabled: f.disabled.checked, password: f.password.value }
+    if (isNew) await api('POST', 'users', body); else await api('PUT', 'users/' + u.id, body)
+  }, isNew ? '' : confirmDelete('user ' + u.name, () => api('DELETE', 'users/' + u.id)))
+}
+
+function usersView() {
+  const st = S.state
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Users'), h('div', { class: 'sub' }, 'People who can sign in to the intercom. Permissions come from their groups.')),
+      h('button', { class: 'btn primary', onclick: () => userDialog() }, 'Add user')),
+    h('table', {}, h('tr', {}, ['', 'Name', 'Login', 'Groups', 'Flags'].map(x => h('th', {}, x))),
+      st.users.map(u => h('tr', { class: 'row', onclick: () => userDialog(u) },
+        h('td', {}, h('span', { class: 'dot' + (onlineFor(u.id).length ? ' on' : ''), title: onlineFor(u.id).length ? 'online' : 'offline' })),
+        h('td', {}, u.name, u.title && h('span', { class: 'muted' }, ' · ' + u.title)), h('td', { class: 'mono' }, u.username),
+        h('td', {}, u.groups.map(g => h('span', { class: 'chip' }, groupName(g))), !u.groups.length && h('span', { class: 'muted' }, 'none')),
+        h('td', {}, u.admin && h('span', { class: 'chip warn' }, 'admin'), u.disabled && h('span', { class: 'chip bad' }, 'disabled'))))) ]
+}
+
+// ── groups ───────────────────────────────────────────────────────────────────
+function groupDialog(g) {
+  const st = S.state, isNew = !g; g = g || { name: '', selfJoin: false, grants: {} }
+  const name = h('input', { value: g.name }), self = h('input', { type: 'checkbox', checked: !!g.selfJoin })
+  const cell = (ch, key) => h('input', { type: 'checkbox', 'data-ch': ch, 'data-key': key, checked: !!g.grants[ch]?.[key] })
+  const m = h('table', { class: 'matrix' }, h('tr', {}, h('th', {}, 'Channel'), h('th', {}, 'Talk'), h('th', {}, 'Listen')),
+    st.channels.map(c => h('tr', {}, h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', {}, cell(c.id, 'talk')), h('td', {}, cell(c.id, 'listen')))))
+  modal(isNew ? 'Add group' : 'Edit ' + g.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
+    h('label', {}, 'Group name', name), h('fieldset', {}, h('legend', {}, 'Channel access'), m),
+    h('label', { class: 'check' }, self, 'Self-join: offer this as a role in open (no-account) mode')),
+  async () => {
+    const grants = {}
+    m.querySelectorAll('input').forEach(i => { (grants[i.dataset.ch] ??= {})[i.dataset.key] = i.checked })
+    const body = { name: name.value, selfJoin: self.checked, grants }
+    if (isNew) await api('POST', 'groups', body); else await api('PUT', 'groups/' + g.id, body)
+  }, isNew ? '' : confirmDelete('group ' + g.name, () => api('DELETE', 'groups/' + g.id)))
+}
+
+function groupsView() {
+  const st = S.state
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Groups'), h('div', { class: 'sub' }, 'Each group grants talk and/or listen on channels. Add users to groups.')),
+      h('button', { class: 'btn primary', onclick: () => groupDialog() }, 'Add group')),
+    h('table', {}, h('tr', {}, ['Group', 'Channels', 'Members'].map(x => h('th', {}, x))),
+      st.groups.map(g => h('tr', { class: 'row', onclick: () => groupDialog(g) },
+        h('td', {}, g.name, g.selfJoin && h('span', { class: 'chip' }, 'self-join')),
+        h('td', {}, Object.entries(g.grants).map(([c, v]) => h('span', { class: 'chip' }, chanName(c) + ' ' + (v.talk && v.listen ? '⇄' : v.talk ? 'talk' : 'listen')))),
+        h('td', {}, st.users.filter(u => u.groups.includes(g.id)).length))))]
+}
+
+// ── channels ─────────────────────────────────────────────────────────────────
+function channelDialog(c) {
+  const isNew = !c; c = c || { name: '', color: '#6366f1', ifb: false }
+  const f = { name: h('input', { value: c.name }), color: h('input', { type: 'color', value: c.color, style: 'height:34px;padding:2px' }),
+    ifb: h('input', { type: 'checkbox', checked: !!c.ifb }), duck: h('input', { type: 'number', min: 0, max: 1, step: 0.01, value: c.duck ?? 0.15 }) }
+  modal(isNew ? 'Add channel' : 'Edit ' + c.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
+    h('div', { class: 'row2' }, h('label', {}, 'Name', f.name), h('label', {}, 'Colour', f.color)),
+    h('label', { class: 'check' }, f.ifb, 'IFB: duck the program feed for listeners while someone talks'),
+    h('label', {}, 'Duck level (0–1, lower is quieter)', f.duck)),
+  async () => {
+    const body = { name: f.name.value, color: f.color.value, ifb: f.ifb.checked, duck: f.ifb.checked ? Number(f.duck.value) : undefined }
+    if (isNew) await api('POST', 'channels', body); else await api('PUT', 'channels/' + c.id, body)
+  }, isNew ? '' : confirmDelete('channel ' + c.name, () => api('DELETE', 'channels/' + c.id)))
+}
+
+function channelsView() {
+  const ids = S.state.channels.map(c => c.id)
+  const move = (i, d) => { const a = [...ids]; [a[i], a[i + d]] = [a[i + d], a[i]]; act(() => api('POST', 'channels/reorder', { ids: a })) }
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Channels'), h('div', { class: 'sub' }, 'Order here is the order on everyone’s intercom (keys 1–9 follow it).')),
+      h('button', { class: 'btn primary', onclick: () => channelDialog() }, 'Add channel')),
+    h('table', {}, h('tr', {}, ['', 'Channel', 'ID', 'Type', ''].map(x => h('th', {}, x))),
+      S.state.channels.map((c, i) => h('tr', { class: 'row', onclick: () => channelDialog(c) },
+        h('td', {}, i + 1), h('td', {}, h('span', { class: 'swatch', style: 'background:' + c.color }), c.name), h('td', { class: 'mono' }, c.id),
+        h('td', {}, c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
+        h('td', { onclick: e => e.stopPropagation() },
+          h('button', { class: 'btn sm', disabled: i === 0, onclick: () => move(i, -1) }, '↑'), ' ',
+          h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓')))))]
+}
+
+// ── online ───────────────────────────────────────────────────────────────────
+function onlineView() {
+  const o = S.state.online
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Online now'), h('div', { class: 'sub' }, o.length + ' connected'))),
+    o.length ? h('table', {}, h('tr', {}, ['Name', 'Title', 'Type', ''].map(x => h('th', {}, x))),
+      o.map(p => h('tr', {}, h('td', {}, h('span', { class: 'dot on' }), p.name), h('td', {}, p.title),
+        h('td', {}, p.ephemeral ? h('span', { class: 'chip' }, 'guest') : h('span', { class: 'chip ok' }, 'account')),
+        h('td', {}, h('button', { class: 'btn sm danger', onclick: () => confirm('Remove ' + p.name + ' from the intercom?') && act(() => api('POST', 'kick/' + p.id), 'Removed') }, 'Kick'))))) : h('div', { class: 'muted' }, 'Nobody is connected.')]
+}
+
+const TABS = { users: ['Users', usersView], groups: ['Groups', groupsView], channels: ['Channels', channelsView], online: ['Online', onlineView] }
+
+function render() {
+  if (document.querySelector('dialog[open]')) return // don't clobber an open editor during polling
+  $app.replaceChildren()
+  if (!S.token || !S.state) { $app.append(login()); return }
+  $app.append(h('header', {}, h('div', { class: 'brand' }, 'ARENA ', h('b', {}, 'COMMS'), ' · ADMIN'),
+    h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: () => { S.tab = k; render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
+    h('button', { class: 'btn sm', onclick: () => { api('POST', 'logout').catch(() => {}); signOut() } }, 'Sign out')),
+    h('main', {}, TABS[S.tab][1]()))
+}
+
+if (S.token) refresh().then(() => { S.timer = setInterval(() => refresh().catch(() => {}), 5000) }).catch(() => { S.token = null; render() })
+else render()
+</script>
+</body>
+</html>
