@@ -405,3 +405,12 @@ test('party-line channel with music: talk keeps working and music routes by the 
     await srv.close()
   }
 })
+
+test('admin page script compiles (a syntax slip there leaves the admin page blank)', async () => {
+  const fs = await import('node:fs')
+  const vm = await import('node:vm')
+  const html = fs.readFileSync(new URL('../admin/index.html', import.meta.url), 'utf8')
+  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1])
+  assert.ok(scripts.length > 0)
+  for (const code of scripts) assert.doesNotThrow(() => new vm.Script(code, { filename: 'admin/index.html' }))
+})
