@@ -124,13 +124,20 @@ export class Directory {
     let source = ''
     if (music && src.source) {
       source = String(src.source).trim().slice(0, 500)
-      let ok = false
-      try { ok = /^https?:$/.test(new URL(source).protocol) } catch { /* not a URL */ }
-      if (!ok) throw new DirectoryError('Stream URL must start with http:// or https://')
+      let url = null
+      try { url = new URL(source) } catch { /* not a URL */ }
+      if (!url || !/^https?:$/.test(url.protocol)) throw new DirectoryError('Stream URL must start with http:// or https://')
+      // Links to a music service's web page are not audio streams and cannot be played here.
+      if (/(^|\.)(youtube\.com|youtu\.be|spotify\.com|music\.apple\.com|soundcloud\.com|deezer\.com|tidal\.com|pandora\.com|music\.amazon\.[a-z.]+)$/i.test(url.hostname)) {
+        throw new DirectoryError('That is a web page for a music service, not an audio stream. Use a radio station\'s direct stream address, or play the service on the A1\'s computer and share its audio instead.')
+      }
     }
+    // A music channel ducks under IFB talkers by default (its own depth if set); noDuck turns that off.
+    const noDuck = music && !!src.noDuck
     return {
       id, name, color, ...(music ? { music: true } : {}), ...(source ? { source } : {}),
-      ...(ifb ? { ifb: true } : {}), ...(ifb && duck != null ? { duck: Number(duck) } : {}),
+      ...(noDuck ? { noDuck: true } : {}),
+      ...(ifb ? { ifb: true } : {}), ...((ifb || (music && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
     }
   }
 
@@ -148,7 +155,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'source']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'source', 'noDuck']) if (body[k] !== undefined) src[k] = body[k]
     this.channels[i] = this.#cleanChannel(id, src)
     this.#changed()
     return this.channels[i]

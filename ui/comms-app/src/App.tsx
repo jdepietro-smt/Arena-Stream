@@ -453,7 +453,7 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
   const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
   const source = (): MusicSource => (chosen === 'stream' ? { kind: 'stream' } : chosen === 'display' ? { kind: 'display' } : { kind: 'device', deviceId: chosen })
   return (
-    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
+    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
         <div className="lg-top">
           <span className="lg-num">♪</span>
@@ -462,7 +462,7 @@ function MusicKey({ ch, engine, prefs, patch, devices }: {
         </div>
         <div className="lg-sub">
           {engine.musicError && ch.canTalk ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
-            : engine.ducked && !sending ? <span className="blink">DUCKED · IFB</span>
+            : engine.ducked && !sending && !ch.noDuck ? <span className="blink">DUCKED · IFB</span>
             : sending ? <span>SENDING TO THE ROOM</span>
             : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
             : <span className="dim">{ch.canTalk ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING'}</span>}

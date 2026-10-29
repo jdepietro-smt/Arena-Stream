@@ -299,3 +299,49 @@ test('music stream: URL stays on the server, relayed only to a key holder with T
     await new Promise(r => radio.close(r))
   }
 })
+
+test('music channel: web-page links are refused, and the duck settings are kept only where they apply', async () => {
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: { url: 'ws://sfu', token: async () => 't', listTracks: async () => [], updateSubscriptions: async () => {} } })
+  const dir = srv.directory
+  for (const bad of ['https://www.youtube.com/watch?v=abc', 'https://youtu.be/abc', 'https://open.spotify.com/track/x', 'https://music.apple.com/us/album/x', 'https://soundcloud.com/a/b']) {
+    assert.throws(() => dir.addChannel({ name: 'Radio', music: true, source: bad }), /not an audio stream/, bad)
+  }
+  assert.equal(dir.addChannel({ name: 'Station', music: true, source: 'https://radio.example.com/live.mp3' }).source, 'https://radio.example.com/live.mp3')
+
+  // Music ducks under IFB talkers by default; the depth is kept, and noDuck turns it off.
+  const a = dir.addChannel({ name: 'Bed', music: true, duck: 0.3 })
+  assert.deepEqual([a.music, a.duck, a.noDuck, a.ifb], [true, 0.3, undefined, undefined])
+  const b = dir.updateChannel(a.id, { noDuck: true })
+  assert.deepEqual([b.noDuck, b.duck], [true, undefined], 'a depth is meaningless once ducking is off')
+  const c = dir.updateChannel(a.id, { noDuck: false, duck: 0.4 })
+  assert.deepEqual([c.noDuck, c.duck], [undefined, 0.4])
+  assert.throws(() => dir.updateChannel(a.id, { duck: 2 }), /between 0 and 1/)
+  // A normal channel never carries music-only settings.
+  const plain = dir.addChannel({ name: 'Plain', noDuck: true, source: 'https://x.example/live.mp3' })
+  assert.equal(plain.noDuck, undefined)
+  assert.equal(plain.source, undefined)
+  await srv.close()
+})
+
+test('music stream relay: a web page behind the URL is refused with 415', async () => {
+  const http = await import('node:http')
+  const page = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end('<html>not audio</html>') })
+  await new Promise(r => page.listen(0, '127.0.0.1', r))
+  const fake = { url: 'ws://sfu', token: async () => 't', listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  const mus = srv.directory.addChannel({ name: 'Page', music: true, source: `http://127.0.0.1:${page.address().port}/watch` })
+  const grp = srv.directory.groups.find(x => x.name === 'Audio')
+  srv.directory.updateGroup(grp.id, { grants: { ...grp.grants, [mus.id]: { talk: true, listen: true } } })
+  try {
+    const c = await client(port)
+    c.send({ type: 'join', name: 'Ann', role: 'Audio' })
+    const w = await c.next(m => m.type === 'welcome')
+    const r = await fetch(`http://127.0.0.1:${port}/music/${mus.id}?k=${w.musicKey}`)
+    assert.equal(r.status, 415)
+    c.ws.close()
+  } finally {
+    await srv.close()
+    await new Promise(r => page.close(r))
+  }
+})

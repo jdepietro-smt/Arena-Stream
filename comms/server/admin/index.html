@@ -226,22 +226,33 @@ function channelDialog(c) {
   const f = { name: h('input', { value: c.name }), color: h('input', { type: 'color', value: c.color, style: 'height:34px;padding:2px' }),
     ifb: h('input', { type: 'checkbox', checked: !!c.ifb }), duck: h('input', { type: 'number', min: 0, max: 1, step: 0.01, value: c.duck ?? 0.15 }),
     music: h('input', { type: 'checkbox', checked: !!c.music }),
-    source: h('input', { value: c.source || '', placeholder: 'https://example.com/live.mp3  (optional)', spellcheck: 'false' }) }
-  const sourceRow = h('label', {}, 'Stream URL: internet radio / Icecast / MP3 or AAC stream the sender can start with one click', f.source)
-  // A music channel is one-way stereo music, so IFB does not apply to it.
+    source: h('input', { value: c.source || '', placeholder: 'https://example.com/live.mp3  (optional)', spellcheck: 'false' }),
+    duckMusic: h('input', { type: 'checkbox', checked: !c.noDuck }) }
+  const sourceRow = h('label', {}, 'Stream URL: a radio station\'s direct MP3 / AAC / Ogg stream the sender can start with one click (not a YouTube or Spotify page link)', f.source)
+  const ifbRow = h('label', { class: 'check' }, f.ifb, 'IFB: duck the program feed (and any music) for listeners while someone talks here')
+  const duckMusicRow = h('label', { class: 'check' }, f.duckMusic, 'Duck this music while someone talks on an IFB channel')
+  const duckText = h('span', {})
+  const duckLabel = h('label', {}, duckText, f.duck)
+  // A music channel is one-way stereo music: it is never an IFB itself, but it ducks under the IFB channels.
   const sync = () => {
-    f.ifb.disabled = f.music.checked; f.duck.disabled = f.music.checked || !f.ifb.checked; if (f.music.checked) f.ifb.checked = false
-    sourceRow.style.display = f.music.checked ? '' : 'none'
+    const music = f.music.checked
+    if (music) f.ifb.checked = false
+    sourceRow.style.display = music ? '' : 'none'
+    ifbRow.style.display = music ? 'none' : ''
+    duckMusicRow.style.display = music ? '' : 'none'
+    const duckOn = music ? f.duckMusic.checked : f.ifb.checked
+    f.duck.disabled = !duckOn
+    duckText.textContent = music ? 'How low the music goes while an IFB channel is talking (0–1, lower is quieter)' : 'Duck level (0–1, lower is quieter)'
   }
-  f.music.onchange = sync; f.ifb.onchange = sync; sync()
+  f.music.onchange = sync; f.ifb.onchange = sync; f.duckMusic.onchange = sync; sync()
   modal(isNew ? 'Add channel' : 'Edit ' + c.name, h('div', { style: 'display:flex;flex-direction:column;gap:14px' },
     h('div', { class: 'row2' }, h('label', {}, 'Name', f.name), h('label', {}, 'Colour', f.color)),
     h('label', { class: 'check' }, f.music, '♪ Music channel: a player (e.g. the A1) sends stereo music; Talk = may send it, Listen = hears it'),
-    sourceRow,
-    h('label', { class: 'check' }, f.ifb, 'IFB: duck the program feed for listeners while someone talks'),
-    h('label', {}, 'Duck level (0–1, lower is quieter)', f.duck)),
+    sourceRow, ifbRow, duckMusicRow, duckLabel),
   async () => {
-    const body = { name: f.name.value, color: f.color.value, music: f.music.checked, source: f.music.checked ? f.source.value.trim() : '', ifb: f.ifb.checked, duck: f.ifb.checked && !f.music.checked ? Number(f.duck.value) : undefined }
+    const music = f.music.checked
+    const body = { name: f.name.value, color: f.color.value, music, source: music ? f.source.value.trim() : '', ifb: !music && f.ifb.checked,
+      noDuck: music && !f.duckMusic.checked, duck: (music ? f.duckMusic.checked : f.ifb.checked) ? Number(f.duck.value) : undefined }
     if (isNew) await api('POST', 'channels', body); else await api('PUT', 'channels/' + c.id, body)
   }, isNew ? '' : confirmDelete('channel ' + c.name, () => api('DELETE', 'channels/' + c.id)))
 }

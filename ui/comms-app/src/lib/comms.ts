@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; stream?: boolean; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' }
@@ -954,8 +954,11 @@ export class CommsEngine {
     const ctx = this.ctx
     if (!ctx) return
     for (const [ch, gain] of this.musicRxGain) {
-      const target = this.listen.has(ch) ? this.channelLevel(ch) * this.masterVolume * (this.ducked ? this.duckLevel : 1) : 0
-      gain.gain.setTargetAtTime(target, ctx.currentTime, this.ducked ? 0.03 : 0.2)
+      const c = this.channels.find(x => x.id === ch)
+      // Music ducks under IFB talkers unless the channel opts out, to its own depth if set (else the IFB's).
+      const ducking = this.ducked && !c?.noDuck
+      const target = this.listen.has(ch) ? this.channelLevel(ch) * this.masterVolume * (ducking ? (c?.duck ?? this.duckLevel) : 1) : 0
+      gain.gain.setTargetAtTime(target, ctx.currentTime, ducking ? 0.03 : 0.2)
     }
   }
 
@@ -998,9 +1001,19 @@ export class CommsEngine {
       stream?.getTracks().forEach(t => t.stop())
       if (el) { el.pause(); el.removeAttribute('src'); el.load() }
       const err = e as Error
-      this.musicError = source.kind === 'stream'
-        ? `Could not play the channel stream (${err.name === 'NotAllowedError' ? 'blocked by the browser' : 'is the stream URL live?'})`
-        : err.message || 'Could not open the music source'
+      let why = err.name === 'NotAllowedError' ? 'blocked by the browser' : 'is the stream URL live?'
+      if (source.kind === 'stream' && err.name !== 'NotAllowedError') {
+        // Ask the relay what is wrong so the key can say it plainly.
+        try {
+          const ac = new AbortController()
+          const r = await fetch(`${httpBase(this.opts!.url)}/music/${encodeURIComponent(ch)}?k=${encodeURIComponent(this.musicKey)}`, { signal: ac.signal })
+          ac.abort()
+          if (r.status === 415) why = 'that link is a web page, not an audio stream'
+          else if (r.status === 502) why = 'the server could not reach it'
+          else if (r.status === 404) why = 'no stream is set for this channel'
+        } catch { /* keep the generic hint */ }
+      }
+      this.musicError = source.kind === 'stream' ? `Could not play the channel stream (${why})` : err.message || 'Could not open the music source'
       this.emit()
       return
     }

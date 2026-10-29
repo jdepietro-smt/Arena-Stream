@@ -235,6 +235,11 @@ export function createServer(
     try {
       const up = await fetch(c.source, { signal: ac.signal, headers: { 'icy-metadata': '0', 'user-agent': 'ArenaComms/1' } })
       if (!up.ok || !up.body) return void res.writeHead(502, cors).end()
+      // A web page (HTML), JSON, etc. is not an audio stream: say so instead of feeding it to the player.
+      if (/^(text\/|application\/(json|xml|xhtml))/i.test(up.headers.get('content-type') ?? '')) {
+        ac.abort()
+        return void res.writeHead(415, cors).end()
+      }
       res.writeHead(200, {
         ...cors, 'content-type': up.headers.get('content-type') || 'audio/mpeg',
         'cache-control': 'no-store', 'x-accel-buffering': 'no', // tell nginx not to buffer a live stream

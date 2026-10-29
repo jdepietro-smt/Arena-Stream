@@ -39,11 +39,17 @@ taken from the A1's own computer, so nothing about the service is integrated or 
   the sender, so browsers do not hit cross-origin blocks, and the URL itself is never sent to clients; only a
   connected user with Talk on the channel can pull it. If the stream freezes the sender reconnects by itself a few
   times, then stops with a message. HLS (.m3u8) is not supported; use a direct stream URL.
+  A link to a web page (YouTube, Spotify, Apple Music, SoundCloud and similar) is not an audio stream: setup refuses
+  it with an explanation, and the relay answers 415 if a URL turns out to serve a page. To use such a service, play
+  it on the A1's own computer and share that audio with the "Computer / tab audio" source instead.
 - **Listening:** the key has the channel's level knob and a LISTEN/MUTED switch, remembered between sessions.
   The server only subscribes a listener to the track while an allowed sender has it on, and stops it the moment a
   sender loses the Talk right.
-- **Quality:** its own stereo track at 128 kbps Opus with DTX off, so music is not gated like speech. It ducks
-  under IFB talkers exactly like the program feed.
+- **Quality:** its own stereo track at 128 kbps Opus with DTX off, so music is not gated like speech.
+- **Ducking:** music plays in the same headset mix as the program feed and ducks under IFB talkers the same way
+  (fast attack, 400 ms hold, slow release). In the music channel's setup, "Duck this music while someone talks on an
+  IFB channel" is on by default, with its own depth (0 to 1, default: the IFB channel's depth); untick it to keep the
+  music at full level. The IFB channel itself is the one that triggers the ducking (set "IFB" on a normal channel).
 - **Needs the SFU** (`media.mode: "sfu"`). The mesh has no separate per-purpose tracks, so music channels are
   hidden there. The gateway does not carry them either.
 - Whether a personal streaming account may be played to a crew this way is a licensing question for the
