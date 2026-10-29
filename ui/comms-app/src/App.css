@@ -63,38 +63,38 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .hl-state.error { color: #ff6b5c; }
 .hl-clock { font-size: 20px; font-weight: 700; letter-spacing: .12em; }
 
-.keys { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; align-content: start; padding: 2px 2px 6px; }
+.keys { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; align-content: start; padding: 2px 2px 6px; }
 .keymod {
-  --ch: var(--accent); display: flex; flex-direction: column; gap: 7px; padding: 7px 7px 8px; border-radius: 9px;
+  --ch: var(--accent); display: flex; flex-direction: column; gap: 9px; padding: 9px 9px 10px; border-radius: 9px;
   background: linear-gradient(180deg, #24272d, #1a1c21); border: 1px solid #30343b; border-top: 3px solid var(--ch);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 2px 0 #0b0c0e;
 }
 .keymod.talking { box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 0 0 1px var(--ch), 0 0 22px -4px var(--ch); }
 .keymod.rx-only .talkkey { opacity: .4; }
 
-.legend { min-height: 48px; padding: 5px 7px 6px; border-left: 4px solid var(--ch); display: flex; flex-direction: column; gap: 3px; }
+.legend { min-height: 58px; padding: 7px 9px 8px; border-left: 4px solid var(--ch); display: flex; flex-direction: column; gap: 3px; }
 .keymod.calling .legend { animation: callflash .5s steps(2) infinite; }
 @keyframes callflash { 50% { background-color: #2a1d05; } }
-.lg-top { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
+.lg-top { display: flex; align-items: center; gap: 6px; font-weight: 700; font-size: 13.5px; letter-spacing: .07em; text-transform: uppercase; white-space: nowrap; }
 .lg-name { overflow: hidden; text-overflow: ellipsis; }
 .lg-num { font-size: 10px; padding: 0 4px; border: 1px solid rgba(var(--lcd-rgb), .45); border-radius: 2px; opacity: .8; }
 .lg-tag { margin-left: auto; font-size: 9px; padding: 0 4px; border: 1px solid currentColor; border-radius: 2px; letter-spacing: .08em; }
 .lg-tag.live { color: #7cff7c; } .lg-tag.error { color: #ff6b5c; } .lg-tag.connecting { color: var(--lcd); }
-.lg-sub { font-size: 10px; letter-spacing: .06em; min-height: 13px; display: flex; flex-direction: column; text-transform: uppercase; overflow: hidden; white-space: nowrap; }
+.lg-sub { font-size: 11px; letter-spacing: .06em; min-height: 15px; display: flex; flex-direction: column; text-transform: uppercase; overflow: hidden; white-space: nowrap; }
 
 .keyrow { display: flex; align-items: center; gap: 6px; }
 .keyrow .talkkey { flex: 1; min-width: 0; }
-.talkkey { height: 54px; font-size: 15px; letter-spacing: .22em; color: var(--ch); border-color: color-mix(in srgb, var(--ch) 45%, #4a505a); }
+.talkkey { height: 68px; font-size: 17px; letter-spacing: .22em; color: var(--ch); border-color: color-mix(in srgb, var(--ch) 45%, #4a505a); }
 .talkkey .led { position: absolute; top: 8px; left: 8px; }
 .talkkey.on { color: #0a0a0a; background: linear-gradient(color-mix(in srgb, var(--ch) 85%, #fff), var(--ch)); box-shadow: 0 0 24px -2px var(--ch), inset 0 0 14px rgba(255,255,255,.4); }
-.cap.sm { flex: 1; min-width: 0; flex-direction: column; gap: 3px; padding: 5px 1px 4px; font-size: 9px; }
+.cap.sm { flex: 1; min-width: 0; flex-direction: column; gap: 4px; padding: 7px 1px 6px; font-size: 10px; }
 .subkeys { display: flex; gap: 5px; }
 .subkeys.one .cap { flex-direction: row; justify-content: center; gap: 8px; }
 .cap.hw { flex: 0 0 auto; flex-direction: row; padding: 11px 18px 9px; font-size: 11px; }
 .cap.hw.leave { color: #ff8277; }
 
 .keymod.program.ducked { box-shadow: 0 0 0 1px #ffb020, 0 0 18px -6px #ffb020; }
-.pgm-mid { display: flex; align-items: center; gap: 10px; padding: 2px 6px; min-height: 54px; }
+.pgm-mid { display: flex; align-items: center; gap: 10px; padding: 2px 6px; min-height: 68px; }
 
 .dock { display: flex; align-items: center; gap: 22px; padding: 10px 16px; border-radius: 9px; background: linear-gradient(#1a1c21, #14161a); border: 1px solid #2a2e35; box-shadow: inset 0 2px 8px rgba(0,0,0,.55); }
 .dock-group { display: flex; align-items: center; gap: 12px; }
@@ -114,14 +114,14 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .person .cap.direct { flex: 0 0 60px; padding: 6px 2px 5px; }
 
 /* ── Key size: comfortable = bigger keys ── */
-.app[data-density=comfortable] .keys { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
-.app[data-density=comfortable] .keymod { gap: 9px; padding: 9px; }
-.app[data-density=comfortable] .legend { min-height: 62px; padding: 7px 9px 8px; }
-.app[data-density=comfortable] .lg-top { font-size: 13.5px; }
-.app[data-density=comfortable] .lg-sub { font-size: 11px; }
-.app[data-density=comfortable] .talkkey { height: 84px; font-size: 19px; }
-.app[data-density=comfortable] .cap.sm { padding: 8px 2px 6px; font-size: 10px; gap: 5px; }
-.app[data-density=comfortable] .pgm-mid { min-height: 84px; }
+.app[data-density=comfortable] .keys { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+.app[data-density=comfortable] .keymod { gap: 11px; padding: 11px; }
+.app[data-density=comfortable] .legend { min-height: 74px; padding: 9px 11px 10px; }
+.app[data-density=comfortable] .lg-top { font-size: 15.5px; }
+.app[data-density=comfortable] .lg-sub { font-size: 12px; }
+.app[data-density=comfortable] .talkkey { height: 100px; font-size: 21px; }
+.app[data-density=comfortable] .cap.sm { padding: 10px 2px 8px; font-size: 11px; gap: 6px; }
+.app[data-density=comfortable] .pgm-mid { min-height: 100px; }
 .app[data-density=comfortable] .directory { width: 280px; }
 
 /* Spatial audio */
