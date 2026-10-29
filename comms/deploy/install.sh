@@ -35,7 +35,7 @@ export DEBIAN_FRONTEND=noninteractive
 need_node=1
 if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 18 ]; then need_node=0; fi
 apt-get update -qq
-apt-get install -y -qq curl openssl nginx ca-certificates xz-utils >/dev/null
+apt-get install -y -qq curl openssl nginx ca-certificates xz-utils ffmpeg >/dev/null # ffmpeg: the server music player
 if [ "$need_node" = 1 ]; then
   # Official tarball into /usr/local: independent of apt, so it cannot clash with Ubuntu's old
   # nodejs/libnode packages. /usr/local/bin comes before /usr/bin on PATH, so it wins.

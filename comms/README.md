@@ -39,6 +39,16 @@ the service is integrated or intercepted by the server.
   to be allowed to talk on Program for the A1 to play there. Listen = hears it. The Channels list shows who can start each
   music channel, or a red "nobody can start it yet: give a group Music".
   Several channels can carry music; each has its own senders and listeners.
+- **Server player (hands-free, started from the admin):** for a **direct audio stream** (internet radio, Icecast, an MP3,
+  AAC or Ogg stream, or an audio file URL) put the address in the channel's setup and press **Play on server** in the same
+  dialog (and **Stop**; the box shows live status). The server itself plays it with ffmpeg and publishes it on the channel
+  as the sender "SERVER PLAYER", so it reaches every panel listening to that channel with nobody's computer or browser
+  involved, no popups and no Music permission needed for anyone. It restarts a dropped stream by itself a few times, then
+  stops with the reason shown. It needs the SFU, `ffmpeg` on the server (the install script adds it) and the
+  `@livekit/rtc-node` package (installed with `npm ci`). Changing the channel's stream URL or music setting stops it.
+  The server only ever plays the saved http/https URL. A music service's web page (YouTube, Spotify, Apple Music,
+  SoundCloud...) is not an audio stream and the server never fetches it; for those, a person plays the page on their own
+  computer and shares its audio from the key (below).
 - **Sending:** in the desktop app, "Computer / tab audio" captures everything the PC plays (Windows loopback), so no virtual
   cable is needed. In a browser it shares a tab's audio (tick "Share audio" in the picker); an audio input device, such as a
   virtual cable or a mixer return, can be chosen instead. Senders never receive their own audio back.

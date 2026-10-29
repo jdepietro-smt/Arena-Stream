@@ -225,6 +225,43 @@ function groupsView() {
 }
 
 // ── channels ─────────────────────────────────────────────────────────────────
+/**
+ * Server player: plays the channel's saved stream URL on the server and sends it to everyone listening on the channel.
+ * Nobody's computer or browser is involved. Only direct audio streams work, not YouTube or Spotify page links.
+ */
+function serverPlayerBox(c) {
+  const status = h('div', { class: 'muted' })
+  const play = h('button', { type: 'button', class: 'btn primary' }, '▶ Play on server')
+  const stop = h('button', { type: 'button', class: 'btn' }, '■ Stop')
+  const box = h('fieldset', {}, h('legend', {}, 'Server player'),
+    h('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap' }, play, stop, status))
+  const show = st => {
+    st = st || { state: 'idle' }
+    const usable = S.state.serverPlayer && !!c.source
+    play.disabled = !usable || st.state === 'starting' || st.state === 'playing'
+    stop.disabled = !usable || st.state === 'idle'
+    status.style.color = st.state === 'error' ? 'var(--danger)' : ''
+    status.textContent = !S.state.serverPlayer ? 'Playing on the server needs the SFU media mode.'
+      : !c.source ? (c.link ? "This channel has a web page link (YouTube, Spotify...), which the server can't play. Put a direct audio stream address in the box above and save."
+        : 'Save a stream URL above to play it from the server.')
+      : st.state === 'playing' ? '● Playing on the server and sent to the panels.'
+      : st.state === 'starting' ? 'Starting...'
+      : st.state === 'error' ? '✕ ' + st.error
+      : 'Stopped. Plays the saved stream on the server and sends it to the panels.'
+  }
+  const call = async action => {
+    try { show({ state: 'starting' }); show(await api('POST', 'channels/' + c.id + '/player', { action })) } catch (e) { show({ state: 'error', error: e.message }) }
+  }
+  play.onclick = () => call('start')
+  stop.onclick = () => call('stop')
+  show(S.state.players?.[c.id])
+  const timer = setInterval(async () => {
+    if (!box.isConnected) return clearInterval(timer)
+    try { show((await api('GET', 'players')).players[c.id]) } catch { /* keep the last status */ }
+  }, 2000)
+  return box
+}
+
 function channelDialog(c) {
   const isNew = !c; c = c || { name: '', color: '#6366f1', ifb: false, music: false, withMusic: false }
   const f = { name: h('input', { value: c.name }), color: h('input', { type: 'color', value: c.color, style: 'height:34px;padding:2px' }),
@@ -259,7 +296,7 @@ function channelDialog(c) {
     h('div', { class: 'row2' }, h('label', {}, 'Name', f.name), h('label', {}, 'Colour', f.color)),
     withMusicRow,
     h('label', { class: 'check' }, f.music, '♪ Music-only channel: no talking, just music a player (e.g. the A1) sends; Music (or Talk) = may send it, Listen = hears it'),
-    sourceRow, ifbRow, duckMusicRow, duckLabel),
+    sourceRow, ifbRow, duckMusicRow, duckLabel, !isNew && (c.music || c.withMusic) && serverPlayerBox(c)),
   async () => {
     const music = f.music.checked, withMusic = !music && f.withMusic.checked, anyMusic = music || withMusic
     const body = { name: f.name.value, color: f.color.value, music, withMusic, source: anyMusic ? f.source.value.trim() : '', ifb: !anyMusic && f.ifb.checked,

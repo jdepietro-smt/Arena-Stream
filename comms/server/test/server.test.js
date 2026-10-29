@@ -449,6 +449,83 @@ test('SFU: a subscription LiveKit loses without telling us is repaired by the pe
   }
 })
 
+test('server player: started from the admin API, routed to listeners as SERVER PLAYER, stopped again', async () => {
+  const { EventEmitter } = await import('node:events')
+  const { PassThrough } = await import('node:stream')
+  process.env.COMMS_ADMIN_PASSWORD = 'adminpass1'
+  const subs = new Map()
+  const fake = {
+    url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async () => [],
+    connectInfo: async () => ({ url: 'ws://lk', token: 't' }),
+    updateSubscriptions: async (id, sids, on) => { const set = subs.get(id) ?? new Set(); for (const x of sids) on ? set.add(x) : set.delete(x); subs.set(id, set) },
+  }
+  const procs = []
+  let published = 0 // every start publishes a new track, like a new LiveKit participant
+  const rtc = {
+    Room: class { async connect() {} get localParticipant() { return { publishTrack: async () => ({ sid: 'TR_player' + (++published) }) } } async disconnect() {} },
+    AudioSource: class { async captureFrame() {} async close() {} }, AudioFrame: class {},
+    LocalAudioTrack: { createAudioTrack: (name) => ({ name }) }, TrackPublishOptions: class {}, TrackSource: { SOURCE_UNKNOWN: 0 },
+  }
+  const spawnFn = () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); p.kill = () => p.stdout.end(); procs.push(p); return p }
+  const srv = createServer({ ...cfg, pin: '' }, { sfu: fake, playerDeps: { spawnFn, loadRtcFn: async () => rtc, restartMs: 10 } })
+  const port = await srv.listen(0)
+  const dir = srv.directory
+  const radio = dir.addChannel({ name: 'Program', withMusic: true, source: 'https://radio.example.com/live.mp3' })
+  const page = dir.addChannel({ name: 'Page', withMusic: true, source: 'https://www.youtube.com/watch?v=abc' })
+  const plain = dir.addChannel({ name: 'Plain' })
+  const grp = dir.groups.find(x => x.name === 'Camera')
+  dir.updateGroup(grp.id, { grants: { ...grp.grants, [radio.id]: { listen: true } } })
+  const base = `http://127.0.0.1:${port}`
+  const api = async (method, p, body, token) => {
+    const r = await fetch(base + p, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: body ? JSON.stringify(body) : undefined })
+    return { status: r.status, body: await r.json() }
+  }
+  const until = async (fn, what) => { for (let i = 0; i < 300; i++) { if (fn()) return; await new Promise(r => setTimeout(r, 10)) } assert.fail('timed out: ' + what) }
+  try {
+    const { body: { token } } = await api('POST', '/admin/api/login', { username: 'admin', password: 'adminpass1' })
+    assert.equal((await api('POST', `/admin/api/channels/${radio.id}/player`, { action: 'start' })).status, 401, 'admin only')
+    const l = await client(port)
+    l.send({ type: 'join', name: 'Bob', role: 'Camera' })
+    const w = await l.next(m => m.type === 'welcome')
+    assert.deepEqual(w.musicSenders, [])
+
+    // Things the server cannot play are refused with a reason.
+    assert.match((await api('POST', `/admin/api/channels/${page.id}/player`, { action: 'start' }, token)).body.error, /web page link/)
+    assert.match((await api('POST', `/admin/api/channels/${plain.id}/player`, { action: 'start' }, token)).body.error, /does not carry music/)
+
+    const st = await api('POST', `/admin/api/channels/${radio.id}/player`, { action: 'start' }, token)
+    assert.equal(st.status, 200)
+    procs[0].stdout.write(Buffer.alloc(1920 * 2)) // the decoder produces audio
+    const on = await l.next(m => m.type === 'music' && m.on)
+    assert.deepEqual([on.channel, on.id, on.name], [radio.id, `player:${radio.id}`, 'SERVER PLAYER'])
+    await until(() => subs.get(w.id)?.has('TR_player1'), 'the listener is subscribed to the player track')
+    const state = await api('GET', '/admin/api/state', null, token)
+    assert.equal(state.body.serverPlayer, true)
+    assert.equal(state.body.players[radio.id].state, 'playing')
+
+    // Someone who joins later is told it is playing.
+    const late = await client(port)
+    late.send({ type: 'join', name: 'Dee', role: 'Camera' })
+    assert.deepEqual((await late.next(m => m.type === 'welcome')).musicSenders, [{ channel: radio.id, id: `player:${radio.id}`, name: 'SERVER PLAYER' }])
+
+    // Changing the channel's stream URL stops the old one.
+    dir.updateChannel(radio.id, { source: 'https://radio.example.com/other.mp3' })
+    const off = await l.next(m => m.type === 'music' && !m.on)
+    assert.equal(off.channel, radio.id)
+
+    // Starting again publishes a new track, and the listener is subscribed to that one.
+    await api('POST', `/admin/api/channels/${radio.id}/player`, { action: 'start' }, token)
+    procs[1].stdout.write(Buffer.alloc(1920 * 2))
+    await l.next(m => m.type === 'music' && m.on)
+    await until(() => subs.get(w.id)?.has('TR_player2'), 'subscribed to the restarted player track')
+    assert.equal((await api('POST', `/admin/api/channels/${radio.id}/player`, { action: 'stop' }, token)).body.state, 'idle')
+    await l.next(m => m.type === 'music' && !m.on)
+    l.ws.close(); late.ws.close()
+  } finally {
+    await srv.close()
+  }
+})
+
 test('admin page script compiles (a syntax slip there leaves the admin page blank)', async () => {
   const fs = await import('node:fs')
   const vm = await import('node:vm')

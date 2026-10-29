@@ -15,6 +15,12 @@ export function createLiveKit({ url, apiUrl, apiKey, apiSecret, room = 'arena' }
       at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: true, canPublishData: false })
       return at.toJwt()
     },
+    /** How this server itself joins the room (the server player): LiveKit's internal address plus a token. */
+    async connectInfo(identity, name) {
+      const at = new AccessToken(apiKey, apiSecret, { identity, name, ttl: '12h' })
+      at.addGrant({ roomJoin: true, room, canPublish: true, canSubscribe: false, canPublishData: false })
+      return { url: (apiUrl || url).replace(/^http/, 'ws'), token: await at.toJwt() }
+    },
     /** Authoritative track list for a participant, read from LiveKit (never from the client). */
     async listTracks(identity) {
       const p = await rooms.getParticipant(room, identity)

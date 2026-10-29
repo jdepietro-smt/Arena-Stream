@@ -17,6 +17,7 @@ import { Directory, seedFromConfig } from './directory.js'
 import { AuthError, createAuth } from './auth.js'
 import { createAdmin } from './admin.js'
 import { createArenaWatcher } from './arena.js'
+import { createPlayers } from './player.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -51,7 +52,7 @@ function safeEqual(a, b) {
 
 export function createServer(
   cfg = loadConfig(),
-  { sfu = cfg.media?.mode === 'sfu' ? createLiveKit(cfg.media.livekit) : null, arenaFetch } = {},
+  { sfu = cfg.media?.mode === 'sfu' ? createLiveKit(cfg.media.livekit) : null, arenaFetch, playerDeps = {} } = {},
 ) {
   const authMode = cfg.auth?.mode === 'open' ? 'open' : 'accounts'
   const dir = Directory.load(cfg.dataFile ?? null, () => seedFromConfig(cfg))
@@ -126,9 +127,34 @@ export function createServer(
     const p = perms[id]
     return !!p && !!(c?.music ? (p.music || p.talk) : c?.withMusic && p.music)
   }
+  // ── Server player ──────────────────────────────────────────────────────────
+  // Plays a channel's saved stream URL on the server (started from the admin's channel settings) and publishes it as that
+  // channel's music track, so listeners get it with nobody's computer involved. Clients see it as the sender "SERVER PLAYER".
+  const PLAYER_NAME = 'SERVER PLAYER'
+  const announcedPlayers = new Set()
+  const onPlayerChange = (ch, st) => {
+    const on = st.state === 'playing'
+    if (on !== announcedPlayers.has(ch)) {
+      if (on) announcedPlayers.add(ch); else announcedPlayers.delete(ch)
+      for (const L of peers.values()) if (L.perms[ch]?.listen) send(L, { type: 'music', channel: ch, id: `player:${ch}`, name: PLAYER_NAME, on })
+    }
+    void reconcileAll()
+  }
+  const players = sfu ? createPlayers({ livekit: sfu, onChange: onPlayerChange, ...playerDeps }) : null
+  /** Stop a player whose channel was deleted, stopped carrying music, or got a different stream URL. */
+  function syncPlayers() {
+    for (const ch of players?.channels() ?? []) {
+      const c = dir.channel(ch)
+      if (!c || !(c.music || c.withMusic) || c.source !== players.urlOf(ch)) void players.stop(ch)
+    }
+  }
+
   /** Who is sending music on the channels this peer may hear. */
-  const musicSendersFor = L => [...peers.values()].flatMap(p =>
-    [...p.musicOn].filter(ch => L.perms[ch]?.listen).map(ch => ({ channel: ch, id: p.id, name: p.user.name })))
+  const musicSendersFor = L => [
+    ...[...peers.values()].flatMap(p =>
+      [...p.musicOn].filter(ch => L.perms[ch]?.listen).map(ch => ({ channel: ch, id: p.id, name: p.user.name }))),
+    ...(players?.playing() ?? []).filter(x => L.perms[x.channel]?.listen).map(x => ({ channel: x.channel, id: `player:${x.channel}`, name: PLAYER_NAME })),
+  ]
   const announceMusic = (P, channel, on) => {
     for (const L of peers.values()) if (L.perms[channel]?.listen) send(L, { type: 'music', channel, id: P.id, name: P.user.name, on })
   }
@@ -153,6 +179,8 @@ export function createServer(
         }
       }
     }
+    // The server player is a sender too: listeners of its channel receive it while it is on air.
+    for (const x of players?.playing() ?? []) if (L.perms[x.channel]?.listen && L.listen.includes(x.channel)) want.add(x.sid)
     return want
   }
 
@@ -161,7 +189,7 @@ export function createServer(
     L.recon = (L.recon ?? Promise.resolve()).then(async () => {
       if (peers.get(L.id) !== L) return
       const want = wantedSids(L)
-      const live = new Set([...peers.values()].flatMap(p => [...p.tracks.values()]))
+      const live = new Set([...peers.values()].flatMap(p => [...p.tracks.values()]).concat((players?.playing() ?? []).map(x => x.sid)))
       const add = [...want].filter(x => !L.subs.has(x))
       // Tracks of departed peers are already gone from LiveKit; don't try to unsubscribe them.
       const drop = [...L.subs].filter(x => !want.has(x) && live.has(x))
@@ -230,12 +258,13 @@ export function createServer(
       }
       if (nameChanged) broadcast({ type: 'peer-update', id: p.id, name: user.name, role: p.title })
     }
+    syncPlayers()
     void reconcileAll()
   }
   dir.onChange(refreshAll)
 
   const admin = createAdmin({
-    dir, auth, kick,
+    dir, auth, kick, players,
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
     })),
@@ -456,6 +485,7 @@ export function createServer(
       new Promise(resolve => httpServer.listen(port, process.env.COMMS_HOST || undefined, () => { arena?.start(); resolve(httpServer.address().port) })),
     close: () => new Promise(resolve => {
       arena?.stop()
+      void players?.stopAll()
       for (const c of wss.clients) c.terminate()
       wss.close(() => httpServer.close(() => resolve()))
     }),

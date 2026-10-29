@@ -32,8 +32,10 @@ function readJson(req) {
   })
 }
 
-export function createAdmin({ dir, auth, online, kick }) {
+export function createAdmin({ dir, auth, online, kick, players = null }) {
   const page = () => fs.readFileSync(path.join(here, 'admin', 'index.html'))
+  const idle = { state: 'idle', error: '', since: 0 }
+  const playerStates = () => Object.fromEntries(dir.channels.filter(c => c.music || c.withMusic).map(c => [c.id, players?.status(c.id) ?? idle]))
 
   return async function handle(req, res, url) {
     if (url.pathname === '/admin' || url.pathname === '/admin/') {
@@ -63,10 +65,31 @@ export function createAdmin({ dir, auth, online, kick }) {
         return send(res, 200, {
           channels: dir.channels, groups: dir.groups,
           users: dir.users.map(u => dir.publicUser(u)), online: online(),
+          serverPlayer: !!players, players: playerStates(),
         }), true
       }
+      if (kind === 'players' && method === 'GET') return send(res, 200, { serverPlayer: !!players, players: playerStates() }), true
       if (kind === 'logout' && method === 'POST') { auth.revoke(token); return send(res, 200, { ok: true }), true }
 
+      if (kind === 'channels' && id && sub === 'player' && method === 'POST') {
+        // Start or stop the server-side player for a channel (plays its saved stream URL on the server).
+        const c = dir.channel(id)
+        if (!c) throw new DirectoryError('No such channel', 404)
+        if (body.action === 'stop') {
+          await players?.stop(id)
+          return send(res, 200, players?.status(id) ?? idle), true
+        }
+        if (body.action !== 'start') throw new DirectoryError('Unknown action')
+        if (!players) throw new DirectoryError('Playing on the server needs the SFU media mode')
+        if (!(c.music || c.withMusic)) throw new DirectoryError('This channel does not carry music')
+        if (!c.source) {
+          throw new DirectoryError(c.link
+            ? 'This channel has a web page link (YouTube, Spotify, ...), which the server cannot play. Use a direct audio stream address.'
+            : 'Set a stream URL on this channel and save it first.')
+        }
+        await players.start(id, c.source)
+        return send(res, 200, players.status(id)), true
+      }
       if (kind === 'channels') {
         if (method === 'POST' && id === 'reorder') { dir.reorderChannels(body.ids); return send(res, 200, { ok: true }), true }
         if (method === 'POST' && !id) return send(res, 201, dir.addChannel(body)), true
