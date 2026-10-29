@@ -67,7 +67,7 @@ export const newPort = (n: number): PortCfg => ({
 })
 
 export const defaultConfig = (): GatewayConfig => ({
-  server: 'ws://localhost:8900', username: '', password: '', autoConnect: true,
+  server: '', username: '', password: '', autoConnect: true,
   device: { inputId: '', outputId: '', inputChannels: 2, outputChannels: 2 },
   asio: { deviceId: -1, frames: 256, inputNames: [], outputNames: [] },
   ports: [],

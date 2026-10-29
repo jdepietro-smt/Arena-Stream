@@ -30,6 +30,12 @@ async function saveConfig(cfg: GatewayConfig) {
   } catch { /* ignore */ }
 }
 
+/** Just an address (5.78.236.254) means the cloud install: wss://<address>/comms. A full ws:// or wss:// URL is used as typed. */
+const serverUrl = (v: string) => {
+  const t = v.trim()
+  return /^wss?:\/\//i.test(t) ? t : `wss://${t.replace(/\/+$/, '')}/comms`
+}
+
 export default function App() {
   const engine = useMemo(() => new CommsEngine(), [])
   const [, bump] = useState(0)
@@ -66,7 +72,7 @@ export default function App() {
   const connect = () => {
     if (!cfg) return
     void engine.join({
-      url: cfg.server.trim(), auth: 'accounts', username: cfg.username.trim() || 'gateway', password: '',
+      url: serverUrl(cfg.server), auth: 'accounts', username: '', password: '',
       name: '', pin: '', echoCancel: false, gateway: true,
     })
   }
@@ -133,8 +139,7 @@ export default function App() {
         <section className="card">
           <h2 className="lcd">Arena server</h2>
           <div className="grid3">
-            <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="ws://host:8900" /></label>
-            <label>Gateway account (no password)<input placeholder="gateway" value={cfg.username} onChange={e => patch({ username: e.target.value })} autoComplete="username" /></label>
+            <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.78.236.254" /></label>
           </div>
           <div className="row">
             <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically at start-up</label>

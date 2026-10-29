@@ -37,16 +37,8 @@ export function createAuth(dir, { secret = randomBytes(32) } = {}) {
     return user
   }
 
-  /** A gateway account (flagged in the admin page) joins by name alone; nobody else can use this path. */
-  function gatewayLogin(username) {
-    const user = dir.userByName(username)
-    if (!user || !user.gateway || user.admin || user.disabled) throw new AuthError('bad-login', 'No such gateway account. Create it in the admin page and tick "Gateway".')
-    return user
-  }
-
   return {
     authenticate,
-    gatewayLogin,
     /** A token a browser can keep to rejoin without the password. Valid 14 days, renewed at each use. */
     issueSession(user) {
       const payload = Buffer.from(JSON.stringify({ u: user.id, e: Date.now() + SESSION_TTL_MS, p: pwTag(user) })).toString('base64url')

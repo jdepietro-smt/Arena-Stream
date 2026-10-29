@@ -153,7 +153,6 @@ function userDialog(u) {
     username: h('input', { value: u.username || '' }), name: h('input', { value: u.name || '' }), title: h('input', { value: u.title || '', placeholder: 'defaults to first group' }),
     password: h('input', { type: 'password', placeholder: isNew ? 'min. 8 characters' : 'leave blank to keep', autocomplete: 'new-password' }),
     admin: h('input', { type: 'checkbox', checked: !!u.admin }), disabled: h('input', { type: 'checkbox', checked: !!u.disabled }),
-    gateway: h('input', { type: 'checkbox', checked: !!u.gateway }),
   }
   const groupBoxes = st.groups.map(g => [g, h('input', { type: 'checkbox', checked: u.groups.includes(g.id) })])
   const tri = (ch, key) => {
@@ -171,12 +170,12 @@ function userDialog(u) {
     h('div', { class: 'row2' }, h('label', {}, 'Title', f.title), h('label', {}, 'Password', f.password)),
     h('fieldset', {}, h('legend', {}, 'Groups'), h('div', { class: 'grid' }, groupBoxes.map(([g, b]) => h('label', { class: 'check' }, b, g.name)), !st.groups.length && h('span', { class: 'muted' }, 'No groups yet'))),
     h('fieldset', {}, h('legend', {}, 'Per-user overrides (on top of groups)'), ov),
-    h('div', { class: 'grid' }, h('label', { class: 'check' }, f.admin, 'Administrator'), h('label', { class: 'check' }, f.disabled, 'Disabled'), h('label', { class: 'check', title: 'For the Arena Comms Gateway app: signs in by username alone, no password' }, f.gateway, 'Gateway (no password)'))),
+    h('div', { class: 'grid' }, h('label', { class: 'check' }, f.admin, 'Administrator'), h('label', { class: 'check' }, f.disabled, 'Disabled'))),
   async () => {
     const overrides = {}
     ov.querySelectorAll('select').forEach(s => { if (s.value) (overrides[s.dataset.ch] ??= {})[s.dataset.key] = s.value === 'true' })
     const body = { username: f.username.value, name: f.name.value || f.username.value, title: f.title.value, groups: groupBoxes.filter(([, b]) => b.checked).map(([g]) => g.id),
-      overrides, admin: f.admin.checked, disabled: f.disabled.checked, gateway: f.gateway.checked, password: f.password.value }
+      overrides, admin: f.admin.checked, disabled: f.disabled.checked, password: f.password.value }
     if (isNew) await api('POST', 'users', body); else await api('PUT', 'users/' + u.id, body)
   }, isNew ? '' : confirmDelete('user ' + u.name, () => api('DELETE', 'users/' + u.id)))
 }

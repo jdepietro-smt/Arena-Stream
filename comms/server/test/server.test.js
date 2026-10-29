@@ -535,17 +535,16 @@ test('admin page script compiles (a syntax slip there leaves the admin page blan
   for (const code of scripts) assert.doesNotThrow(() => new vm.Script(code, { filename: 'admin/index.html' }))
 })
 
-test('gateway account joins by name alone; no other account can', async () => {
+test('gateway app joins with no account, even where accounts are required, and sees every channel', async () => {
   const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, {})
   const port = await srv.listen(0)
-  const dir = srv.directory
-  dir.addUser({ username: 'gateway', gateway: true, admin: true }) // admin flag is dropped for a gateway
-  dir.addUser({ username: 'alice', password: 'correct horse' })
-  assert.equal(dir.userByName('gateway').admin, false)
-  const join = async msg => { const c = await client(port); c.send({ type: 'join', ...msg }); const m = await c.next(x => x.type === 'joined' || x.type === 'error' || x.type === 'welcome' || x.type === 'rejected'); c.ws.close(); return m }
-  const ok = await join({ username: 'gateway', gateway: true })
-  assert.ok(ok.type !== 'error' && ok.type !== 'rejected', JSON.stringify(ok))
-  const bad = await join({ username: 'alice', gateway: true })
-  assert.ok(bad.type === 'error' || bad.type === 'rejected', 'a normal account cannot skip its password: ' + JSON.stringify(bad))
+  const ch = srv.directory.addChannel({ name: 'Production' })
+  const join = async msg => { const c = await client(port); c.send({ type: 'join', ...msg }); const m = await c.next(x => x.type === 'welcome' || x.type === 'error'); c.ws.close(); return m }
+  const ok = await join({ gateway: true })
+  assert.equal(ok.type, 'welcome', JSON.stringify(ok))
+  const mine = ok.channels.find(c => c.id === ch.id)
+  assert.ok(mine && mine.canTalk && mine.canListen, JSON.stringify(ok.channels))
+  assert.equal(ok.me.admin, false)
+  assert.equal((await join({ username: 'nobody', password: 'x' })).type, 'error', 'normal sign-in still needs an account')
   await srv.close?.()
 })

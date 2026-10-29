@@ -347,14 +347,12 @@ export function createServer(
 
     async function join(msg) {
       let user
-      if (authMode === 'accounts' && msg.token) {
+      if (msg.gateway && !msg.token && !msg.username) {
+        // The Arena Comms Gateway app: no account, no password. Just the server address.
+        user = { id: `gateway:${randomUUID()}`, ephemeral: true, gateway: true, name: String(msg.name || 'Gateway').slice(0, MAX_NAME), title: 'Gateway', groups: [], overrides: {} }
+      } else if (authMode === 'accounts' && msg.token) {
         user = auth.userForSession(msg.token)
         if (!user) return fail('bad-token', 'Your session expired. Sign in again.')
-      } else if (authMode === 'accounts' && msg.gateway && !msg.password) {
-        try { user = auth.gatewayLogin(msg.username) } catch (e) {
-          if (e instanceof AuthError) return fail(e.code, e.message)
-          throw e
-        }
       } else if (authMode === 'accounts') {
         try {
           user = await auth.authenticate(msg.username, msg.password, `${ip}:${String(msg.username).toLowerCase()}`)

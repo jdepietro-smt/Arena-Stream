@@ -104,6 +104,8 @@ export class Directory {
         if (gr.music) slot(ch).music = true
       }
     }
+    // The gateway app is a trusted bridge to the broadcast comms system: it talks and listens on every channel.
+    if (user.gateway) for (const c of this.channels) { const s = slot(c.id); s.talk = !c.music; s.listen = true }
     for (const [ch, ov] of Object.entries(user.overrides ?? {})) {
       if (!this.channel(ch)) continue
       if (typeof ov.talk === 'boolean') slot(ch).talk = ov.talk
@@ -268,9 +270,6 @@ export class Directory {
       out.overrides = ov
     }
     if (body.admin !== undefined) out.admin = !!body.admin
-    // A gateway account signs in without a password (see auth.gatewayLogin), so it can never be an administrator.
-    if (body.gateway !== undefined) out.gateway = !!body.gateway
-    if (out.gateway) out.admin = false
     if (body.disabled !== undefined) out.disabled = !!body.disabled
     if (body.password !== undefined && body.password !== '') {
       if (String(body.password).length < 8) throw new DirectoryError('Password must be at least 8 characters')
@@ -284,9 +283,8 @@ export class Directory {
   }
 
   addUser(body) {
-    if (!body.password && !body.gateway) throw new DirectoryError('A password is required')
-    if (body.gateway && !body.password) body = { ...body, password: randomBytes(18).toString('base64url') } // unusable: gateways never use it
-    const base = { id: `u_${randomBytes(5).toString('hex')}`, username: '', name: '', title: '', groups: [], overrides: {}, admin: false, disabled: false, gateway: false }
+    if (!body.password) throw new DirectoryError('A password is required')
+    const base = { id: `u_${randomBytes(5).toString('hex')}`, username: '', name: '', title: '', groups: [], overrides: {}, admin: false, disabled: false }
     if (!body.username) throw new DirectoryError('Username is required')
     const u = this.#cleanUserFields({ name: body.username, ...body }, base)
     this.users.push(u)
