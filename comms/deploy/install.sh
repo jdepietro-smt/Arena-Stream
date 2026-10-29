@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs Arena Comms next to the Arena stream server on one Ubuntu box.
-# Run as root:   cd /opt/arena && git pull && bash comms/deploy/install.sh
+# Run as root from the checkout:   bash comms/deploy/install.sh
 # Safe to re-run: it updates code and services, and keeps existing config, keys and users.
 #
 # What it sets up
@@ -13,7 +13,8 @@
 #   The dashboard gets a "Comms" tab injected by nginx; the dashboard's own files are untouched.
 set -euo pipefail
 
-REPO="${REPO:-/opt/arena}"
+# Default to the checkout this script lives in, so no environment variable is needed.
+REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 COMMS="$REPO/comms"
 ETC=/etc/arena-comms
 WEBROOT=/var/www/arena-comms
