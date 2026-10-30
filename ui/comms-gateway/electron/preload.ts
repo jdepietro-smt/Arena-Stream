@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('gw', {
   asioTx: (slot: string, planar: Float32Array, first = 0) => ipcRenderer.send('asio:tx', slot, planar, first),
   onAsioRx: (cb: ((slot: string, planar: Float32Array, peaks?: Float32Array) => void) | null) => { asioRx = cb },
   getConfig: () => ipcRenderer.invoke('config:get'),
+  relaunch: () => ipcRenderer.invoke('app:relaunch'),
   setConfig: (cfg: unknown) => ipcRenderer.invoke('config:set', cfg),
   rtpOpen: (id: string, cfg: unknown) => ipcRenderer.invoke('rtp:open', id, cfg),
   rtpClose: (id: string) => ipcRenderer.invoke('rtp:close', id),

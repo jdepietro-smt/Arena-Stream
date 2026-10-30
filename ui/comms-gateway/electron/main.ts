@@ -8,6 +8,12 @@ import { asioClose, registerAsio } from './asio'
 // An unattended gateway has no user to click before audio may start.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 app.setName('Arena Comms Gateway')
+// "Send over TCP": WebRTC may not use UDP at all, so a lossy UDP path (the readout's packet loss) cannot drop audio.
+// It is a start-up switch, so it is read from the saved settings now and a change needs a restart.
+try {
+  const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'gateway-config.json'), 'utf8'))
+  if (saved.forceTcp) app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp')
+} catch { /* no settings yet */ }
 app.setAppUserModelId('com.smt.arenacommsgateway')
 
 const hasSingleLock = app.requestSingleInstanceLock()
@@ -42,6 +48,8 @@ function createWindow() {
 
 // ── config (password encrypted with the OS keystore when available) ──────────
 const configFile = () => path.join(app.getPath('userData'), 'gateway-config.json')
+
+ipcMain.handle('app:relaunch', () => { app.relaunch(); app.exit(0) })
 
 ipcMain.handle('config:get', () => {
   try {

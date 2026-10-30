@@ -72,7 +72,8 @@ export default function App() {
       setCfg(c => c && { ...c, asio: c.asio.map(a => (a.driver ? a : { ...a, driver: asioDevices.find(d => d.id === a.deviceId)?.name ?? '' })) })
   }, [cfg, asioDevices])
 
-  useEffect(() => { void loadConfig().then(setCfg) }, [])
+  const tcpAtStart = useRef(false)
+  useEffect(() => { void loadConfig().then(c => { tcpAtStart.current = !!c.forceTcp; setCfg(c) }) }, [])
   // A new name reaches the server straight away, no reconnect.
   const wantName = cfg?.name.trim() || 'Gateway'
   useEffect(() => {
@@ -178,6 +179,10 @@ export default function App() {
             {connected
               ? <button className="btn danger" onClick={disconnect}>Disconnect</button>
               : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
+          </div>
+          <div className="row">
+            <label className="check" title="Use this if the readout at the top shows packet loss: TCP resends what the network drops, at the cost of a little extra delay."><input type="checkbox" checked={!!cfg.forceTcp} onChange={e => patch({ forceTcp: e.target.checked })} />Send audio over TCP (for a network that loses packets)</label>
+            {!!cfg.forceTcp !== tcpAtStart.current && <button className="btn" onClick={() => void saveConfig(cfg).then(() => window.gw?.relaunch())}>Restart to apply</button>}
           </div>
           {status === 'error' && <div className="error">{engine.error}</div>}
           <p className="hint">No account needed: enter the server address and connect. The gateway talks and listens on every channel. If it stays on reconnecting, Windows does not trust the server's certificate yet (install it under Trusted Root Certification Authorities).</p>

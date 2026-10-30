@@ -67,6 +67,8 @@ export interface GatewayConfig {
   /** How this gateway shows up in the server's list of people. */
   name: string
   server: string; username: string; password: string; autoConnect: boolean
+  /** Send and receive audio over TCP instead of UDP (for a network that drops UDP packets). Applies after a restart. */
+  forceTcp?: boolean
   device: DeviceCfg
   asio: AsioCfg[]
   ports: PortCfg[]
@@ -106,6 +108,7 @@ declare global {
   interface Window {
     gw?: {
       getConfig(): Promise<GatewayConfig | null>
+      relaunch(): Promise<void>
       setConfig(c: GatewayConfig): Promise<void>
       rtpOpen(id: string, c: RtpCfg): Promise<{ ok: boolean; error?: string }>
       rtpClose(id: string): Promise<void>
