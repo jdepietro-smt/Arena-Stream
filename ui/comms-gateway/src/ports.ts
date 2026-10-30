@@ -35,6 +35,8 @@ export interface PortCfg {
   /** Which ASIO interface (AsioCfg.id) the input / output channel belongs to (source: 'asio'); blank = the first one. */
   inDev?: string
   outDev?: string
+  /** Send as stereo music (this input = left, the next = right) instead of mono voice. Music-capable channels only. */
+  stereo?: boolean
   rtp: RtpCfg
   /** `always`: send continuously instead of waiting for voice (a program feed). */
   vox: { thresholdDb: number; hangMs: number; echoGuard: boolean; always?: boolean }
@@ -91,7 +93,7 @@ export function structuralKey(cfg: GatewayConfig): string {
     d: cfg.device,
     a: (cfg.asio ?? []).map(a => ({ i: a.id, d: a.driver || a.deviceId, f: a.frames })),
     p: cfg.ports.map(p => ({
-      id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, di: p.inDev ?? '', do: p.outDev ?? '', ii: p.inputId ?? '', oi: p.outputId ?? '',
+      id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, di: p.inDev ?? '', do: p.outDev ?? '', st: !!p.stereo, ii: p.inputId ?? '', oi: p.outputId ?? '',
       r: p.source === 'rtp' ? p.rtp : null,
     })),
   })
@@ -144,6 +146,8 @@ class Port implements PortRuntime {
   inAn!: AnalyserNode
   outAn!: AnalyserNode
   inGain!: GainNode
+  /** Stereo ports only: the left/right mix that is sent as music. */
+  stereoNode: GainNode | null = null
   outGain!: GainNode
   toneGain!: GainNode
   private buf = new Float32Array(1024)
@@ -400,6 +404,14 @@ export class GatewayRuntime {
       }
       this.deviceError = [...new Set([...inErr.values(), ...outErr.values()])].join('. ')
 
+      // Stereo ports send their mix as music on the channel (needs the server to let this gateway start music there).
+      for (const p of this.ports) {
+        if (!p.cfg.stereo || !p.stereoNode) continue
+        const ch = this.engine.channels.find(x => x.id === p.cfg.channel)
+        if (!(ch?.music || ch?.withMusic)) p.error = p.error || 'Stereo needs a music channel (a channel with music switched on)'
+        else if (!ch.canMusic) p.error = p.error || 'This gateway may not start music on that channel (update the server)'
+        else void this.engine.startMusic(p.cfg.channel, { kind: 'node', node: p.stereoNode })
+      }
       this.timer = setInterval(() => this.voxTick(), 20)
     } finally {
       this.building = false
@@ -418,7 +430,7 @@ export class GatewayRuntime {
     const delay = ctx.createDelay(0.1); delay.delayTime.value = 0.03
     p.inGain.connect(p.inAn)
     p.inGain.connect(delay)
-    delay.connect(this.engine.channelTx(c.channel))
+    if (!c.stereo) delay.connect(this.engine.channelTx(c.channel))
     // Built-in test tone (1 kHz) for commissioning, injected ahead of the gain stage.
     const osc = ctx.createOscillator(); osc.frequency.value = 1000
     p.toneGain = ctx.createGain(); p.toneGain.gain.value = 0
@@ -441,7 +453,23 @@ export class GatewayRuntime {
       const fromSystem = c.inDev === SYSTEM_DEV
       const gi = fromSystem ? undefined : asio?.get(c.inDev || firstAsio)
       const go = asio?.get(c.outDev || firstAsio)
-      if (c.inCh < 1) { /* no input routed */ } else if (fromSystem) {
+      if (c.stereo) {
+        // Stereo: this input is left and the next is right (for the PC's own audio, its left and right as they are).
+        const st = ctx.createChannelMerger(2)
+        const tap = (ch: number, side: number) => {
+          if (fromSystem) { if (system) system.splitter.connect(st, side, side); return !!system }
+          if (!gi || ch < 1 || ch > gi.chans) return false
+          gi.splitters[Math.floor((ch - 1) / MAX_NODE_CH)].connect(st, (ch - 1) % MAX_NODE_CH, side)
+          return true
+        }
+        if (c.inCh < 1) { /* no input routed */ } else if (!tap(c.inCh, 0) || !tap(c.inCh + 1, 1)) p.error = fromSystem ? this.systemError || 'System audio is not available' : `Stereo needs inputs ${c.inCh} and ${c.inCh + 1} on this interface`
+        else {
+          p.stereoNode = ctx.createGain()
+          p.stereoNode.gain.value = dbToGain(c.inGainDb)
+          st.connect(p.stereoNode)
+          p.stereoNode.connect(p.inAn) // the meter
+        }
+      } else if (c.inCh < 1) { /* no input routed */ } else if (fromSystem) {
         if (!system) p.error = this.systemError || 'System audio is not available'
         else if (c.inCh === 1) system.mix.connect(p.inGain)
         else system.splitter.connect(p.inGain, c.inCh - 2)
@@ -483,6 +511,7 @@ export class GatewayRuntime {
       if (!next) continue
       p.cfg = next
       if (p.inGain) p.inGain.gain.value = dbToGain(next.inGainDb)
+      if (p.stereoNode) p.stereoNode.gain.value = dbToGain(next.inGainDb)
       if (p.outGain) p.outGain.gain.value = dbToGain(next.outGainDb)
     }
   }
@@ -504,6 +533,7 @@ export class GatewayRuntime {
       const guarded = v.echoGuard && now - p.lastOut < 250
       const above = !guarded && p.inDb() > v.thresholdDb
       if (above) p.lastAbove = now
+      if (p.cfg.stereo) { if (p.open) { p.open = false; changed = true } continue } // sent as music, not keyed
       const routed = p.cfg.source !== 'asio' || p.cfg.inCh > 0
       const want = (ch?.canTalk ?? false) && (v.always ? routed : above || (p.open && now - p.lastAbove < v.hangMs))
       // The engine drops held keys on a server reconnect, so compare with its real state, not just ours.
@@ -520,6 +550,7 @@ export class GatewayRuntime {
     this.timer = null
     for (const p of this.ports) {
       if (p.open) this.engine.release(p.cfg.channel)
+      if (p.cfg.stereo) this.engine.stopMusic(p.cfg.channel)
       if (p.cfg.source === 'rtp') void window.gw?.rtpClose(p.cfg.id)
       p.rxNode?.disconnect()
     }

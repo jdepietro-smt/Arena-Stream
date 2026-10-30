@@ -105,7 +105,7 @@ export class Directory {
       }
     }
     // The gateway app is a trusted bridge to the broadcast comms system: it talks and listens on every channel.
-    if (user.gateway) for (const c of this.channels) { const s = slot(c.id); s.talk = !c.music; s.listen = true }
+    if (user.gateway) for (const c of this.channels) { const s = slot(c.id); s.talk = !c.music; s.listen = true; s.music = !!(c.music || c.withMusic) }
     for (const [ch, ov] of Object.entries(user.overrides ?? {})) {
       if (!this.channel(ch)) continue
       if (typeof ov.talk === 'boolean') slot(ch).talk = ov.talk

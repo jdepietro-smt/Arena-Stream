@@ -459,6 +459,9 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
           <div className="mwrap"><div className="ledmeter out"><div style={{ width: pct(outDb) }} /></div></div>
         </div>
       </div>
+      {cfg.source === 'asio' && (channels.find(c => c.id === cfg.channel)?.music || channels.find(c => c.id === cfg.channel)?.withMusic) && (
+        <label className="check" title="Left = the chosen input, right = the next one. Listeners hear it as stereo music, not as a voice."><input type="checkbox" checked={!!cfg.stereo} onChange={e => onChange({ stereo: e.target.checked })} />Send in stereo (this input = left, the next = right)</label>
+      )}
       <label className="check" title="For a program feed: keeps sending to the channel whether or not anything is loud enough"><input type="checkbox" checked={!!cfg.vox.always} onChange={e => onChange({ vox: { ...cfg.vox, always: e.target.checked } })} />Always send (program feed, no voice gating)</label>
       <div className="grid4">
         <label>VOX threshold: {cfg.vox.thresholdDb} dB

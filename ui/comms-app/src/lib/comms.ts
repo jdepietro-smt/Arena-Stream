@@ -11,10 +11,12 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
-export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' }
+export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' } | { kind: 'node'; node: AudioNode }
 interface MusicTx {
   /** Capture sources have a MediaStream; the channel's stream URL is played through an audio element instead. */
   stream: MediaStream | null; el: HTMLAudioElement | null; src: AudioNode; gain: GainNode
+  /** A node the caller feeds (the gateway's stereo mix): what `src` is fed from. */
+  from?: AudioNode
   /** Watchdog for the channel stream (see startMusic). */
   watch?: ReturnType<typeof setInterval>
   dest: MediaStreamAudioDestinationNode; an: AnalyserNode; buf: Float32Array<ArrayBuffer>
@@ -976,14 +978,20 @@ export class CommsEngine {
   async startMusic(ch: string, source: MusicSource) {
     const ctx = this.ctx
     const c = this.channels.find(x => x.id === ch)
-    if (!(c?.music || c?.withMusic) || !c.canMusic || !ctx || this.opts?.gateway) return
+    // A gateway sends music only from a stereo mix it builds itself (kind 'node').
+    if (!(c?.music || c?.withMusic) || !c.canMusic || !ctx || (this.opts?.gateway && source.kind !== 'node')) return
     this.stopMusic(ch, false)
     this.musicError = ''
     let stream: MediaStream | null = null
     let el: HTMLAudioElement | null = null
     let src: AudioNode
+    let from: AudioNode | undefined
     try {
-      if (source.kind === 'stream') {
+      if (source.kind === 'node') {
+        from = source.node
+        src = ctx.createGain() // a private tap, so stopping the music does not disconnect the caller's node from anything else
+        from.connect(src)
+      } else if (source.kind === 'stream') {
         // The channel's stream URL, relayed by the server (same origin: no CORS trouble, URL never reaches the browser).
         el = new Audio()
         el.crossOrigin = 'anonymous'
@@ -1037,7 +1045,7 @@ export class CommsEngine {
     src.connect(gain)
     gain.connect(dest)
     gain.connect(an)
-    this.musicTx.set(ch, { stream, el, src, gain, dest, an, buf: new Float32Array(an.fftSize) })
+    this.musicTx.set(ch, { stream, el, src, gain, dest, an, buf: new Float32Array(an.fftSize), from })
     // Sharing stopped from the browser's own bar: switch the music off.
     stream?.getAudioTracks()[0]?.addEventListener('ended', () => { if (this.musicTx.get(ch)?.stream === stream) this.stopMusic(ch) })
     if (el) {
@@ -1098,6 +1106,7 @@ export class CommsEngine {
     this.musicTx.delete(ch)
     if (tx && notify) this.send({ type: 'music', channel: ch, on: false })
     if (tx) {
+      try { tx.from?.disconnect(tx.src) } catch { /* already apart */ }
       tx.src.disconnect()
       tx.gain.disconnect()
       if (tx.watch) clearInterval(tx.watch)
