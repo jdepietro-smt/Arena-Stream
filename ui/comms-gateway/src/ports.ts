@@ -304,7 +304,9 @@ export class GatewayRuntime {
           const using = active.some(p => p.source === 'asio' && (p.inDev || cfg.asio[0].id) === a.id || p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id)
           if (!dev) { if (using) this.deviceError ||= `ASIO driver "${a.driver || a.deviceId}" is not available. Is the interface plugged in and switched on?`; continue }
           // The whole interface is opened even with nothing routed yet, so the grid's meters show activity.
-          const res = await window.gw!.asioOpen(a.id, { deviceId: dev.id, inputs: 64, outputs: 64, frames: a.frames })
+          // Outputs cost CPU even when silent, so only as many are opened as the ports use (inputs stay whole for the meters).
+          const needOut = active.reduce((m, p) => p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id ? Math.max(m, p.outCh) : m, 0)
+          const res = await window.gw!.asioOpen(a.id, { deviceId: dev.id, inputs: 64, outputs: needOut, frames: a.frames })
           this.asioInfo.set(a.id, res)
           if (!res.ok) { this.deviceError ||= `ASIO ${dev.name}: ${res.error}`; continue }
           if (!moduleLoaded) { await ctx.audioWorklet.addModule('asio-worklet.js'); moduleLoaded = true }
@@ -319,7 +321,7 @@ export class GatewayRuntime {
           for (let first = 0; first < nIn; first += MAX_NODE_CH) {
             const count = Math.min(MAX_NODE_CH, nIn - first)
             const node = new AudioWorkletNode(ctx, 'asio-in', {
-              numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 512 },
+              numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 1536 }, // a ~32 ms cushion: a late block from the helper must not cut the audio
             })
             const splitter = ctx.createChannelSplitter(count)
             node.connect(splitter)

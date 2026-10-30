@@ -21,12 +21,18 @@ class AsioIn extends AudioWorkletProcessor {
   push(data) {
     const planar = data instanceof Float32Array ? data : new Float32Array(data.buffer ? data.buffer : data)
     const frames = Math.floor(planar.length / this.n)
-    for (let i = 0; i < frames; i++) {
-      if (this.count === this.cap) { this.r = (this.r + 1) % this.cap; this.count-- }
-      for (let c = 0; c < this.n; c++) this.rings[c][this.w] = planar[c * frames + i]
-      this.w = (this.w + 1) % this.cap
-      this.count++
+    if (!frames) return
+    // Overflow drops the oldest audio.
+    const over = this.count + frames - this.cap
+    if (over > 0) { this.r = (this.r + over) % this.cap; this.count -= over }
+    const first = Math.min(frames, this.cap - this.w) // up to the end of the ring, then wrap
+    for (let c = 0; c < this.n; c++) {
+      const ring = this.rings[c]
+      ring.set(planar.subarray(c * frames, c * frames + first), this.w)
+      if (first < frames) ring.set(planar.subarray(c * frames + first, (c + 1) * frames), 0)
     }
+    this.w = (this.w + frames) % this.cap
+    this.count += frames
   }
 
   process(_inputs, outputs) {
