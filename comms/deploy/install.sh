@@ -101,11 +101,31 @@ step "Building the Comms web app"
 [ -f "$REPO/ui/comms-app/dist/index.html" ] || { echo "web build failed"; exit 1; }
 install -m 644 "$COMMS/deploy/comms-tab.js" "$WEBROOT/comms-tab.js"
 
-step "TLS certificate (self-signed for $IP)"
-if [ ! -f "$ETC/tls/cert.pem" ]; then
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout "$ETC/tls/key.pem" -out "$ETC/tls/cert.pem" \
-    -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" 2>/dev/null
-  chmod 600 "$ETC/tls/key.pem"
+TLS_CERT="$ETC/tls/cert.pem"
+TLS_KEY="$ETC/tls/key.pem"
+SERVER_NAME="_"
+if [ -n "${COMMS_DOMAIN:-}" ]; then
+  # A real certificate for a domain that points at this server: browsers and the gateway apps trust it with nothing to install.
+  step "TLS certificate (Let's Encrypt for $COMMS_DOMAIN)"
+  apt-get install -y -qq certbot >/dev/null
+  if [ ! -f "/etc/letsencrypt/live/$COMMS_DOMAIN/fullchain.pem" ]; then
+    # Needs the name to resolve to this server and port 80 reachable. nginx is paused for the few seconds it takes.
+    EMAIL_ARGS=(--register-unsafely-without-email)
+    [ -n "${COMMS_EMAIL:-}" ] && EMAIL_ARGS=(-m "$COMMS_EMAIL")
+    certbot certonly --standalone -d "$COMMS_DOMAIN" --non-interactive --agree-tos "${EMAIL_ARGS[@]}" \
+      --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx" \
+      || { echo "Could not get a certificate: does $COMMS_DOMAIN point at $IP, and is port 80 open?"; exit 1; }
+  fi
+  TLS_CERT="/etc/letsencrypt/live/$COMMS_DOMAIN/fullchain.pem"
+  TLS_KEY="/etc/letsencrypt/live/$COMMS_DOMAIN/privkey.pem"
+  SERVER_NAME="$COMMS_DOMAIN"
+else
+  step "TLS certificate (self-signed for $IP)"
+  if [ ! -f "$ETC/tls/cert.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout "$ETC/tls/key.pem" -out "$ETC/tls/cert.pem" \
+      -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" 2>/dev/null
+    chmod 600 "$ETC/tls/key.pem"
+  fi
 fi
 
 step "Services"
@@ -149,9 +169,9 @@ map \$http_upgrade \$arena_conn { default upgrade; '' close; }
 
 server {
     listen 443 ssl;
-    server_name _;
-    ssl_certificate     $ETC/tls/cert.pem;
-    ssl_certificate_key $ETC/tls/key.pem;
+    server_name $SERVER_NAME;
+    ssl_certificate     $TLS_CERT;
+    ssl_certificate_key $TLS_KEY;
     client_max_body_size 50m;
 
     location = /comms-tab.js { alias $WEBROOT/comms-tab.js; add_header Cache-Control no-cache; }
@@ -220,6 +240,7 @@ systemctl reload nginx
 step "Firewall"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow 443/tcp >/dev/null; ufw allow 7881/tcp >/dev/null; ufw allow 7882/udp >/dev/null
+  [ -n "${COMMS_DOMAIN:-}" ] && ufw allow 80/tcp >/dev/null # the certificate check and its renewals
   echo "ufw: opened 443/tcp, 7881/tcp, 7882/udp"
 else
   echo "ufw not active"
@@ -238,10 +259,11 @@ curl -fsSk --max-time 5 https://127.0.0.1/login | grep -c comms-tab.js | sed 's/
 
 echo
 echo "=============================================="
-echo "Dashboard (with Comms tab):  https://$IP/"
-echo "Comms admin:                 https://$IP/comms/admin"
+HOST="${COMMS_DOMAIN:-$IP}"
+echo "Dashboard (with Comms tab):  https://$HOST/"
+echo "Comms admin:                 https://$HOST/comms/admin"
 if [ "$FIRST_RUN" = 1 ]; then
   echo "Admin login:                 admin / $COMMS_ADMIN_PASSWORD   (change it in the admin page)"
 fi
-echo "Your browser warns once about the self-signed certificate; accept it."
+[ -z "${COMMS_DOMAIN:-}" ] && echo "Your browser warns once about the self-signed certificate; accept it."
 echo "=============================================="
