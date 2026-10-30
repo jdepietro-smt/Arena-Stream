@@ -148,6 +148,8 @@ class Port implements PortRuntime {
   inGain!: GainNode
   /** Stereo ports only: the left/right mix that is sent as music. */
   stereoNode: GainNode | null = null
+  /** When the music send was last (re)started, so a dropped one is retried every few seconds. */
+  musicTry = 0
   outGain!: GainNode
   toneGain!: GainNode
   private buf = new Float32Array(1024)
@@ -529,6 +531,12 @@ export class GatewayRuntime {
       const ch = chans.find(c => c.id === p.cfg.channel)
       const access: Port['access'] = !ch ? 'none' : ch.music ? (ch.canMusic ? 'ok' : 'none') : ch.canTalk && ch.canListen ? 'ok' : ch.canTalk ? 'talk-only' : ch.canListen ? 'listen-only' : 'none'
       if (access !== p.access) { p.access = access; changed = true }
+      // The engine drops a music send when the server re-reads permissions or a publish fails; a stereo port
+      // must bring it back by itself instead of staying silent until the gateway is rebuilt.
+      if (p.stereoNode && this.isStereo(p.cfg) && ch?.canMusic && !this.engine.musicSending(p.cfg.channel) && now - p.musicTry > 3000) {
+        p.musicTry = now
+        void this.engine.startMusic(p.cfg.channel, { kind: 'node', node: p.stereoNode })
+      }
       if (!p.inAn) continue
       const v = p.cfg.vox
       const outDb = p.outDb()
