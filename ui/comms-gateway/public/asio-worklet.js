@@ -15,6 +15,9 @@ class AsioIn extends AudioWorkletProcessor {
     this.count = 0
     this.target = (options.processorOptions && options.processorOptions.targetSamples) || 512
     this.primed = false
+    this.dry = 0 // times the cushion ran out (audible as a dropout)
+    this.trims = 0 // times it was far ahead and skipped back (audible as a click)
+    this.sent = 0
     this.port.onmessage = e => this.push(e.data)
   }
 
@@ -42,18 +45,20 @@ class AsioIn extends AudioWorkletProcessor {
       if (this.count >= this.target) this.primed = true
       else return true // silence until a little audio has built up
     }
-    if (this.count < len) { this.primed = false; return true } // ran dry: silence, then rebuild the cushion
+    if (this.count < len) { this.primed = false; this.dry++; return true } // ran dry: silence, then rebuild the cushion
     // The interface clock can run a touch faster than ours: if we are far ahead, skip back to the cushion.
     if (this.count > this.target * 6) {
       const drop = this.count - this.target * 2
       this.r = (this.r + drop) % this.cap
       this.count -= drop
+      this.trims++
     }
     for (let i = 0; i < len; i++) {
       for (let c = 0; c < this.n; c++) out[c][i] = this.rings[c][this.r]
       this.r = (this.r + 1) % this.cap
     }
     this.count -= len
+    if ((this.sent += len) >= 48000) { this.sent = 0; this.port.postMessage({ stat: true, dry: this.dry, trims: this.trims }) }
     return true
   }
 }

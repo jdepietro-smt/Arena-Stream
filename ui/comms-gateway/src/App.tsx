@@ -161,6 +161,7 @@ export default function App() {
       <div className="titlebar">
         <div className="brand"><img src="logo.png" alt="" /><span>ARENA</span><b>COMMS</b><span className="gw">GATEWAY</span></div>
         <div className="title-right">
+          {status === 'connected' && <LinkHealth engine={engine} runtime={runtime} />}
           <span className={`pill ${status}`}>{status === 'connected' ? `Connected · ${engine.myName}` : status === 'error' ? 'Error' : status}</span>
         </div>
       </div>
@@ -495,5 +496,28 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
         {problem && <span className="warn">{problem}</span>}
       </div>
     </section>
+  )
+}
+
+/** Live health: loss/delay on the send link to the server, and dropouts in each interface's input buffer. */
+function LinkHealth({ engine, runtime }: { engine: CommsEngine; runtime: GatewayRuntime }) {
+  const [link, setLink] = useState<{ rttMs: number; lost: number; sent: number; jitterMs: number } | null>(null)
+  useEffect(() => {
+    let prev: { lost: number; sent: number } | null = null
+    const t = setInterval(async () => {
+      const s = await engine.linkStats()
+      if (!s) return
+      setLink({ ...s, lost: prev ? s.lost - prev.lost : 0, sent: prev ? s.sent - prev.sent : 0 }) // over the last interval
+      prev = { lost: s.lost, sent: s.sent }
+    }, 3000)
+    return () => clearInterval(t)
+  }, [engine])
+  const dry = [...runtime.asioHealth.values()].reduce((n, h) => n + h.dry, 0)
+  const trims = [...runtime.asioHealth.values()].reduce((n, h) => n + h.trims, 0)
+  const pct = link && link.sent > 0 ? (link.lost / (link.sent + link.lost)) * 100 : 0
+  return (
+    <span className="muted" title="Send link to the server over the last 3 s, and ASIO input buffer dropouts since the gateway connected" style={{ marginRight: 10, fontSize: 12 }}>
+      {link ? `link ${Math.round(link.rttMs)} ms · loss ${pct.toFixed(1)}% · jitter ${link.jitterMs.toFixed(0)} ms` : 'link …'} · buffer dropouts {dry} · skips {trims}
+    </span>
   )
 }

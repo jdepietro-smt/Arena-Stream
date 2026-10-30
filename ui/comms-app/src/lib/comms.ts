@@ -943,6 +943,22 @@ export class CommsEngine {
 
   musicSending(ch: string): boolean { return this.musicTx.has(ch) }
 
+  /** Quality of the send link to the media server, from the WebRTC stats (gateways use this for a health readout). */
+  async linkStats(): Promise<{ rttMs: number; lost: number; sent: number; jitterMs: number } | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pc = (this.room as any)?.engine?.pcManager?.publisher
+    let rep: RTCStatsReport | undefined
+    try { rep = await pc?.getStats?.() } catch { return null }
+    if (!rep) return null
+    let rttMs = 0, lost = 0, sent = 0, jitterMs = 0
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rep.forEach((r: any) => {
+      if (r.type === 'remote-inbound-rtp' && r.kind === 'audio') { rttMs = Math.max(rttMs, (r.roundTripTime || 0) * 1000); lost += r.packetsLost || 0; jitterMs = Math.max(jitterMs, (r.jitter || 0) * 1000) }
+      if (r.type === 'outbound-rtp' && r.kind === 'audio') sent += r.packetsSent || 0
+    })
+    return { rttMs, lost, sent, jitterMs }
+  }
+
   private attachMusic(ch: string, track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
     const ctx = this.ctx
     if (!ctx || !track.sid) return

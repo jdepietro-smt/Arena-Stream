@@ -181,6 +181,8 @@ export class GatewayRuntime {
   private rtpBound = false
   /** What each interface opened as (by AsioCfg.id), and its driver's channel counts. */
   asioInfo = new Map<string, AsioOpenResult>()
+  /** Per interface: how often its input buffer ran dry (a dropout) or had to skip ahead (a click) since the build. */
+  asioHealth = new Map<string, { dry: number; trims: number }>()
   private asioNodes: AudioNode[] = []
   /** Peak level (0..1, slowly falling) of every interface input and output, for the routing grid's meters. */
   private asioPeaks = new Map<string, { in: Float32Array; out: Float32Array }>()
@@ -326,12 +328,20 @@ export class GatewayRuntime {
           const sent = [...use].filter(c => c >= 0 && c < nIn).sort((x, y) => x - y)
           sent.forEach((c, k) => g.useIdx.set(c, k))
           const frames = (len: number, ch: number) => Math.floor(len / ch)
-          const inChunks: { first: number; count: number; node: AudioWorkletNode }[] = []
+          const inChunks: { first: number; count: number; node: AudioWorkletNode; dry?: number; trims?: number }[] = []
           for (let first = 0; first < sent.length; first += MAX_NODE_CH) {
             const count = Math.min(MAX_NODE_CH, sent.length - first)
             const node = new AudioWorkletNode(ctx, 'asio-in', {
               numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 1536 }, // a ~32 ms cushion: a late block from the helper must not cut the audio
             })
+            node.port.onmessage = e => {
+              const d = e.data as { stat?: boolean; dry: number; trims: number }
+              if (!d?.stat) return
+              const h = this.asioHealth.get(a.id) ?? { dry: 0, trims: 0 }
+              this.asioHealth.set(a.id, { dry: h.dry - (inChunks.find(x => x.node === node)?.dry ?? 0) + d.dry, trims: h.trims - (inChunks.find(x => x.node === node)?.trims ?? 0) + d.trims })
+              const me = inChunks.find(x => x.node === node)
+              if (me) { me.dry = d.dry; me.trims = d.trims }
+            }
             const splitter = ctx.createChannelSplitter(count)
             node.connect(splitter)
             g.splitters.push(splitter)
@@ -598,6 +608,7 @@ export class GatewayRuntime {
       for (const n of this.asioNodes) n.disconnect()
       this.asioNodes = []
       this.asioInfo.clear()
+      this.asioHealth.clear()
       this.asioPeaks.clear()
     }
     this.system = null
