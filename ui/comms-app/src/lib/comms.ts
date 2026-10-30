@@ -1324,6 +1324,13 @@ export class CommsEngine {
     this.emit()
   }
 
+  /** Gateway only: change the name the server shows for this connection, without reconnecting. */
+  rename(name: string) {
+    this.myName = name
+    this.send({ type: 'rename', name })
+    this.emit()
+  }
+
   setListen(ch: string, on: boolean) {
     if (on && !this.channels.find(c => c.id === ch)?.canListen) return
     if (on) this.listen.add(ch); else this.listen.delete(ch)

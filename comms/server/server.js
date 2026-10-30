@@ -429,6 +429,14 @@ export function createServer(
       }
 
       switch (msg.type) {
+        case 'rename': {
+          // Only the gateway app names itself; everyone else's name comes from their account.
+          if (!me.user.gateway) break
+          const name = String(msg.name ?? '').trim().slice(0, MAX_NAME) || 'Gateway'
+          me.user.name = name
+          broadcast({ type: 'peer-update', id: me.id, name, role: me.title })
+          break
+        }
         case 'state': {
           const asList = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : [])
           const prevDirect = me.talk.filter(t => t.startsWith('u:')).join()

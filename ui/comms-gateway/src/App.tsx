@@ -70,6 +70,13 @@ export default function App() {
   }, [cfg, asioDevices])
 
   useEffect(() => { void loadConfig().then(setCfg) }, [])
+  // A new name reaches the server straight away, no reconnect.
+  const wantName = cfg?.name.trim() || 'Gateway'
+  useEffect(() => {
+    if (!cfg || engine.status !== 'connected' || engine.myName === wantName) return
+    const t = setTimeout(() => engine.rename(wantName), 300)
+    return () => clearTimeout(t)
+  }, [wantName, engine.status, engine.myName]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!cfg) return
     const t = setTimeout(() => void saveConfig(cfg), 400)
@@ -169,7 +176,6 @@ export default function App() {
               : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
           </div>
           {status === 'error' && <div className="error">{engine.error}</div>}
-          {connected && engine.myName !== (cfg.name.trim() || 'Gateway') && <div className="hint">The new name applies the next time the gateway connects.</div>}
           <p className="hint">No account needed: enter the server address and connect. The gateway talks and listens on every channel. If it stays on reconnecting, Windows does not trust the server's certificate yet (install it under Trusted Root Certification Authorities).</p>
         </section>
 
