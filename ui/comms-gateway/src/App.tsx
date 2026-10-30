@@ -62,6 +62,9 @@ export default function App() {
     setAsioErr(r.ok ? '' : r.error ?? '')
   }
   useEffect(() => { void refreshAsio() }, [])
+  // Opening an interface reveals its real channel counts (a driver setting may have changed since the list was read).
+  const asioKey = [...runtime.asioInfo].map(([id, r]) => `${id}:${r.inputChannels}:${r.outputChannels}`).join()
+  useEffect(() => { if (asioKey) void refreshAsio() }, [asioKey])
   // Remember each interface by its driver name (its number can change), once the driver list is known.
   useEffect(() => {
     if (!cfg || !asioDevices.length) return

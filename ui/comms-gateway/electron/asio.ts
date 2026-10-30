@@ -97,7 +97,13 @@ export function registerAsio(getWindow: () => BrowserWindow | null) {
     asioClose('_list')
     return r
   })
-  ipcMain.handle('asio:open', (_e, name: string, cfg) => call(name, 'open', cfg))
+  ipcMain.handle('asio:open', async (_e, name: string, cfg: { deviceId: number }) => {
+    const r = await call(name, 'open', cfg)
+    // Opening reports the driver's real channel counts; keep the cached list in step (it can be older than a driver setting change).
+    const d = lastList?.devices?.find(x => x.id === cfg.deviceId)
+    if (r.ok && d) { d.inputChannels = r.inputChannels as number; d.outputChannels = r.outputChannels as number }
+    return r
+  })
   ipcMain.handle('asio:close', async (_e, name?: string) => { asioClose(name) })
   ipcMain.on('asio:tx', (_e, name: string, planar: Float32Array) => {
     const s = slots.get(name)
