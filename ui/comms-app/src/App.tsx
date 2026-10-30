@@ -331,7 +331,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
         <div className="keys">
           {engine.program && <ProgramKey engine={engine} />}
           {engine.channels.map((c, i) => (c.music
-            ? <MusicKey key={c.id} ch={c} engine={engine} prefs={prefs} patch={patch} devices={devices} />
+            ? <MusicKey key={c.id} ch={c} engine={engine} />
             : <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} prefs={prefs} patch={patch} devices={devices} />))}
         </div>
         {dock}
@@ -505,50 +505,28 @@ function MusicControls({ ch, engine, prefs, patch, devices, meter }: {
 }
 
 /**
- * A music-only channel (set up in the admin's Channels, "Music-only channel"). Whoever may talk on it gets the sender
- * controls; whoever may listen gets the channel's level knob and listen switch. Ducked by IFB like the program.
+ * A music-only channel (the Program feed). Just a listen switch and a volume knob; the music itself is started from the
+ * channel's settings in the admin page (server player) or by the gateway.
  */
-function MusicKey({ ch, engine, prefs, patch, devices }: {
-  ch: Channel; engine: CommsEngine; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
-}) {
-  const senders = engine.musicSendersOn(ch.id)
-  const sending = engine.musicSending(ch.id)
+function MusicKey({ ch, engine }: { ch: Channel; engine: CommsEngine }) {
   const listening = engine.listen.has(ch.id)
-  const link = prefs.musicLinkBy[ch.id] ?? ch.link ?? ''
-  const chosen = prefs.musicSrcBy[ch.id] ?? (ch.stream ? 'stream' : 'display')
   return (
-    <div className={`keymod music ${senders.length ? 'onair' : ''} ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
+    <div className={`keymod music ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
       <div className="lcd legend">
         <div className="lg-top">
           <span className="lg-num">♪</span>
           <span className="lg-name">{ch.name}</span>
-          <span className={`lg-tag ${senders.length ? 'live' : ''}`}>{senders.length ? 'ON AIR' : 'OFF'}</span>
-        </div>
-        <div className="lg-sub">
-          {engine.musicError && ch.canMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
-            : engine.ducked && !sending && !ch.noDuck ? <span className="blink">DUCKED · IFB</span>
-            : sending ? <span>SENDING TO THE ROOM</span>
-            : senders.length ? <span>▶ {senders.join(', ').toUpperCase()}</span>
-            : ch.canMusic && chosen === 'display' && link.trim()
-              ? <span className="blink">PRESS START: THE LINK OPENS. THEN GO LIVE</span>
-              : <span className="dim">{ch.canMusic ? 'READY — START A SOURCE' : 'NO MUSIC PLAYING · LISTEN ONLY'}</span>}
         </div>
       </div>
-      {ch.canMusic ? (
-        <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} meter />
-      ) : (
-        <>
-          <div className="pgm-mid">
-            <Knob label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
-              onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
-          </div>
-          <div className="subkeys one">
-            <button className="cap sm" disabled={!ch.canListen} onClick={() => engine.setListen(ch.id, !listening)}>
-              <i className={`led green ${listening ? 'on' : ''}`} />{listening ? 'LISTEN' : 'MUTED'}
-            </button>
-          </div>
-        </>
-      )}
+      <div className="pgm-mid">
+        <Knob label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
+          onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
+      </div>
+      <div className="subkeys one">
+        <button className="cap sm" disabled={!ch.canListen} onClick={() => engine.setListen(ch.id, !listening)}>
+          <i className={`led green ${listening ? 'on' : ''}`} />{listening ? 'LISTEN' : 'MUTED'}
+        </button>
+      </div>
     </div>
   )
 }
