@@ -58,7 +58,7 @@ chmod 700 "$ETC"
 if [ ! -f "$ETC/env" ]; then
   LK_KEY="arena$(openssl rand -hex 4)"
   LK_SECRET="$(openssl rand -hex 24)"
-  ADMIN_PW="$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-14)"
+  ADMIN_PW="${COMMS_ADMIN_PW_INIT:-$(openssl rand -base64 12 | tr -d '/+=' | cut -c1-14)}" # set COMMS_ADMIN_PW_INIT to choose the first admin password
   cat >"$ETC/env" <<EOF
 LK_KEY=$LK_KEY
 LK_SECRET=$LK_SECRET
