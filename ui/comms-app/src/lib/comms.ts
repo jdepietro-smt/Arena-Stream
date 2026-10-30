@@ -958,7 +958,7 @@ export class CommsEngine {
     rep.forEach((r: any) => {
       if (r.type === 'remote-inbound-rtp' && r.kind === 'audio') { rttMs = Math.max(rttMs, (r.roundTripTime || 0) * 1000); lost += r.packetsLost || 0; jitterMs = Math.max(jitterMs, (r.jitter || 0) * 1000) }
       if (r.type === 'outbound-rtp' && r.kind === 'audio') sent += r.packetsSent || 0
-      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') { const l = (rep as unknown as Map<string, any>).get(r.localCandidateId); // eslint-disable-line @typescript-eslint/no-explicit-any if (l) via = `${l.protocol ?? ''} ${l.candidateType ?? ''}`.trim() }
+      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') { const l = (rep as unknown as Map<string, { protocol?: string; candidateType?: string }>).get(r.localCandidateId); if (l) via = `${l.protocol ?? ''} ${l.candidateType ?? ''}`.trim() }
     })
     return { rttMs, lost, sent, jitterMs, via }
   }
