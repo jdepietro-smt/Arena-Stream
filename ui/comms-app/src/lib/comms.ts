@@ -1117,7 +1117,7 @@ export class CommsEngine {
       if (old?.track) await room.localParticipant.unpublishTrack(old.track, false).catch(() => {})
       this.publishCount++
       this.musicPubs.set(ch, await room.localParticipant.publishTrack(tx.dest.stream.getAudioTracks()[0], {
-        name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: true, forceStereo: true, // RED: each packet also carries the one before it, so a lost packet is rarely heard
+        name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
         audioPreset: { maxBitrate: 128_000 },
       }))
       this.send({ type: 'tracks' })
