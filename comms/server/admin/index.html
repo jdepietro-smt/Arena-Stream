@@ -339,7 +339,24 @@ function onlineView() {
         h('td', {}, h('button', { class: 'btn sm danger', onclick: () => confirm('Remove ' + p.name + ' from the intercom?') && act(() => api('POST', 'kick/' + p.id), 'Removed') }, 'Kick'))))) : h('div', { class: 'muted' }, 'Nobody is connected.')]
 }
 
-const TABS = { users: ['Users', usersView], groups: ['Groups', groupsView], channels: ['Channels', channelsView], online: ['Online', onlineView] }
+function ago(t) {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000))
+  return s < 60 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'
+}
+
+// ── gateways ─────────────────────────────────────────────────────────────────
+function gatewaysView() {
+  const list = S.state.gateways || []
+  const on = list.filter(g => g.online).length
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Gateways'), h('div', { class: 'sub' }, on + ' of ' + list.length + ' online. A gateway appears here the first time it connects.'))),
+    list.length ? h('table', {}, h('tr', {}, ['', 'Name', 'Status', 'Last seen', ''].map(x => h('th', {}, x))),
+      list.map(g => h('tr', {}, h('td', {}, h('span', { class: 'dot' + (g.online ? ' on' : ''), title: g.online ? 'online' : 'offline' })), h('td', {}, g.name),
+        h('td', {}, g.online ? h('span', { class: 'chip ok' }, 'online') : h('span', { class: 'chip bad' }, 'offline')),
+        h('td', { class: 'muted' }, g.online ? 'now' : ago(g.lastSeen)),
+        h('td', {}, h('button', { class: 'btn sm danger', disabled: g.online, title: g.online ? 'Online gateways cannot be removed' : '', onclick: () => confirm('Forget gateway ' + g.name + '?') && act(() => api('DELETE', 'gateways/' + g.id), 'Removed') }, 'Remove'))))) : h('div', { class: 'muted' }, 'No gateway has connected yet.')]
+}
+
+const TABS = { users: ['Users', usersView], groups: ['Groups', groupsView], channels: ['Channels', channelsView], gateways: ['Gateways', gatewaysView], online: ['Online', onlineView] }
 
 function render() {
   if (document.querySelector('dialog[open]')) return // don't clobber an open editor during polling

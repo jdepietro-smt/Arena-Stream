@@ -273,7 +273,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
   engine: CommsEngine; name: string; prefs: Prefs; patch: (p: Partial<Prefs>) => void; devices: MediaDeviceInfo[]
   onAudio: () => void; onAdmin?: () => void; onLeave: () => void
 }) {
-  const roster = engine.roster()
+  const roster = engine.roster().filter(p => !p.gateway) // a gateway cannot be called
   const keyed = useRef(new Map<string, string>()) // keyboard code -> target
 
   useEffect(() => {

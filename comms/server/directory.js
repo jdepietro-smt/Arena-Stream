@@ -81,6 +81,18 @@ export class Directory {
   get channels() { return this.data.channels }
   get groups() { return this.data.groups }
   get users() { return this.data.users }
+  /** Gateway apps that have connected, by their own stable id: kept so the admin can see which are offline. */
+  get gateways() { return (this.data.gateways ??= []) }
+  noteGateway(id, name) {
+    const g = this.gateways.find(x => x.id === id)
+    if (g) { g.name = name; g.lastSeen = Date.now() } else this.gateways.push({ id, name, lastSeen: Date.now() })
+    this.save() // not a directory change: nobody's permissions move
+  }
+  deleteGateway(id) {
+    if (!this.gateways.some(g => g.id === id)) throw new DirectoryError('No such gateway', 404)
+    this.data.gateways = this.gateways.filter(g => g.id !== id)
+    this.save()
+  }
   channel(id) { return this.channels.find(c => c.id === id) }
   group(id) { return this.groups.find(g => g.id === id) }
   user(id) { return this.users.find(u => u.id === id) }

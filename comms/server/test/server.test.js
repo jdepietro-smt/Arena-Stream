@@ -567,3 +567,21 @@ test('gateway app joins with no account, even where accounts are required, and s
   assert.equal((await join({ username: 'nobody', password: 'x' })).type, 'error', 'normal sign-in still needs an account')
   await srv.close?.()
 })
+
+test('gateways are remembered by their own id, shown online/offline, and cannot be called directly', async () => {
+  const fake = { url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  const gw = await client(port)
+  gw.send({ type: 'join', gateway: true, name: 'Truck A', gatewayId: 'abcd-1234-efgh' })
+  const welcome = await gw.next(x => x.type === 'welcome')
+  assert.deepEqual(srv.directory.gateways.map(g => g.name), ['Truck A'])
+  const peer = (await (async () => { const c = await client(port); c.send({ type: 'join', gateway: true, name: 'Watcher' }); const w = await c.next(x => x.type === 'welcome'); c.ws.close(); return w })()).peers.find(p => p.id === welcome.id)
+  assert.equal(peer?.gateway, true, 'peers are marked as gateways so the Direct list can hide them')
+  gw.ws.close()
+  await new Promise(r => setTimeout(r, 50))
+  assert.equal(srv.directory.gateways.length, 1, 'it stays on the list after going offline')
+  srv.directory.deleteGateway(srv.directory.gateways[0].id)
+  assert.equal(srv.directory.gateways.length, 0)
+  await srv.close?.()
+})

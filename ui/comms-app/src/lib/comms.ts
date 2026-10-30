@@ -25,7 +25,7 @@ export type StreamState = 'unknown' | 'live' | 'down' | 'stalled'
 export interface ArenaStream { id: string; name: string; channel: string | null; state: StreamState }
 export interface ArenaAlert { text: string; level: 'warn' | 'ok'; at: number; stream: string | null }
 export type ProgramState = 'off' | 'connecting' | 'live' | 'error'
-export interface PeerInfo { id: string; name: string; role: string; talk: string[]; listen: string[] }
+export interface PeerInfo { id: string; name: string; role: string; talk: string[]; listen: string[]; gateway?: boolean }
 export type Status = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
 
 export interface JoinOptions {
@@ -43,6 +43,8 @@ export interface JoinOptions {
   echoCancel: boolean
   /** Gateway mode: no microphone/speakers; audio enters and leaves through per-channel buses (SFU only). */
   gateway?: boolean
+  /** Gateway mode: this app's stable id, so the server can list it as online or offline. */
+  gatewayId?: string
   /** Overrides the server-provided program feed (WHEP URL). */
   programUrl?: string
 }
@@ -530,7 +532,7 @@ export class CommsEngine {
     try { ws = new WebSocket(o.url) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
     this.ws = ws
     ws.onopen = () => this.send(o.auth === 'accounts'
-      ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password, ...(o.gateway ? { gateway: true, name: o.name } : {}) })
+      ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password, ...(o.gateway ? { gateway: true, name: o.name, gatewayId: o.gatewayId } : {}) })
       : { type: 'join', name: o.name, group: o.group, pin: o.pin })
     ws.onmessage = ev => {
       try { this.onMessage(JSON.parse(ev.data as string)) } catch (e) { console.error('[comms] bad message', e) }

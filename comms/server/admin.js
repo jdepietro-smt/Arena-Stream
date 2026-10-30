@@ -32,7 +32,7 @@ function readJson(req) {
   })
 }
 
-export function createAdmin({ dir, auth, online, kick, players = null }) {
+export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [] }) {
   const page = () => fs.readFileSync(path.join(here, 'admin', 'index.html'))
   const idle = { state: 'idle', error: '', since: 0 }
   const playerStates = () => Object.fromEntries(dir.channels.filter(c => c.music || c.withMusic).map(c => [c.id, players?.status(c.id) ?? idle]))
@@ -64,7 +64,7 @@ export function createAdmin({ dir, auth, online, kick, players = null }) {
       if (kind === 'state' && method === 'GET') {
         return send(res, 200, {
           channels: dir.channels, groups: dir.groups,
-          users: dir.users.map(u => dir.publicUser(u)), online: online(),
+          users: dir.users.map(u => dir.publicUser(u)), online: online(), gateways: gateways(),
           serverPlayer: !!players, players: playerStates(),
         }), true
       }
@@ -105,6 +105,11 @@ export function createAdmin({ dir, auth, online, kick, players = null }) {
         if (method === 'POST' && !id) return send(res, 201, dir.publicUser(dir.addUser(body))), true
         if (method === 'PUT' && id) return send(res, 200, dir.publicUser(dir.updateUser(id, body))), true
         if (method === 'DELETE' && id) { dir.deleteUser(id); return send(res, 200, { ok: true }), true }
+      }
+      if (kind === 'gateways' && method === 'DELETE' && id) {
+        if (gateways().find(g => g.id === id)?.online) throw new DirectoryError('That gateway is online', 409)
+        dir.deleteGateway(id)
+        return send(res, 200, { ok: true }), true
       }
       if (kind === 'kick' && method === 'POST' && id) {
         return send(res, kick(id) ? 200 : 404, { ok: true }), true

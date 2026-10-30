@@ -80,7 +80,7 @@ export function createServer(
       ...c, ...(source ? { stream: true } : {}), canTalk: perms[c.id].talk, canListen: perms[c.id].listen,
       canMusic: !!sfu && mayStartMusic(perms, c.id),
     }))
-  const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen })
+  const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen, ...(p.user.gateway ? { gateway: true } : {}) })
   const titleOf = u => u.title || dir.group(u.groups?.[0])?.name || ''
   const send = (p, msg) => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)) }
   const broadcast = (msg, exceptId) => {
@@ -272,6 +272,7 @@ export function createServer(
 
   const admin = createAdmin({
     dir, auth, kick, players,
+    gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
     })),
@@ -356,7 +357,9 @@ export function createServer(
       let user
       if (msg.gateway && !msg.token && !msg.username) {
         // The Arena Comms Gateway app: no account, no password. Just the server address.
-        user = { id: `gateway:${randomUUID()}`, ephemeral: true, gateway: true, name: String(msg.name || 'Gateway').slice(0, MAX_NAME), title: 'Gateway', groups: [], overrides: {} }
+        const gwKey = /^[\w-]{8,64}$/.test(String(msg.gatewayId ?? '')) ? String(msg.gatewayId) : ''
+        user = { id: `gateway:${randomUUID()}`, ephemeral: true, gateway: true, gwKey, name: String(msg.name || 'Gateway').slice(0, MAX_NAME), title: 'Gateway', groups: [], overrides: {} }
+        if (gwKey) dir.noteGateway(gwKey, user.name)
       } else if (authMode === 'accounts' && msg.token) {
         user = auth.userForSession(msg.token)
         if (!user) return fail('bad-token', 'Your session expired. Sign in again.')
@@ -434,6 +437,7 @@ export function createServer(
           if (!me.user.gateway) break
           const name = String(msg.name ?? '').trim().slice(0, MAX_NAME) || 'Gateway'
           me.user.name = name
+          if (me.user.gwKey) dir.noteGateway(me.user.gwKey, name)
           broadcast({ type: 'peer-update', id: me.id, name, role: me.title })
           break
         }
@@ -442,7 +446,7 @@ export function createServer(
           const prevDirect = me.talk.filter(t => t.startsWith('u:')).join()
           me.listen = [...new Set(asList(msg.listen).filter(id => me.perms[id]?.listen))]
           me.talk = [...new Set(asList(msg.talk).filter(id =>
-            (me.perms[id]?.talk && !isMusic(id)) || (id.startsWith('u:') && peers.has(id.slice(2)))))]
+            (me.perms[id]?.talk && !isMusic(id)) || (id.startsWith('u:') && peers.has(id.slice(2)) && !peers.get(id.slice(2)).user.gateway)))]
           broadcast({ type: 'peer-state', id: me.id, talk: me.talk, listen: me.listen })
           // Listen changes affect me; a changed direct target affects that listener.
           void reconcile(me)
@@ -488,6 +492,7 @@ export function createServer(
       clearTimeout(joinTimer)
       if (me && peers.get(me.id) === me) {
         peers.delete(me.id)
+        if (me.user.gwKey) dir.noteGateway(me.user.gwKey, me.user.name)
         for (const ch of me.musicOn) announceMusic(me, ch, false)
         broadcast({ type: 'peer-leave', id: me.id })
       }

@@ -62,6 +62,8 @@ const MAX_NODE_CH = 32
 interface AsioGraph { splitters: ChannelSplitterNode[]; chans: number; mergers: ChannelMergerNode[]; outs: number; devIn: number; devOut: number }
 export interface DeviceCfg { inputId: string; outputId: string; inputChannels: number; outputChannels: number }
 export interface GatewayConfig {
+  /** Stable id of this gateway (generated once), so the server can tell which gateways are online or offline. */
+  id: string
   /** How this gateway shows up in the server's list of people. */
   name: string
   server: string; username: string; password: string; autoConnect: boolean
@@ -81,6 +83,7 @@ export const newPort = (n: number): PortCfg => ({
 })
 
 export const defaultConfig = (): GatewayConfig => ({
+  id: crypto.randomUUID(),
   name: 'Gateway', server: '', username: '', password: '', autoConnect: true,
   device: { inputId: '', outputId: '', inputChannels: 2, outputChannels: 2 },
   asio: [],

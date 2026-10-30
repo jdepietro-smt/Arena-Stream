@@ -96,7 +96,7 @@ export default function App() {
     if (!cfg) return
     void engine.join({
       url: serverUrl(cfg.server), auth: 'accounts', username: '', password: '',
-      name: cfg.name.trim() || 'Gateway', pin: '', echoCancel: false, gateway: true,
+      name: cfg.name.trim() || 'Gateway', pin: '', echoCancel: false, gateway: true, gatewayId: cfg.id,
     })
   }
   const disconnect = () => { runtime.teardown(); engine.leave() }
