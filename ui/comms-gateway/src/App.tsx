@@ -144,7 +144,7 @@ export default function App() {
       }) }
     })
   const removePort = (id: string) => setCfg(c => c && { ...c, ports: c.ports.filter(x => x.id !== id) })
-  const addPort = () => setCfg(c => c && { ...c, ports: [...c.ports, newPort(c.ports.length + 1)] })
+  const addPort = () => setCfg(c => c && { ...c, ports: [...c.ports, { ...newPort(c.ports.length + 1), ...(c.asio.length ? { source: 'asio' as SourceKind, inCh: 0, outCh: 0 } : {}) }] })
 
   const connected = status === 'connected' || status === 'reconnecting'
   const mics = devices.filter(d => d.kind === 'audioinput')
