@@ -792,14 +792,15 @@ export class CommsEngine {
         this.gwSrc.set(track.sid, { src, hold })
         return
       }
-      if (pub.trackName.startsWith('music:')) { this.attachMusic(pub.trackName.slice(6), track); return }
+      if (pub.trackName.startsWith('music:')) { this.attachMusic(pub.trackName.slice(6), track as unknown as { sid?: string; mediaStreamTrack: MediaStreamTrack; receiver?: RTCRtpReceiver }); return }
       const sid = track.sid ?? String(this.sfuVoices.size)
       const ch = pub.trackName.startsWith('ch:') ? pub.trackName.slice(3) : ''
       this.sfuVoices.get(sid) && this.dropVoice(this.sfuVoices.get(sid)!)
       this.sfuVoices.set(sid, this.makeVoice(new MediaStream([track.mediaStreamTrack]), ch))
       this.applyVolumes()
       const rx = (track as RemoteAudioTrack).receiver as (RTCRtpReceiver & { jitterBufferTarget?: number }) | undefined
-      if (rx) try { rx.jitterBufferTarget = 40 } catch { /* older Chromium */ }
+      // Through the media server the path is the internet: a deeper buffer rides out jitter and lost packets instead of stretching or breaking the audio.
+      if (rx) try { rx.jitterBufferTarget = 100 } catch { /* older Chromium */ }
     })
     room.on(RoomEvent.TrackUnsubscribed, track => {
       const g = track.sid ? this.gwSrc.get(track.sid) : undefined
@@ -963,7 +964,9 @@ export class CommsEngine {
     return { rttMs, lost, sent, jitterMs, via }
   }
 
-  private attachMusic(ch: string, track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
+  private attachMusic(ch: string, track: { sid?: string; mediaStreamTrack: MediaStreamTrack; receiver?: RTCRtpReceiver }) {
+    // Music has no talk-back to protect, so it gets the deepest cushion.
+    if (track.receiver) try { (track.receiver as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = 200 } catch { /* older Chromium */ }
     const ctx = this.ctx
     if (!ctx || !track.sid) return
     this.ensureMix()
