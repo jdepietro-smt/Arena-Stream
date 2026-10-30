@@ -545,6 +545,8 @@ test('gateway app joins with no account, even where accounts are required, and s
   const mine = ok.channels.find(c => c.id === ch.id)
   assert.ok(mine && mine.canTalk && mine.canListen, JSON.stringify(ok.channels))
   assert.equal(ok.me.admin, false)
+  assert.equal(ok.me.name, 'Gateway')
+  assert.equal((await join({ gateway: true, name: 'Truck A' })).me.name, 'Truck A', 'a gateway can be named')
   const g = srv.directory.addGroup({ name: 'Crew', grants: { [ch.id]: { talk: true, listen: true } } })
   const ok2 = await join({ gateway: true })
   assert.deepEqual(ok2.groups.find(x => x.id === g.id)?.channels, [ch.id], 'the gateway is told which channels each group has')

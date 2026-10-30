@@ -2,12 +2,19 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { CommsEngine } from '@engine'
 import {
   AsioCfg, AsioDevice, GatewayConfig, GatewayRuntime, PortCfg, PortRuntime, RtpCfg, SourceKind,
-  defaultConfig, defaultRtp, newPort,
+  defaultConfig, defaultRtp, newAsio, newPort,
 } from './ports'
 import './kp.css'
 import './App.css'
 
 const LS_KEY = 'arena-comms-gateway-config'
+
+/** Older configs held a single ASIO interface as one object; now it is a list. */
+function migrateAsio(old: unknown): AsioCfg[] {
+  if (Array.isArray(old)) return old.map((a, i) => ({ ...newAsio(i + 1), ...a }))
+  const o = old as Partial<AsioCfg> | undefined
+  return o && typeof o.deviceId === 'number' && o.deviceId >= 0 ? [{ ...newAsio(1), id: 'a1', ...o }] : []
+}
 
 async function loadConfig(): Promise<GatewayConfig> {
   const base = defaultConfig()
@@ -15,7 +22,7 @@ async function loadConfig(): Promise<GatewayConfig> {
     const stored = window.gw ? await window.gw.getConfig() : JSON.parse(localStorage.getItem(LS_KEY) ?? 'null')
     if (stored) {
       return {
-        ...base, ...stored, device: { ...base.device, ...stored.device }, asio: { ...base.asio, ...(stored.asio ?? {}) },
+        ...base, ...stored, device: { ...base.device, ...stored.device }, asio: migrateAsio(stored.asio),
         ports: (stored.ports ?? []).map((p: PortCfg) => ({ ...newPort(1), ...p, rtp: { ...defaultRtp(), ...p.rtp }, vox: { ...newPort(1).vox, ...p.vox } })),
       }
     }
@@ -55,6 +62,12 @@ export default function App() {
     setAsioErr(r.ok ? '' : r.error ?? '')
   }
   useEffect(() => { void refreshAsio() }, [])
+  // Remember each interface by its driver name (its number can change), once the driver list is known.
+  useEffect(() => {
+    if (!cfg || !asioDevices.length) return
+    if (cfg.asio.some(a => !a.driver && asioDevices.some(d => d.id === a.deviceId)))
+      setCfg(c => c && { ...c, asio: c.asio.map(a => (a.driver ? a : { ...a, driver: asioDevices.find(d => d.id === a.deviceId)?.name ?? '' })) })
+  }, [cfg, asioDevices])
 
   useEffect(() => { void loadConfig().then(setCfg) }, [])
   useEffect(() => {
@@ -73,7 +86,7 @@ export default function App() {
     if (!cfg) return
     void engine.join({
       url: serverUrl(cfg.server), auth: 'accounts', username: '', password: '',
-      name: '', pin: '', echoCancel: false, gateway: true,
+      name: cfg.name.trim() || 'Gateway', pin: '', echoCancel: false, gateway: true,
     })
   }
   const disconnect = () => { runtime.teardown(); engine.leave() }
@@ -109,14 +122,19 @@ export default function App() {
   const patch = (p: Partial<GatewayConfig>) => setCfg(c => c && { ...c, ...p })
   const patchDevice = (p: Partial<GatewayConfig['device']>) => setCfg(c => c && { ...c, device: { ...c.device, ...p } })
   const patchPort = (id: string, p: Partial<PortCfg>) => setCfg(c => c && { ...c, ports: c.ports.map(x => (x.id === id ? { ...x, ...p } : x)) })
-  const patchAsio = (p: Partial<AsioCfg>) => setCfg(c => c && { ...c, asio: { ...c.asio, ...p } })
-  const setChName = (kind: 'inputNames' | 'outputNames', i: number, v: string) =>
+  const patchAsio = (id: string, p: Partial<AsioCfg>) => setCfg(c => c && { ...c, asio: c.asio.map(a => (a.id === id ? { ...a, ...p } : a)) })
+  const addAsio = () => setCfg(c => c && { ...c, asio: [...c.asio, newAsio(c.asio.length + 1)] })
+  const removeAsio = (id: string) => setCfg(c => c && { ...c, asio: c.asio.filter(a => a.id !== id) })
+  const setChName = (id: string, kind: 'inputNames' | 'outputNames', i: number, v: string) =>
     setCfg(c => {
       if (!c) return c
-      const arr = [...(c.asio[kind] ?? [])]
-      while (arr.length <= i) arr.push('')
-      arr[i] = v
-      return { ...c, asio: { ...c.asio, [kind]: arr } }
+      return { ...c, asio: c.asio.map(a => {
+        if (a.id !== id) return a
+        const arr = [...(a[kind] ?? [])]
+        while (arr.length <= i) arr.push('')
+        arr[i] = v
+        return { ...a, [kind]: arr }
+      }) }
     })
   const removePort = (id: string) => setCfg(c => c && { ...c, ports: c.ports.filter(x => x.id !== id) })
   const addPort = () => setCfg(c => c && { ...c, ports: [...c.ports, newPort(c.ports.length + 1)] })
@@ -125,7 +143,8 @@ export default function App() {
   const mics = devices.filter(d => d.kind === 'audioinput')
   const outs = devices.filter(d => d.kind === 'audiooutput')
   const live = new Map(runtime.ports.map(p => [p.cfg.id, p]))
-  const asioDev = asioDevices.find(d => d.id === cfg.asio.deviceId)
+  const devFor = (a: AsioCfg) => asioDevices.find(d => d.name === a.driver) ?? asioDevices.find(d => d.id === a.deviceId)
+  const interfaces = cfg.asio.map(a => ({ cfg: a, dev: devFor(a) }))
 
   return (
     <div className="app">
@@ -139,6 +158,7 @@ export default function App() {
         <section className="card">
           <h2 className="lcd">Arena server</h2>
           <div className="grid3">
+            <label>Gateway name<input value={cfg.name} onChange={e => patch({ name: e.target.value })} placeholder="Gateway" maxLength={24} /></label>
             <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.78.236.254" /></label>
           </div>
           <div className="row">
@@ -149,6 +169,7 @@ export default function App() {
               : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
           </div>
           {status === 'error' && <div className="error">{engine.error}</div>}
+          {connected && engine.myName !== (cfg.name.trim() || 'Gateway') && <div className="hint">The new name applies the next time the gateway connects.</div>}
           <p className="hint">No account needed: enter the server address and connect. The gateway talks and listens on every channel. If it stays on reconnecting, Windows does not trust the server's certificate yet (install it under Trusted Root Certification Authorities).</p>
         </section>
 
@@ -174,31 +195,43 @@ export default function App() {
         </section>
 
         <section className="card">
-          <div className="bar"><h2 className="lcd">ASIO interface (all channels)</h2><button className="btn sm" onClick={() => void refreshAsio()}>Refresh drivers</button></div>
-          <div className="grid4">
-            <label>ASIO driver
-              <select value={cfg.asio.deviceId} onChange={e => patchAsio({ deviceId: +e.target.value })}>
-                <option value={-1}>none</option>
-                {asioDevices.map(d => <option key={d.id} value={d.id}>{d.name} ({d.inputChannels} in / {d.outputChannels} out)</option>)}
-              </select>
-            </label>
-            <label>Buffer size
-              <select value={cfg.asio.frames} onChange={e => patchAsio({ frames: +e.target.value })}>
-                {[64, 128, 256, 512, 1024].map(n => <option key={n} value={n}>{n} samples ({(n / 48).toFixed(1)} ms)</option>)}
-              </select>
-            </label>
-          </div>
+          <div className="bar"><h2 className="lcd">ASIO interfaces</h2><span className="grow" /><button className="btn sm" onClick={() => void refreshAsio()}>Refresh drivers</button><button className="btn sm primary" onClick={addAsio}>Add interface</button></div>
+          {cfg.asio.length === 0 && <div className="hint">Add an interface for each ASIO driver you want to use: a Focusrite, Dante Virtual Soundcard, and so on. Every channel of each one appears in the routing grid.</div>}
+          {cfg.asio.map((a, n) => {
+            const info = runtime.asioInfo.get(a.id)
+            const used = new Set(cfg.asio.filter(o => o !== a).map(o => o.driver))
+            return (
+              <div key={a.id} className="iface">
+                <div className="grid4">
+                  <label>Interface {n + 1}: ASIO driver
+                    <select value={a.driver} onChange={e => patchAsio(a.id, { driver: e.target.value, deviceId: asioDevices.find(d => d.name === e.target.value)?.id ?? -1 })}>
+                      <option value="">none</option>
+                      {a.driver && !asioDevices.some(d => d.name === a.driver) && <option value={a.driver}>{a.driver} (not found)</option>}
+                      {asioDevices.map(d => <option key={d.id} value={d.name} disabled={used.has(d.name)}>{d.name} ({d.inputChannels} in / {d.outputChannels} out){used.has(d.name) ? ' · in use above' : ''}</option>)}
+                    </select>
+                  </label>
+                  <label>Buffer size
+                    <select value={a.frames} onChange={e => patchAsio(a.id, { frames: +e.target.value })}>
+                      {[64, 128, 256, 512, 1024].map(f => <option key={f} value={f}>{f} samples ({(f / 48).toFixed(1)} ms)</option>)}
+                    </select>
+                  </label>
+                  <label>&nbsp;<button className="btn sm danger" onClick={() => confirm(`Remove interface ${n + 1}? Ports using it lose their routes.`) && removeAsio(a.id)}>Remove</button></label>
+                </div>
+                {info?.ok && <div className="hint">Open: {info.driver} · {info.inputChannels} in / {info.outputChannels} out · {info.frames}-sample buffer</div>}
+                {info && !info.ok && <div className="error">{info.error}</div>}
+              </div>
+            )
+          })}
           {asioErr && <div className="error">{asioErr}</div>}
           {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
-          {runtime.asioInfo?.ok && <div className="hint">Open: {runtime.asioInfo.driver} · {runtime.asioInfo.openedIn} in / {runtime.asioInfo.openedOut} out used · {runtime.asioInfo.frames}-sample buffer</div>}
         </section>
 
-        {asioDev && <RoutingGrid cfg={cfg} asioDev={asioDev} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
+        {interfaces.some(i => i.dev) && <RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
         {cfg.ports.map(p => (
-          <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected} mics={mics} outs={outs} asio={cfg.asio} asioDev={asioDev}
+          <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected} mics={mics} outs={outs} interfaces={interfaces}
             dupChannel={!!p.channel && cfg.ports.some(o => o !== p && o.enabled && p.enabled && o.channel === p.channel)}
             onChange={x => patchPort(p.id, x)} onRemove={() => removePort(p.id)} />
         ))}
@@ -208,12 +241,13 @@ export default function App() {
 }
 
 /** Dante-Controller-style routing: interface channels on one axis, Arena channels on the other. */
-function RoutingGrid({ cfg, asioDev, runtime, channels: allChannels, groups, setCfg, setName }: {
+function RoutingGrid({ interfaces, cfg, runtime, channels: allChannels, groups, setCfg, setName }: {
+  interfaces: { cfg: AsioCfg; dev?: AsioDevice }[]
   runtime: GatewayRuntime
-  cfg: GatewayConfig; asioDev: AsioDevice; channels: { id: string; name: string; color?: string }[]
+  cfg: GatewayConfig; channels: { id: string; name: string; color?: string }[]
   setCfg: (f: (c: GatewayConfig | null) => GatewayConfig | null) => void
   groups: { id: string; name: string; channels: string[] }[]
-  setName: (kind: 'inputNames' | 'outputNames', i: number, v: string) => void
+  setName: (id: string, kind: 'inputNames' | 'outputNames', i: number, v: string) => void
 }) {
   const [tab, setTab] = useState<'in' | 'out'>('in')
   const [group, setGroup] = useState(() => { try { return localStorage.getItem('gw-grid-group') ?? '' } catch { return '' } })
@@ -221,18 +255,19 @@ function RoutingGrid({ cfg, asioDev, runtime, channels: allChannels, groups, set
   const grp = groups.find(g => g.id === group)
   const channels = grp ? allChannels.filter(c => grp.channels.includes(c.id)) : allChannels
   const key = tab === 'in' ? 'inCh' : 'outCh'
-  const count = tab === 'in' ? asioDev.inputChannels : asioDev.outputChannels
-  const names = tab === 'in' ? cfg.asio.inputNames : cfg.asio.outputNames
+  const devKey = tab === 'in' ? 'inDev' : 'outDev'
+  const firstId = cfg.asio[0]?.id ?? ''
   const portFor = (ch: string) => cfg.ports.find(p => p.source === 'asio' && p.channel === ch)
-  const toggle = (ch: { id: string; name: string }, n: number) => setCfg(c => {
+  const toggle = (ch: { id: string; name: string }, ifaceId: string, n: number) => setCfg(c => {
     if (!c) return c
     const ex = c.ports.find(p => p.source === 'asio' && p.channel === ch.id)
-    const next = ex?.[key] === n ? 0 : n // clicking the lit cell clears it
+    const same = ex && ex[key] === n && (ex[devKey] || firstId) === ifaceId
+    const patch = same ? { [key]: 0 } : { [key]: n, [devKey]: ifaceId } // clicking the lit cell clears it
     if (!ex) {
-      const p = { ...newPort(c.ports.length + 1), name: ch.name, source: 'asio' as SourceKind, channel: ch.id, inCh: 0, outCh: 0, [key]: next }
+      const p = { ...newPort(c.ports.length + 1), name: ch.name, source: 'asio' as SourceKind, channel: ch.id, inCh: 0, outCh: 0, ...patch }
       return { ...c, ports: [...c.ports, p] }
     }
-    const upd = { ...ex, [key]: next }
+    const upd = { ...ex, ...patch }
     // A port with nothing routed either way is dropped, so clearing the last cell leaves no empty card behind.
     return { ...c, ports: upd.inCh < 1 && upd.outCh < 1 ? c.ports.filter(p => p !== ex) : c.ports.map(p => (p === ex ? upd : p)) }
   })
@@ -252,36 +287,41 @@ function RoutingGrid({ cfg, asioDev, runtime, channels: allChannels, groups, set
         </div>
       </div>
       {channels.length === 0 && <div className="hint">Connect to the server to see its channels as columns. You can name the interface channels now.</div>}
-      {<>
-          <div className="hint">Type in the name boxes to name each channel (for example Mic 3 - Director). {tab === 'in'
-            ? 'Click where an interface input meets an Arena channel to send that input to the channel. One input per channel; an input can feed several channels.'
-            : 'Click where an Arena channel meets an interface output to play the channel out of that output. One output per channel.'}</div>
-          <div className="gridwrap">
-            <table className="rgrid">
-              <thead><tr><th className="corner">{tab === 'in' ? 'Interface input' : 'Interface output'}</th>
-                {channels.map(c => <th key={c.id} className="chead"><span>{c.name}</span></th>)}</tr></thead>
-              <tbody>
-                {Array.from({ length: count }, (_, i) => (
-                  <tr key={i}>
-                    <th className="rname"><b>{i + 1}</b><input value={names[i] ?? ''} onChange={e => setName(tab === 'in' ? 'inputNames' : 'outputNames', i, e.target.value)} placeholder={tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`} /><span className="chmeter" title="Level on this line"><i style={{ width: pct(runtime.asioLevelDb(tab, i)) }} /></span></th>
+      <div className="hint">Type in the name boxes to name each channel (for example Mic 3 - Director). {tab === 'in'
+        ? 'Click where an interface input meets an Arena channel to send that input to the channel. One input per channel; an input can feed several channels.'
+        : 'Click where an Arena channel meets an interface output to play the channel out of that output. One output per channel.'}</div>
+      <div className="gridwrap">
+        <table className="rgrid">
+          <thead><tr><th className="corner">{tab === 'in' ? 'Interface input' : 'Interface output'}</th>
+            {channels.map(c => <th key={c.id} className="chead"><span>{c.name}</span></th>)}</tr></thead>
+          <tbody>
+            {interfaces.map(({ cfg: a, dev }, n) => dev && [
+              <tr key={a.id + 'h'}><th className="ifhead" colSpan={channels.length + 1}>{a.driver || `Interface ${n + 1}`}</th></tr>,
+              ...Array.from({ length: tab === 'in' ? dev.inputChannels : dev.outputChannels }, (_, i) => {
+                const names = tab === 'in' ? a.inputNames : a.outputNames
+                return (
+                  <tr key={`${a.id}-${i}`}>
+                    <th className="rname"><b>{i + 1}</b><input value={names[i] ?? ''} onChange={e => setName(a.id, tab === 'in' ? 'inputNames' : 'outputNames', i, e.target.value)} placeholder={tab === 'in' ? `Input ${i + 1}` : `Output ${i + 1}`} /><span className="chmeter" title="Level on this line"><i style={{ width: pct(runtime.asioLevelDb(a.id, tab, i)) }} /></span></th>
                     {channels.map(c => {
-                      const on = portFor(c.id)?.[key] === i + 1
-                      return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, i + 1)} title={`${names[i]?.trim() || i + 1} ${tab === 'in' ? '→' : '←'} ${c.name}`} /></td>
+                      const p = portFor(c.id)
+                      const on = !!p && p[key] === i + 1 && (p[devKey] || firstId) === a.id
+                      return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, a.id, i + 1)} title={`${names[i]?.trim() || i + 1} ${tab === 'in' ? '→' : '←'} ${c.name}`} /></td>
                     })}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-      </>}
+                )
+              }),
+            ])}
+          </tbody>
+        </table>
+      </div>
     </section>
   )
 }
 
 const pct = (db: number) => `${Math.max(0, Math.min(100, ((db + 60) / 60) * 100))}%`
 
-function PortCard({ cfg, live, engine, connected, mics, outs, asio, asioDev, dupChannel, onChange, onRemove }: {
-  cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; mics: MediaDeviceInfo[]; outs: MediaDeviceInfo[]; asio: AsioCfg; asioDev?: AsioDevice; dupChannel: boolean
+function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupChannel, onChange, onRemove }: {
+  cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; mics: MediaDeviceInfo[]; outs: MediaDeviceInfo[]; interfaces: { cfg: AsioCfg; dev?: AsioDevice }[]; dupChannel: boolean
   onChange: (p: Partial<PortCfg>) => void; onRemove: () => void
 }) {
   const channels = engine.channels.filter(c => !c.music)
@@ -322,17 +362,25 @@ function PortCard({ cfg, live, engine, connected, mics, outs, asio, asioDev, dup
         </label>
         {cfg.source === 'asio' && <>
           <label>Interface input
-            <select value={cfg.inCh} onChange={e => onChange({ inCh: +e.target.value })}>
-              <option value={0}>— none —</option>
-              {!asioDev && cfg.inCh > 0 && <option value={cfg.inCh}>{cfg.inCh}</option>}
-              {Array.from({ length: asioDev?.inputChannels ?? 0 }, (_, i) => <option key={i} value={i + 1}>{i + 1} · {asio.inputNames[i]?.trim() || `Input ${i + 1}`}</option>)}
+            <select value={cfg.inCh > 0 ? `${cfg.inDev || interfaces[0]?.cfg.id}|${cfg.inCh}` : ''}
+              onChange={e => { const [d, n] = e.target.value.split('|'); onChange(e.target.value ? { inDev: d, inCh: +n } : { inCh: 0 }) }}>
+              <option value="">— none —</option>
+              {interfaces.map((f, k) => f.dev && (
+                <optgroup key={f.cfg.id} label={f.cfg.driver || `Interface ${k + 1}`}>
+                  {Array.from({ length: f.dev.inputChannels }, (_, i) => <option key={i} value={`${f.cfg.id}|${i + 1}`}>{i + 1} · {f.cfg.inputNames[i]?.trim() || `Input ${i + 1}`}</option>)}
+                </optgroup>
+              ))}
             </select>
           </label>
           <label>Interface output
-            <select value={cfg.outCh} onChange={e => onChange({ outCh: +e.target.value })}>
-              <option value={0}>— none —</option>
-              {!asioDev && cfg.outCh > 0 && <option value={cfg.outCh}>{cfg.outCh}</option>}
-              {Array.from({ length: asioDev?.outputChannels ?? 0 }, (_, i) => <option key={i} value={i + 1}>{i + 1} · {asio.outputNames[i]?.trim() || `Output ${i + 1}`}</option>)}
+            <select value={cfg.outCh > 0 ? `${cfg.outDev || interfaces[0]?.cfg.id}|${cfg.outCh}` : ''}
+              onChange={e => { const [d, n] = e.target.value.split('|'); onChange(e.target.value ? { outDev: d, outCh: +n } : { outCh: 0 }) }}>
+              <option value="">— none —</option>
+              {interfaces.map((f, k) => f.dev && (
+                <optgroup key={f.cfg.id} label={f.cfg.driver || `Interface ${k + 1}`}>
+                  {Array.from({ length: f.dev.outputChannels }, (_, i) => <option key={i} value={`${f.cfg.id}|${i + 1}`}>{i + 1} · {f.cfg.outputNames[i]?.trim() || `Output ${i + 1}`}</option>)}
+                </optgroup>
+              ))}
             </select>
           </label>
         </>}

@@ -528,7 +528,7 @@ export class CommsEngine {
     try { ws = new WebSocket(o.url) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
     this.ws = ws
     ws.onopen = () => this.send(o.auth === 'accounts'
-      ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password, ...(o.gateway ? { gateway: true } : {}) })
+      ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password, ...(o.gateway ? { gateway: true, name: o.name } : {}) })
       : { type: 'join', name: o.name, group: o.group, pin: o.pin })
     ws.onmessage = ev => {
       try { this.onMessage(JSON.parse(ev.data as string)) } catch (e) { console.error('[comms] bad message', e) }

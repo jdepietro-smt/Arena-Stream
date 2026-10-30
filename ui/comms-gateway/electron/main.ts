@@ -108,7 +108,7 @@ ipcMain.handle('rtp:close', (_e, id: string) => { closeRtp(id) })
 
 // ── ASIO (every channel of an interface Windows only offers as a stereo pair) ──
 registerAsio(() => win)
-app.on('before-quit', asioClose)
+app.on('before-quit', () => asioClose())
 
 if (hasSingleLock) app.whenReady().then(createWindow)
 

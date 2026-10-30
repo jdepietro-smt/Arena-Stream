@@ -2,10 +2,11 @@
 // pair to Windows' own audio. The real work happens in a helper process (asio-worker.ts) because audify's native module
 // cannot be loaded inside Electron; the installer ships a plain node.exe for it. This file starts that helper and relays:
 //
-//   ASIO input channels  --planar blocks-->  window ('asio:rx')   (each block is one device buffer)
-//   window output blocks ('asio:tx') --> helper --> per-channel rings --> mixed into each device output buffer
+//   ASIO input channels  --planar blocks-->  window ('asio:rx', slot, block)   (each block is one device buffer)
+//   window output blocks ('asio:tx', slot, block) --> helper --> per-channel rings --> mixed into each device output buffer
 //
-// Dante Virtual Soundcard shows up as an ASIO driver too, so it works through the same path.
+// A process can hold only one ASIO driver, so every interface (a Focusrite, Dante Virtual Soundcard, ...) gets its own helper,
+// keyed by a slot name.
 
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { ChildProcess, ForkOptions, fork } from 'child_process'
@@ -14,10 +15,11 @@ import path from 'path'
 
 export interface AsioDevice { id: number; name: string; inputChannels: number; outputChannels: number; sampleRates: number[] }
 
-let child: ChildProcess | null = null
+interface Slot { child: ChildProcess; pending: Map<number, (r: unknown) => void> }
+const slots = new Map<string, Slot>()
 let seq = 0
-const pending = new Map<number, (r: unknown) => void>()
 let rxTarget: (() => BrowserWindow | null) | null = null
+let lastList: { ok: boolean; devices?: AsioDevice[]; error?: string } | null = null
 
 /** The Node binary for the helper: the one shipped beside the app, else the Node on this machine (development). */
 function nodeBinary(): string | undefined {
@@ -30,8 +32,9 @@ function workerPath(): string {
   return path.join(__dirname, 'asio-worker.js').replace('app.asar', 'app.asar.unpacked')
 }
 
-function start(): ChildProcess | null {
-  if (child && child.connected) return child
+function start(name: string): Slot | null {
+  const have = slots.get(name)
+  if (have && have.child.connected) return have
   const exec = nodeBinary()
   if (app.isPackaged && !exec) return null
   const c = fork(workerPath(), [], {
@@ -40,52 +43,64 @@ function start(): ChildProcess | null {
     serialization: 'advanced', // typed arrays travel as binary
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   } as ForkOptions)
+  const slot: Slot = { child: c, pending: new Map() }
   c.on('message', (m: { id?: number; result?: unknown; type?: string; planar?: Float32Array }) => {
     if (m.id != null) {
-      const done = pending.get(m.id)
-      pending.delete(m.id)
+      const done = slot.pending.get(m.id)
+      slot.pending.delete(m.id)
       done?.(m.result)
     } else if (m.type === 'rx') {
       const win = rxTarget?.()
-      if (win && !win.isDestroyed()) win.webContents.send('asio:rx', m.planar)
+      if (win && !win.isDestroyed()) win.webContents.send('asio:rx', name, m.planar)
     }
   })
   const gone = () => {
-    if (child === c) child = null
-    for (const done of pending.values()) done({ ok: false, error: 'The ASIO helper stopped' })
-    pending.clear()
+    if (slots.get(name) === slot) slots.delete(name)
+    for (const done of slot.pending.values()) done({ ok: false, error: 'The ASIO helper stopped' })
+    slot.pending.clear()
   }
   c.on('exit', gone)
   c.on('error', gone)
-  child = c
-  return c
+  slots.set(name, slot)
+  return slot
 }
 
-function call(type: string, cfg?: unknown): Promise<{ ok: boolean; error?: string; [k: string]: unknown }> {
-  const c = start()
-  if (!c) return Promise.resolve({ ok: false, error: 'ASIO helper is missing from this install' })
+function call(name: string, type: string, cfg?: unknown): Promise<{ ok: boolean; error?: string; [k: string]: unknown }> {
+  const s = start(name)
+  if (!s) return Promise.resolve({ ok: false, error: 'ASIO helper is missing from this install' })
   return new Promise(resolve => {
     const id = ++seq
-    const timer = setTimeout(() => { pending.delete(id); resolve({ ok: false, error: 'The ASIO driver did not answer' }) }, 20000)
-    pending.set(id, r => { clearTimeout(timer); resolve(r as { ok: boolean }) })
-    c.send({ id, type, cfg })
+    const timer = setTimeout(() => { s.pending.delete(id); resolve({ ok: false, error: 'The ASIO driver did not answer' }) }, 20000)
+    s.pending.set(id, r => { clearTimeout(timer); resolve(r as { ok: boolean }) })
+    s.child.send({ id, type, cfg })
   })
 }
 
-export function asioClose() {
-  if (!child) return
-  const c = child
-  child = null
-  try { c.send({ id: 0, type: 'close' }) } catch { /* gone */ }
-  setTimeout(() => { try { c.kill() } catch { /* gone */ } }, 500)
+/** Close one interface, or all of them. */
+export function asioClose(name?: string) {
+  for (const [n, s] of [...slots]) {
+    if (name && n !== name) continue
+    slots.delete(n)
+    try { s.child.send({ id: 0, type: 'close' }) } catch { /* gone */ }
+    setTimeout(() => { try { s.child.kill() } catch { /* gone */ } }, 500)
+  }
 }
 
 export function registerAsio(getWindow: () => BrowserWindow | null) {
   rxTarget = getWindow
-  ipcMain.handle('asio:list', () => call('list'))
-  ipcMain.handle('asio:open', (_e, cfg) => call('open', cfg))
-  ipcMain.handle('asio:close', async () => { if (child) await call('close') })
-  ipcMain.on('asio:tx', (_e, planar: Float32Array) => {
-    if (child?.connected) child.send({ type: 'tx', planar })
+  ipcMain.handle('asio:list', async () => {
+    // Probing drivers while another process holds one can fail, so reuse the last good list while any interface is open.
+    if (slots.size && lastList?.ok) return lastList
+    const r = await call('_list', 'list')
+    if (r.ok) lastList = r as typeof lastList
+    if (!slots.has('_list')) return r
+    asioClose('_list')
+    return r
+  })
+  ipcMain.handle('asio:open', (_e, name: string, cfg) => call(name, 'open', cfg))
+  ipcMain.handle('asio:close', async (_e, name?: string) => { asioClose(name) })
+  ipcMain.on('asio:tx', (_e, name: string, planar: Float32Array) => {
+    const s = slots.get(name)
+    if (s?.child.connected) s.child.send({ type: 'tx', planar })
   })
 }
