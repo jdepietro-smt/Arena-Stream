@@ -36,7 +36,8 @@ export interface PortCfg {
   inDev?: string
   outDev?: string
   rtp: RtpCfg
-  vox: { thresholdDb: number; hangMs: number; echoGuard: boolean }
+  /** `always`: send continuously instead of waiting for voice (a program feed). */
+  vox: { thresholdDb: number; hangMs: number; echoGuard: boolean; always?: boolean }
   inGainDb: number
   outGainDb: number
 }
@@ -443,7 +444,8 @@ export class GatewayRuntime {
       const guarded = v.echoGuard && now - p.lastOut < 250
       const above = !guarded && p.inDb() > v.thresholdDb
       if (above) p.lastAbove = now
-      const want = (ch?.canTalk ?? false) && (above || (p.open && now - p.lastAbove < v.hangMs))
+      const routed = p.cfg.source !== 'asio' || p.cfg.inCh > 0
+      const want = (ch?.canTalk ?? false) && (v.always ? routed : above || (p.open && now - p.lastAbove < v.hangMs))
       // The engine drops held keys on a server reconnect, so compare with its real state, not just ours.
       const keyed = this.engine.talkSet.has(p.cfg.channel)
       if (want && !keyed) this.engine.press(p.cfg.channel)

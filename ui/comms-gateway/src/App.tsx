@@ -439,12 +439,13 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
           <div className="mwrap"><div className="ledmeter out"><div style={{ width: pct(outDb) }} /></div></div>
         </div>
       </div>
+      <label className="check" title="For a program feed: keeps sending to the channel whether or not anything is loud enough"><input type="checkbox" checked={!!cfg.vox.always} onChange={e => onChange({ vox: { ...cfg.vox, always: e.target.checked } })} />Always send (program feed, no voice gating)</label>
       <div className="grid4">
         <label>VOX threshold: {cfg.vox.thresholdDb} dB
-          <input type="range" min={-80} max={-10} value={cfg.vox.thresholdDb} onChange={e => onChange({ vox: { ...cfg.vox, thresholdDb: +e.target.value } })} />
+          <input type="range" disabled={!!cfg.vox.always} min={-80} max={-10} value={cfg.vox.thresholdDb} onChange={e => onChange({ vox: { ...cfg.vox, thresholdDb: +e.target.value } })} />
         </label>
         <label>VOX hang: {cfg.vox.hangMs} ms
-          <input type="range" min={100} max={2000} step={50} value={cfg.vox.hangMs} onChange={e => onChange({ vox: { ...cfg.vox, hangMs: +e.target.value } })} />
+          <input type="range" disabled={!!cfg.vox.always} min={100} max={2000} step={50} value={cfg.vox.hangMs} onChange={e => onChange({ vox: { ...cfg.vox, hangMs: +e.target.value } })} />
         </label>
         <label>Gain in: {cfg.inGainDb} dB
           <input type="range" min={-30} max={30} value={cfg.inGainDb} onChange={e => onChange({ inGainDb: +e.target.value })} />
