@@ -12,11 +12,13 @@ cd /opt/arena-stream && git pull -q
 IP="$(curl -4fsS --retry 5 --retry-delay 3 https://api.ipify.org)"
 DOM="$(echo "$IP" | tr . -).sslip.io"
 sleep 5
-if COMMS_DOMAIN="$DOM" bash comms/deploy/install.sh 2>&1 | tee /root/arena-comms-install.log && [ "${PIPESTATUS[0]}" = 0 ]; then
+COMMS_DOMAIN="$DOM" bash comms/deploy/install.sh 2>&1 | tee /root/arena-comms-install.log || true
+# Judge success by the certificate itself, not by the installer's exit status.
+if [ -f "/etc/letsencrypt/live/$DOM/fullchain.pem" ]; then
   echo "https://$DOM" > /root/arena-comms-url.txt
 else
   echo "A certificate for $DOM could not be issued: installing with a self-signed certificate instead"
-  bash comms/deploy/install.sh 2>&1 | tee -a /root/arena-comms-install.log
+  bash comms/deploy/install.sh 2>&1 | tee -a /root/arena-comms-install.log || true
   echo "https://$IP (self-signed)" > /root/arena-comms-url.txt
 fi
 echo

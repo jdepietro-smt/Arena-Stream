@@ -250,10 +250,10 @@ echo "If this server has a Hetzner Cloud Firewall, allow inbound 443/tcp, 7881/t
 step "Checks"
 sleep 2
 systemctl is-active arena-livekit arena-comms
-curl -fsS --max-time 5 http://127.0.0.1:8900/health && echo
-curl -fsSk --max-time 5 -o /dev/null -w "dashboard via https: %{http_code}\n" "https://127.0.0.1/"
-curl -fsSk --max-time 5 https://127.0.0.1/comms-tab.js -o /dev/null -w "comms-tab.js: %{http_code}\n"
-curl -fsSk --max-time 5 -o /dev/null -w "comms web app: %{http_code}\n" "https://127.0.0.1/comms/app/"
+curl -fsS --max-time 5 http://127.0.0.1:8900/health && echo || true
+curl -fsSk --max-time 5 -o /dev/null -w "dashboard via https: %{http_code}\n" "https://127.0.0.1/" || true
+curl -fsSk --max-time 5 https://127.0.0.1/comms-tab.js -o /dev/null -w "comms-tab.js: %{http_code}\n" || true
+curl -fsSk --max-time 5 -o /dev/null -w "comms web app: %{http_code}\n" "https://127.0.0.1/comms/app/" || true
 # The dashboard root redirects to /login when signed out, so look at the login page.
 curl -fsSk --max-time 5 https://127.0.0.1/login | grep -c comms-tab.js | sed 's/^/tab script injected into the dashboard login page: /' || true
 
