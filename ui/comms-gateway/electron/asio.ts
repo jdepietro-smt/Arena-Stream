@@ -44,14 +44,14 @@ function start(name: string): Slot | null {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   } as ForkOptions)
   const slot: Slot = { child: c, pending: new Map() }
-  c.on('message', (m: { id?: number; result?: unknown; type?: string; planar?: Float32Array }) => {
+  c.on('message', (m: { id?: number; result?: unknown; type?: string; planar?: Float32Array; peaks?: Float32Array }) => {
     if (m.id != null) {
       const done = slot.pending.get(m.id)
       slot.pending.delete(m.id)
       done?.(m.result)
     } else if (m.type === 'rx') {
       const win = rxTarget?.()
-      if (win && !win.isDestroyed()) win.webContents.send('asio:rx', name, m.planar)
+      if (win && !win.isDestroyed()) win.webContents.send('asio:rx', name, m.planar, m.peaks)
     }
   })
   const gone = () => {

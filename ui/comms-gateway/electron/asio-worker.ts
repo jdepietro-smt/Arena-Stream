@@ -18,6 +18,7 @@ const RATE = 48000
 interface AsioDevice { id: number; name: string; inputChannels: number; outputChannels: number; sampleRates: number[] }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 interface Open { api: any; nOut: number; rings: SampleRing[] }
+const PEAK_MS = 60 // how often the level of every input channel is reported
 let current: Open | null = null
 
 const reply = (id: number, result: unknown) => process.send?.({ id, result })
@@ -41,7 +42,7 @@ function close() {
   try { if (cur.api.isStreamOpen()) cur.api.closeStream() } catch { /* already closed */ }
 }
 
-function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?: number }) {
+function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?: number; use?: number[] }) {
   close()
   try {
     const api = new audify.RtAudio(audify.RtAudioApi.WINDOWS_ASIO)
@@ -56,6 +57,10 @@ function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?:
     const rings = Array.from({ length: openOut }, () => new SampleRing(8192))
     const high = frames * 6 // a channel this far ahead of the device is trimmed back to `target`
     const target = frames * 2
+    // Only the channels that are routed somewhere travel to the window; the level of every channel is measured here.
+    const use = [...new Set(cfg.use ?? [])].filter(c => c >= 0 && c < nIn).sort((a, b) => a - b)
+    const peak = new Float32Array(nIn)
+    let lastPeaks = 0
 
     api.openStream(
       { deviceId: dev.id, nChannels: openOut, firstChannel: 0 },
@@ -64,7 +69,20 @@ function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?:
       (pcm: Buffer) => {
         const f32 = new Float32Array(pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength))
         const fr = f32.length / openIn
-        if (nIn > 0) process.send?.({ type: 'rx', planar: deinterleave(f32, fr, openIn, nIn) })
+        if (nIn > 0) {
+          for (let f = 0; f < fr; f++) {
+            const base = f * openIn
+            for (let c = 0; c < nIn; c++) { const v = f32[base + c]; const a = v < 0 ? -v : v; if (a > peak[c]) peak[c] = a }
+          }
+          const now = Date.now()
+          const report = now - lastPeaks >= PEAK_MS
+          if (use.length || report) {
+            const planar = new Float32Array(use.length * fr)
+            for (let k = 0; k < use.length; k++) for (let f = 0; f < fr; f++) planar[k * fr + f] = f32[f * openIn + use[k]]
+            process.send?.({ type: 'rx', planar, ...(report ? { peaks: peak.slice() } : {}) })
+            if (report) { peak.fill(0); lastPeaks = now }
+          }
+        }
         const out = new Float32Array(fr * openOut)
         interleaveFromRings(rings, fr, out, high, target)
         api.write(Buffer.from(out.buffer))
