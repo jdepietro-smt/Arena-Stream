@@ -5,8 +5,8 @@ import { createServer, loadConfig } from '../server.js'
 
 const cfg = { ...loadConfig('/nonexistent.json'), dataFile: null, auth: { mode: 'open' }, pin: 'sekret' }
 
-async function client(port) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}`)
+async function client(port, headers = {}) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers })
   const inbox = []
   const waiters = []
   ws.on('message', raw => {
@@ -583,5 +583,15 @@ test('gateways are remembered by their own id, shown online/offline, and cannot 
   assert.equal(srv.directory.gateways.length, 1, 'it stays on the list after going offline')
   srv.directory.deleteGateway(srv.directory.gateways[0].id)
   assert.equal(srv.directory.gateways.length, 0)
+  await srv.close?.()
+})
+
+test('the media relay address follows the address the client used to reach the server', async () => {
+  const fake = { url: 'wss://1.2.3.4/livekit', token: async () => 'tok', listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  const via = async host => { const c = await client(port, host ? { host, 'x-forwarded-for': '9.9.9.9' } : {}); c.send({ type: 'join', gateway: true, name: 'T' }); const w = await c.next(x => x.type === 'welcome'); c.ws.close(); return w.livekit.url }
+  assert.equal(await via('comms.example.com'), 'wss://comms.example.com/livekit', 'a client that came in by name is sent to that name')
+  assert.equal(await via(null), 'wss://1.2.3.4/livekit', 'a direct connection keeps the configured address')
   await srv.close?.()
 })

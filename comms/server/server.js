@@ -353,6 +353,15 @@ export function createServer(
       ws.close(4000, code)
     }
 
+    /** The media relay lives behind the same web address the client used to reach this server, so it matches that address's certificate. */
+    const livekitUrlFor = request => {
+      // Only behind the web proxy (it sets X-Forwarded-For and passes the client's own Host); a direct connection keeps the configured address.
+      if (!request.headers['x-forwarded-for']) return sfu.url
+      const host = String(request.headers['x-forwarded-host'] || request.headers.host || '').split(',')[0].trim()
+      if (!host) return sfu.url
+      try { const u = new URL(sfu.url); u.host = host; return u.toString().replace(/\/$/, '') } catch { return sfu.url }
+    }
+
     async function join(msg) {
       let user
       if (msg.gateway && !msg.token && !msg.username) {
@@ -402,7 +411,7 @@ export function createServer(
       Promise.resolve(sfu ? sfu.token({ id: joined.id, name: user.name }) : null).then(token => send(joined, {
         type: 'welcome',
         media: sfu ? 'sfu' : 'mesh',
-        livekit: sfu ? { url: sfu.url, token } : null,
+        livekit: sfu ? { url: livekitUrlFor(req), token } : null,
         id: joined.id,
         me: { name: user.name, title: joined.title, admin: !!user.admin },
         session: authMode === 'accounts' && !user.ephemeral ? auth.issueSession(user) : null,
