@@ -10,10 +10,13 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 app.setName('Arena Comms Gateway')
 // "Send over TCP": WebRTC may not use UDP at all, so a lossy UDP path (the readout's packet loss) cannot drop audio.
 // It is a start-up switch, so it is read from the saved settings now and a change needs a restart.
+let forceTcp = false
 try {
   const saved = JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'gateway-config.json'), 'utf8'))
-  if (saved.forceTcp) app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp')
+  forceTcp = !!saved.forceTcp
+  if (forceTcp) app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp')
 } catch { /* no settings yet */ }
+ipcMain.on('gw:forceTcp', e => { e.returnValue = forceTcp }) // the preload needs it before the page's scripts run
 app.setAppUserModelId('com.smt.arenacommsgateway')
 
 const hasSingleLock = app.requestSingleInstanceLock()
@@ -42,6 +45,7 @@ function createWindow() {
       backgroundThrottling: false,
     },
   })
+  if (forceTcp) win.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp')
   if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL)
   else win.loadFile(path.join(__dirname, '../dist/index.html'))
 }
