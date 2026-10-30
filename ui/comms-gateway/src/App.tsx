@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { CommsEngine } from '@engine'
 import {
   AsioCfg, AsioDevice, GatewayConfig, GatewayRuntime, PortCfg, PortRuntime, RtpCfg, SourceKind,
-  defaultConfig, defaultRtp, newAsio, newPort,
+  SYSTEM_DEV, SYSTEM_INPUTS, defaultConfig, defaultRtp, newAsio, newPort,
 } from './ports'
 import './kp.css'
 import './App.css'
@@ -235,7 +235,7 @@ export default function App() {
           {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
         </section>
 
-        {interfaces.some(i => i.dev) && <RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
+        {<RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
@@ -295,6 +295,7 @@ function RoutingGrid({ interfaces, cfg, runtime, channels: allChannels, groups, 
           <button className={`btn sm ${tab === 'out' ? 'primary' : ''}`} onClick={() => setTab('out')}>Arena → Outputs</button>
         </div>
       </div>
+      {runtime.systemError && <div className="error">{runtime.systemError}</div>}
       {channels.length === 0 && <div className="hint">Connect to the server to see its channels as columns. You can name the interface channels now.</div>}
       <div className="hint">Type in the name boxes to name each channel (for example Mic 3 - Director). {tab === 'in'
         ? 'Click where an interface input meets an Arena channel to send that input to the channel. One input per channel; an input can feed several channels.'
@@ -320,6 +321,19 @@ function RoutingGrid({ interfaces, cfg, runtime, channels: allChannels, groups, 
                 )
               }),
             ])}
+            {tab === 'in' && [
+              <tr key="sys-h"><th className="ifhead" colSpan={channels.length + 1}>This PC: browser &amp; system audio</th></tr>,
+              ...SYSTEM_INPUTS.map((label, i) => (
+                <tr key={`sys-${i}`}>
+                  <th className="rname"><b>{i + 1}</b><span className="sysname">{label}</span><span className="chmeter" title="Level on this line"><i style={{ width: pct(runtime.asioLevelDb(SYSTEM_DEV, 'in', i)) }} /></span></th>
+                  {channels.map(c => {
+                    const p = portFor(c.id)
+                    const on = !!p && p.inDev === SYSTEM_DEV && p.inCh === i + 1
+                    return <td key={c.id}><button className={`cell ${on ? 'on' : ''}`} onClick={() => toggle(c, SYSTEM_DEV, i + 1)} title={`${label} → ${c.name}`} /></td>
+                  })}
+                </tr>
+              )),
+            ]}
           </tbody>
         </table>
       </div>
@@ -379,6 +393,9 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
                   {Array.from({ length: f.dev.inputChannels }, (_, i) => <option key={i} value={`${f.cfg.id}|${i + 1}`}>{i + 1} · {f.cfg.inputNames[i]?.trim() || `Input ${i + 1}`}</option>)}
                 </optgroup>
               ))}
+              <optgroup label="This PC (browser & system audio)">
+                {SYSTEM_INPUTS.map((n, i) => <option key={n} value={`${SYSTEM_DEV}|${i + 1}`}>{n}</option>)}
+              </optgroup>
             </select>
           </label>
           <label>Interface output

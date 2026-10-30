@@ -52,6 +52,10 @@ export interface AsioOpenResult {
 /** One ASIO interface: which driver, its buffer size, and your names for its channels (index 0 = channel 1). */
 export interface AsioCfg { id: string; driver: string; deviceId: number; frames: number; inputNames: string[]; outputNames: string[] }
 export const newAsio = (n: number): AsioCfg => ({ id: `a${Date.now().toString(36)}${n}`, driver: '', deviceId: -1, frames: 256, inputNames: [], outputNames: [] })
+/** Pseudo-interface for the PC's own sound output (a browser, a player...). Input 1 = mix of both sides, 2 = left, 3 = right. */
+export const SYSTEM_DEV = 'system'
+export const SYSTEM_INPUTS = ['Mix (left + right)', 'Left', 'Right']
+interface SystemGraph { splitter: ChannelSplitterNode; mix: GainNode; analysers: AnalyserNode[] }
 interface AsioGraph { splitter: ChannelSplitterNode | null; chans: number; merger: ChannelMergerNode | null; outs: number; devIn: number; devOut: number }
 export interface DeviceCfg { inputId: string; outputId: string; inputChannels: number; outputChannels: number }
 export interface GatewayConfig {
@@ -170,7 +174,18 @@ export class GatewayRuntime {
   private asioNodes: AudioNode[] = []
   /** Peak level (0..1, slowly falling) of every interface input and output, for the routing grid's meters. */
   private asioPeaks = new Map<string, { in: Float32Array; out: Float32Array }>()
+  private system: SystemGraph | null = null
+  systemError = ''
   asioLevelDb(id: string, kind: 'in' | 'out', i: number): number {
+    if (id === SYSTEM_DEV) {
+      const an = this.system?.analysers[i]
+      if (!an) return SILENCE_DB
+      const buf = new Float32Array(an.fftSize)
+      an.getFloatTimeDomainData(buf)
+      let m = 0
+      for (const v of buf) m = Math.max(m, Math.abs(v))
+      return m > 1e-5 ? 20 * Math.log10(m) : SILENCE_DB
+    }
     const v = this.asioPeaks.get(id)?.[kind][i] ?? 0
     return v > 1e-5 ? 20 * Math.log10(v) : SILENCE_DB
   }
@@ -322,6 +337,31 @@ export class GatewayRuntime {
         }
       }
 
+      // ── System audio: whatever this PC is playing (a browser tab, a media player), captured as a stereo loopback ──
+      this.systemError = ''
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { mandatory: { chromeMediaSource: 'desktop' } },
+          video: { mandatory: { chromeMediaSource: 'desktop' } },
+        } as unknown as MediaStreamConstraints)
+        stream.getVideoTracks().forEach(t => t.stop()) // only the sound is wanted
+        if (!stream.getAudioTracks().length) throw new Error('no system audio available')
+        this.streams.push(stream)
+        const src = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()))
+        const splitter = ctx.createChannelSplitter(2)
+        src.connect(splitter)
+        const mix = ctx.createGain()
+        mix.gain.value = 0.5
+        splitter.connect(mix, 0)
+        splitter.connect(mix, 1)
+        const mk = () => { const a = ctx.createAnalyser(); a.fftSize = 1024; return a }
+        const analysers = [mk(), mk(), mk()]
+        mix.connect(analysers[0])
+        splitter.connect(analysers[1], 0)
+        splitter.connect(analysers[2], 1)
+        this.system = { splitter, mix, analysers }
+      } catch (e) { this.systemError = `System audio: ${(e as Error).message}` }
+
       const needRtp = active.some(p => p.source === 'rtp')
       if (needRtp) {
         if (!window.gw) this.deviceError ||= 'Network audio (RTP) needs the desktop app'
@@ -354,6 +394,7 @@ export class GatewayRuntime {
   }
 
   private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }, asio?: Map<string, AsioGraph>, firstAsio = '') {
+    const system = this.system
     const c = p.cfg
     if (!c.channel) { p.error = 'Pick an Arena channel'; return }
 
@@ -383,9 +424,14 @@ export class GatewayRuntime {
       else if (c.outCh < 1 || c.outCh > outDev.outs) p.error = p.error || `Output channel ${c.outCh} not available (this device has ${outDev.outs} outputs)`
       else p.outGain.connect(outDev.merger, 0, c.outCh - 1)
     } else if (c.source === 'asio') {
-      const gi = asio?.get(c.inDev || firstAsio)
+      const fromSystem = c.inDev === SYSTEM_DEV
+      const gi = fromSystem ? undefined : asio?.get(c.inDev || firstAsio)
       const go = asio?.get(c.outDev || firstAsio)
-      if (c.inCh < 1) { /* no input routed */ } else if (!gi) p.error = 'ASIO interface not available'
+      if (c.inCh < 1) { /* no input routed */ } else if (fromSystem) {
+        if (!system) p.error = this.systemError || 'System audio is not available'
+        else if (c.inCh === 1) system.mix.connect(p.inGain)
+        else system.splitter.connect(p.inGain, c.inCh - 2)
+      } else if (!gi) p.error = 'ASIO interface not available'
       else if (!gi.splitter || c.inCh > gi.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${gi.devIn})`
       else gi.splitter.connect(p.inGain, c.inCh - 1)
       if (c.outCh < 1) { /* no output routed */ } else if (!go) p.error = p.error || 'ASIO interface not available'
@@ -476,6 +522,7 @@ export class GatewayRuntime {
       this.asioInfo.clear()
       this.asioPeaks.clear()
     }
+    this.system = null
     this.builtKey = ''
   }
 }
