@@ -85,12 +85,15 @@ function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?:
   }
 }
 
-process.on('message', (m: { id?: number; type: string; cfg?: never; planar?: Float32Array }) => {
+process.on('message', (m: { id?: number; type: string; cfg?: never; planar?: Float32Array; first?: number }) => {
   if (m.type === 'tx') {
+    // A block carries a group of channels starting at `first` (the window sends wide interfaces in groups of 32).
     const cur = current
     if (!cur || !cur.nOut || !(m.planar instanceof Float32Array)) return
-    const blk = Math.floor(m.planar.length / cur.nOut)
-    for (let c = 0; c < cur.nOut; c++) cur.rings[c].push(m.planar.subarray(c * blk, (c + 1) * blk))
+    const first = m.first ?? 0
+    const count = Math.min(cur.nOut - first, Math.round(m.planar.length / 128))
+    const blk = Math.floor(m.planar.length / Math.max(1, count))
+    for (let k = 0; k < count; k++) cur.rings[first + k].push(m.planar.subarray(k * blk, (k + 1) * blk))
     return
   }
   if (m.id == null) return

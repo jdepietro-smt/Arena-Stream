@@ -105,8 +105,8 @@ export function registerAsio(getWindow: () => BrowserWindow | null) {
     return r
   })
   ipcMain.handle('asio:close', async (_e, name?: string) => { asioClose(name) })
-  ipcMain.on('asio:tx', (_e, name: string, planar: Float32Array) => {
+  ipcMain.on('asio:tx', (_e, name: string, planar: Float32Array, first: number) => {
     const s = slots.get(name)
-    if (s?.child.connected) s.child.send({ type: 'tx', planar })
+    if (s?.child.connected) s.child.send({ type: 'tx', planar, first })
   })
 }

@@ -56,7 +56,8 @@ export const newAsio = (n: number): AsioCfg => ({ id: `a${Date.now().toString(36
 export const SYSTEM_DEV = 'system'
 export const SYSTEM_INPUTS = ['Mix (left + right)', 'Left', 'Right']
 interface SystemGraph { splitter: ChannelSplitterNode; mix: GainNode; analysers: AnalyserNode[] }
-interface AsioGraph { splitter: ChannelSplitterNode | null; chans: number; merger: ChannelMergerNode | null; outs: number; devIn: number; devOut: number }
+const MAX_NODE_CH = 32
+interface AsioGraph { splitters: ChannelSplitterNode[]; chans: number; mergers: ChannelMergerNode[]; outs: number; devIn: number; devOut: number }
 export interface DeviceCfg { inputId: string; outputId: string; inputChannels: number; outputChannels: number }
 export interface GatewayConfig {
   /** How this gateway shows up in the server's list of people. */
@@ -106,7 +107,7 @@ declare global {
       asioList(): Promise<{ ok: boolean; devices?: AsioDevice[]; error?: string }>
       asioOpen(slot: string, c: { deviceId: number; inputs: number; outputs: number; frames?: number }): Promise<AsioOpenResult>
       asioClose(slot?: string): Promise<void>
-      asioTx(slot: string, planar: Float32Array): void
+      asioTx(slot: string, planar: Float32Array, first?: number): void
       onAsioRx(cb: ((slot: string, planar: Float32Array) => void) | null): void
       rtpTx(id: string, samples: Float32Array): void
       onRtpRx(cb: (id: string, s: Float32Array) => void): void
@@ -196,11 +197,12 @@ export class GatewayRuntime {
   isStale(cfg: GatewayConfig) { return this.builtKey !== structuralKey(cfg) }
 
   /** Fold one planar block (channel-major) into the per-channel peaks: instant rise, slow fall. */
-  private trackPeaks(peaks: Float32Array, planar: Float32Array, chans: number) {
+  private trackPeaks(peaks: Float32Array, planar: Float32Array, chans: number, first = 0) {
     const len = Math.floor(planar.length / chans)
-    for (let c = 0; c < chans; c++) {
+    for (let k = 0; k < chans; k++) {
+      const c = first + k
       let m = 0
-      for (let i = c * len, e = i + len; i < e; i++) { const a = planar[i] < 0 ? -planar[i] : planar[i]; if (a > m) m = a }
+      for (let i = k * len, e = i + len; i < e; i++) { const a = planar[i] < 0 ? -planar[i] : planar[i]; if (a > m) m = a }
       peaks[c] = Math.max(m, peaks[c] * 0.97)
     }
   }
@@ -287,7 +289,7 @@ export class GatewayRuntime {
         const handlers = new Map<string, (buf: Float32Array) => void>()
         window.gw!.onAsioRx((slot, buf) => handlers.get(slot)?.(buf))
         let moduleLoaded = false
-        for (const a of wanted) {
+        for (const a of wanted) try {
           // The driver is found by name (its number can change between boots), then by the number saved with it.
           const dev = listed.find(d => d.name === a.driver) ?? listed.find(d => d.id === a.deviceId)
           const using = active.some(p => p.source === 'asio' && (p.inDev || cfg.asio[0].id) === a.id || p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id)
@@ -297,44 +299,56 @@ export class GatewayRuntime {
           this.asioInfo.set(a.id, res)
           if (!res.ok) { this.deviceError ||= `ASIO ${dev.name}: ${res.error}`; continue }
           if (!moduleLoaded) { await ctx.audioWorklet.addModule('asio-worklet.js'); moduleLoaded = true }
-          const g: AsioGraph = { splitter: null, chans: res.openedIn ?? 0, merger: null, outs: res.openedOut ?? 0, devIn: res.inputChannels ?? 0, devOut: res.outputChannels ?? 0 }
+          const g: AsioGraph = { splitters: [], chans: res.openedIn ?? 0, mergers: [], outs: res.openedOut ?? 0, devIn: res.inputChannels ?? 0, devOut: res.outputChannels ?? 0 }
           const peaks = { in: new Float32Array(res.openedIn ?? 0), out: new Float32Array(res.openedOut ?? 0) }
           this.asioPeaks.set(a.id, peaks)
-          if ((res.openedIn ?? 0) > 0) {
-            const nIn = res.openedIn!
-            const inNode = new AudioWorkletNode(ctx, 'asio-in', {
-              numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [nIn], processorOptions: { targetSamples: 512 },
+          // Web Audio nodes carry at most 32 channels, so a wide interface (Dante: 64) is split into groups of 32.
+          const nIn = res.openedIn ?? 0
+          const nOut = res.openedOut ?? 0
+          const frames = (len: number, ch: number) => Math.floor(len / ch)
+          const inChunks: { first: number; count: number; node: AudioWorkletNode }[] = []
+          for (let first = 0; first < nIn; first += MAX_NODE_CH) {
+            const count = Math.min(MAX_NODE_CH, nIn - first)
+            const node = new AudioWorkletNode(ctx, 'asio-in', {
+              numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 512 },
             })
+            const splitter = ctx.createChannelSplitter(count)
+            node.connect(splitter)
+            g.splitters.push(splitter)
+            inChunks.push({ first, count, node })
+            this.asioNodes.push(node, splitter)
+          }
+          if (inChunks.length) {
             handlers.set(a.id, buf => {
               this.trackPeaks(peaks.in, buf, nIn)
-              inNode.port.postMessage(buf, [buf.buffer])
+              const fr = frames(buf.length, nIn)
+              for (const ch of inChunks) {
+                const part = buf.slice(ch.first * fr, (ch.first + ch.count) * fr) // channel-major, so a group is contiguous
+                ch.node.port.postMessage(part, [part.buffer])
+              }
             })
-            const splitter = ctx.createChannelSplitter(nIn)
-            inNode.connect(splitter)
-            g.splitter = splitter
-            this.asioNodes.push(inNode, splitter)
           }
-          if ((res.openedOut ?? 0) > 0) {
-            const nOut = res.openedOut!
+          for (let first = 0; first < nOut; first += MAX_NODE_CH) {
+            const count = Math.min(MAX_NODE_CH, nOut - first)
             const outNode = new AudioWorkletNode(ctx, 'asio-out', {
-              numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: nOut,
-              channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: nOut },
+              numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: count,
+              channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: count },
             })
             outNode.port.onmessage = e => {
               const blk = e.data as Float32Array
-              this.trackPeaks(peaks.out, blk, nOut)
-              window.gw?.asioTx(a.id, blk)
+              this.trackPeaks(peaks.out, blk, count, first)
+              window.gw?.asioTx(a.id, blk, first)
             }
-            const merger = ctx.createChannelMerger(nOut)
+            const merger = ctx.createChannelMerger(count)
             merger.connect(outNode)
             const sink = ctx.createGain()
             sink.gain.value = 0 // keeps the node pulled by the graph without making any sound
             outNode.connect(sink).connect(ctx.destination)
-            g.merger = merger
+            g.mergers.push(merger)
             this.asioNodes.push(outNode, sink, merger)
           }
           asio.set(a.id, g)
-        }
+        } catch (e) { this.deviceError ||= `ASIO ${a.driver}: ${(e as Error).message}` }
       }
 
       // ── System audio: whatever this PC is playing (a browser tab, a media player), captured as a stereo loopback ──
@@ -432,11 +446,11 @@ export class GatewayRuntime {
         else if (c.inCh === 1) system.mix.connect(p.inGain)
         else system.splitter.connect(p.inGain, c.inCh - 2)
       } else if (!gi) p.error = 'ASIO interface not available'
-      else if (!gi.splitter || c.inCh > gi.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${gi.devIn})`
-      else gi.splitter.connect(p.inGain, c.inCh - 1)
+      else if (c.inCh > gi.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${gi.devIn})`
+      else gi.splitters[Math.floor((c.inCh - 1) / MAX_NODE_CH)].connect(p.inGain, (c.inCh - 1) % MAX_NODE_CH)
       if (c.outCh < 1) { /* no output routed */ } else if (!go) p.error = p.error || 'ASIO interface not available'
-      else if (!go.merger || c.outCh > go.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${go.devOut})`
-      else p.outGain.connect(go.merger, 0, c.outCh - 1)
+      else if (c.outCh > go.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${go.devOut})`
+      else p.outGain.connect(go.mergers[Math.floor((c.outCh - 1) / MAX_NODE_CH)], 0, (c.outCh - 1) % MAX_NODE_CH)
     } else if (c.source === 'rtp') {
       const r = c.rtp
       const res = await window.gw!.rtpOpen(c.id, r)

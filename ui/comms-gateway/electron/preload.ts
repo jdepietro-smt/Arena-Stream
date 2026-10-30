@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('gw', {
   asioList: () => ipcRenderer.invoke('asio:list'),
   asioOpen: (slot: string, cfg: unknown) => ipcRenderer.invoke('asio:open', slot, cfg),
   asioClose: (slot?: string) => ipcRenderer.invoke('asio:close', slot),
-  asioTx: (slot: string, planar: Float32Array) => ipcRenderer.send('asio:tx', slot, planar),
+  asioTx: (slot: string, planar: Float32Array, first = 0) => ipcRenderer.send('asio:tx', slot, planar, first),
   onAsioRx: (cb: ((slot: string, planar: Float32Array) => void) | null) => { asioRx = cb },
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (cfg: unknown) => ipcRenderer.invoke('config:set', cfg),
