@@ -536,7 +536,8 @@ test('admin page script compiles (a syntax slip there leaves the admin page blan
 })
 
 test('gateway app joins with no account, even where accounts are required, and sees every channel', async () => {
-  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, {})
+  const fake = { url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, { sfu: fake })
   const port = await srv.listen(0)
   const ch = srv.directory.addChannel({ name: 'Production' })
   const join = async msg => { const c = await client(port); c.send({ type: 'join', ...msg }); const m = await c.next(x => x.type === 'welcome' || x.type === 'error'); c.ws.close(); return m }
