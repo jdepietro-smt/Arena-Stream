@@ -217,11 +217,12 @@ function groupsView() {
   const st = S.state
   return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Groups'), h('div', { class: 'sub' }, 'Each group grants talk and/or listen on channels. Add users to groups.')),
       h('button', { class: 'btn primary', onclick: () => groupDialog() }, 'Add group')),
-    h('table', {}, h('tr', {}, ['Group', 'Channels', 'Members'].map(x => h('th', {}, x))),
+    h('table', {}, h('tr', {}, ['Group', 'Channels', 'Members', ''].map(x => h('th', {}, x))),
       st.groups.map(g => h('tr', { class: 'row', onclick: () => groupDialog(g) },
         h('td', {}, g.name, g.selfJoin && h('span', { class: 'chip' }, 'self-join')),
         h('td', {}, Object.entries(g.grants).map(([c, v]) => h('span', { class: 'chip' }, chanName(c) + ' ' + (v.talk && v.listen ? '⇄' : v.talk ? 'talk' : 'listen')))),
-        h('td', {}, st.users.filter(u => u.groups.includes(g.id)).length))))]
+        h('td', {}, st.users.filter(u => u.groups.includes(g.id)).length),
+        h('td', { onclick: e => e.stopPropagation() }, h('button', { class: 'btn sm danger', onclick: () => confirm('Delete group ' + g.name + '?') && act(() => api('DELETE', 'groups/' + g.id), 'Deleted') }, 'Delete')))))]
 }
 
 // ── channels ─────────────────────────────────────────────────────────────────
@@ -324,7 +325,8 @@ function channelsView() {
         h('td', {}, c.music || c.withMusic ? [h('span', { class: 'chip' }, (c.music ? '♪ music' : '♪ + music') + (c.source ? ' · stream' : c.link ? ' · link' : '')), ' ', musicSenders(c)] : c.ifb ? h('span', { class: 'chip warn' }, 'IFB ' + (c.duck ?? 0.15)) : h('span', { class: 'muted' }, 'party line')),
         h('td', { onclick: e => e.stopPropagation() },
           h('button', { class: 'btn sm', disabled: i === 0, onclick: () => move(i, -1) }, '↑'), ' ',
-          h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓')))))]
+          h('button', { class: 'btn sm', disabled: i === ids.length - 1, onclick: () => move(i, 1) }, '↓'), ' ',
+          h('button', { class: 'btn sm danger', onclick: () => confirm('Delete channel ' + c.name + '?') && act(() => api('DELETE', 'channels/' + c.id), 'Deleted') }, 'Delete')))))]
 }
 
 // ── online ───────────────────────────────────────────────────────────────────
