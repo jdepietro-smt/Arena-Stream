@@ -947,19 +947,20 @@ export class CommsEngine {
   musicSending(ch: string): boolean { return this.musicTx.has(ch) }
 
   /** Quality of the send link to the media server, from the WebRTC stats (gateways use this for a health readout). */
-  async linkStats(): Promise<{ rttMs: number; lost: number; sent: number; jitterMs: number } | null> {
+  async linkStats(): Promise<{ rttMs: number; lost: number; sent: number; jitterMs: number; via: string } | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const pc = (this.room as any)?.engine?.pcManager?.publisher
     let rep: RTCStatsReport | undefined
     try { rep = await pc?.getStats?.() } catch { return null }
     if (!rep) return null
-    let rttMs = 0, lost = 0, sent = 0, jitterMs = 0
+    let rttMs = 0, lost = 0, sent = 0, jitterMs = 0, via = ''
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     rep.forEach((r: any) => {
       if (r.type === 'remote-inbound-rtp' && r.kind === 'audio') { rttMs = Math.max(rttMs, (r.roundTripTime || 0) * 1000); lost += r.packetsLost || 0; jitterMs = Math.max(jitterMs, (r.jitter || 0) * 1000) }
       if (r.type === 'outbound-rtp' && r.kind === 'audio') sent += r.packetsSent || 0
+      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') { const l = (rep as unknown as Map<string, any>).get(r.localCandidateId); // eslint-disable-line @typescript-eslint/no-explicit-any if (l) via = `${l.protocol ?? ''} ${l.candidateType ?? ''}`.trim() }
     })
-    return { rttMs, lost, sent, jitterMs }
+    return { rttMs, lost, sent, jitterMs, via }
   }
 
   private attachMusic(ch: string, track: { sid?: string; mediaStreamTrack: MediaStreamTrack }) {
@@ -1113,7 +1114,7 @@ export class CommsEngine {
       if (old?.track) await room.localParticipant.unpublishTrack(old.track, false).catch(() => {})
       this.publishCount++
       this.musicPubs.set(ch, await room.localParticipant.publishTrack(tx.dest.stream.getAudioTracks()[0], {
-        name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
+        name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: true, forceStereo: true, // RED: each packet also carries the one before it, so a lost packet is rarely heard
         audioPreset: { maxBitrate: 128_000 },
       }))
       this.send({ type: 'tracks' })
