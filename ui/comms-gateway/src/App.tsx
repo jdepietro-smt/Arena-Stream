@@ -235,7 +235,7 @@ export default function App() {
           {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
         </section>
 
-        {<RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels.filter(c => !c.music)} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
+        {<RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
 
         <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
         {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
@@ -347,7 +347,7 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
   cfg: PortCfg; live?: PortRuntime; engine: CommsEngine; connected: boolean; mics: MediaDeviceInfo[]; outs: MediaDeviceInfo[]; interfaces: { cfg: AsioCfg; dev?: AsioDevice }[]; dupChannel: boolean
   onChange: (p: Partial<PortCfg>) => void; onRemove: () => void
 }) {
-  const channels = engine.channels.filter(c => !c.music)
+  const channels = engine.channels
   const rtp = (p: Partial<RtpCfg>) => onChange({ rtp: { ...cfg.rtp, ...p } })
   const num = (v: string, d = 0) => (Number.isFinite(+v) ? +v : d)
   const inDb = live?.inDb() ?? -120
@@ -459,9 +459,16 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
           <div className="mwrap"><div className="ledmeter out"><div style={{ width: pct(outDb) }} /></div></div>
         </div>
       </div>
-      {cfg.source === 'asio' && (channels.find(c => c.id === cfg.channel)?.music || channels.find(c => c.id === cfg.channel)?.withMusic) && (
-        <label className="check" title="Left = the chosen input, right = the next one. Listeners hear it as stereo music, not as a voice."><input type="checkbox" checked={!!cfg.stereo} onChange={e => onChange({ stereo: e.target.checked })} />Send in stereo (this input = left, the next = right)</label>
-      )}
+      {cfg.source === 'asio' && (() => {
+        const ch = channels.find(c => c.id === cfg.channel)
+        if (!ch?.music && !ch?.withMusic) return null
+        return (
+          <label className="check" title="Left = the chosen input, right = the next one (for the PC's audio: its left and right). Listeners hear stereo music, not a voice.">
+            <input type="checkbox" checked={!!ch.music || !!cfg.stereo} disabled={!!ch.music} onChange={e => onChange({ stereo: e.target.checked })} />
+            Send in stereo{ch.music ? ' (always, on a music channel)' : ''}: this input = left, the next = right
+          </label>
+        )
+      })()}
       <label className="check" title="For a program feed: keeps sending to the channel whether or not anything is loud enough"><input type="checkbox" checked={!!cfg.vox.always} onChange={e => onChange({ vox: { ...cfg.vox, always: e.target.checked } })} />Always send (program feed, no voice gating)</label>
       <div className="grid4">
         <label>VOX threshold: {cfg.vox.thresholdDb} dB

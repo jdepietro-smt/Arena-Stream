@@ -406,7 +406,7 @@ export class GatewayRuntime {
 
       // Stereo ports send their mix as music on the channel (needs the server to let this gateway start music there).
       for (const p of this.ports) {
-        if (!p.cfg.stereo || !p.stereoNode) continue
+        if (!this.isStereo(p.cfg) || !p.stereoNode) continue
         const ch = this.engine.channels.find(x => x.id === p.cfg.channel)
         if (!(ch?.music || ch?.withMusic)) p.error = p.error || 'Stereo needs a music channel (a channel with music switched on)'
         else if (!ch.canMusic) p.error = p.error || 'This gateway may not start music on that channel (update the server)'
@@ -419,6 +419,9 @@ export class GatewayRuntime {
     }
   }
 
+  /** Stereo ports send music: chosen on a music-capable channel, and forced on a music-only one (it has no voice). */
+  private isStereo(c: PortCfg) { return !!c.stereo || !!this.engine.channels.find(x => x.id === c.channel)?.music }
+
   private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }, asio?: Map<string, AsioGraph>, firstAsio = '') {
     const system = this.system
     const c = p.cfg
@@ -430,7 +433,8 @@ export class GatewayRuntime {
     const delay = ctx.createDelay(0.1); delay.delayTime.value = 0.03
     p.inGain.connect(p.inAn)
     p.inGain.connect(delay)
-    if (!c.stereo) delay.connect(this.engine.channelTx(c.channel))
+    const stereo = this.isStereo(c)
+    if (!stereo) delay.connect(this.engine.channelTx(c.channel))
     // Built-in test tone (1 kHz) for commissioning, injected ahead of the gain stage.
     const osc = ctx.createOscillator(); osc.frequency.value = 1000
     p.toneGain = ctx.createGain(); p.toneGain.gain.value = 0
@@ -453,7 +457,7 @@ export class GatewayRuntime {
       const fromSystem = c.inDev === SYSTEM_DEV
       const gi = fromSystem ? undefined : asio?.get(c.inDev || firstAsio)
       const go = asio?.get(c.outDev || firstAsio)
-      if (c.stereo) {
+      if (stereo) {
         // Stereo: this input is left and the next is right (for the PC's own audio, its left and right as they are).
         const st = ctx.createChannelMerger(2)
         const tap = (ch: number, side: number) => {
@@ -520,10 +524,10 @@ export class GatewayRuntime {
   private voxTick() {
     const now = performance.now()
     let changed = false
-    const chans = this.engine.channels.filter(c => !c.music) // music channels are not carried by the gateway
+    const chans = this.engine.channels
     for (const p of this.ports) {
       const ch = chans.find(c => c.id === p.cfg.channel)
-      const access: Port['access'] = !ch ? 'none' : ch.canTalk && ch.canListen ? 'ok' : ch.canTalk ? 'talk-only' : ch.canListen ? 'listen-only' : 'none'
+      const access: Port['access'] = !ch ? 'none' : ch.music ? (ch.canMusic ? 'ok' : 'none') : ch.canTalk && ch.canListen ? 'ok' : ch.canTalk ? 'talk-only' : ch.canListen ? 'listen-only' : 'none'
       if (access !== p.access) { p.access = access; changed = true }
       if (!p.inAn) continue
       const v = p.cfg.vox
@@ -533,7 +537,7 @@ export class GatewayRuntime {
       const guarded = v.echoGuard && now - p.lastOut < 250
       const above = !guarded && p.inDb() > v.thresholdDb
       if (above) p.lastAbove = now
-      if (p.cfg.stereo) { if (p.open) { p.open = false; changed = true } continue } // sent as music, not keyed
+      if (this.isStereo(p.cfg)) { if (p.open) { p.open = false; changed = true } continue } // sent as music, not keyed
       const routed = p.cfg.source !== 'asio' || p.cfg.inCh > 0
       const want = (ch?.canTalk ?? false) && (v.always ? routed : above || (p.open && now - p.lastAbove < v.hangMs))
       // The engine drops held keys on a server reconnect, so compare with its real state, not just ours.
@@ -550,7 +554,7 @@ export class GatewayRuntime {
     this.timer = null
     for (const p of this.ports) {
       if (p.open) this.engine.release(p.cfg.channel)
-      if (p.cfg.stereo) this.engine.stopMusic(p.cfg.channel)
+      if (this.isStereo(p.cfg)) this.engine.stopMusic(p.cfg.channel)
       if (p.cfg.source === 'rtp') void window.gw?.rtpClose(p.cfg.id)
       p.rxNode?.disconnect()
     }
