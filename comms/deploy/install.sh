@@ -101,6 +101,12 @@ step "Building the Comms web app"
 [ -f "$REPO/ui/comms-app/dist/index.html" ] || { echo "web build failed"; exit 1; }
 install -m 644 "$COMMS/deploy/comms-tab.js" "$WEBROOT/comms-tab.js"
 
+# The domain is remembered, so a later plain update (bash comms/deploy/install.sh) keeps the real certificate.
+if [ -n "${COMMS_DOMAIN:-}" ]; then
+  echo "$COMMS_DOMAIN" > "$ETC/domain"
+elif [ -f "$ETC/domain" ]; then
+  COMMS_DOMAIN="$(cat "$ETC/domain")"
+fi
 TLS_CERT="$ETC/tls/cert.pem"
 TLS_KEY="$ETC/tls/key.pem"
 SERVER_NAME="_"
