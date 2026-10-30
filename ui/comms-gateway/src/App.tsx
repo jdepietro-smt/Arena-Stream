@@ -522,7 +522,7 @@ function LinkHealth({ engine, runtime }: { engine: CommsEngine; runtime: Gateway
   const pct = link && link.sent > 0 ? (link.lost / (link.sent + link.lost)) * 100 : 0
   return (
     <span className="muted" title="Send link to the server over the last 3 s, and ASIO input buffer dropouts since the gateway connected" style={{ marginRight: 10, fontSize: 12 }}>
-      {link ? `link ${Math.round(link.rttMs)} ms · loss ${pct.toFixed(1)}% · jitter ${link.jitterMs.toFixed(0)} ms` : 'link …'} · buffer dropouts {dry} · skips {trims}
+      {link ? `link ${Math.round(link.rttMs)} ms · loss ${pct.toFixed(1)}% (${link.lost}/${link.sent + link.lost}) · jitter ${link.jitterMs.toFixed(0)} ms` : 'link …'} · publishes {engine.publishCount} · buffer dropouts {dry} · skips {trims}{engine.musicError ? ` · ${engine.musicError}` : ''}
     </span>
   )
 }

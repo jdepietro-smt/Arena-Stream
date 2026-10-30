@@ -116,6 +116,8 @@ export class CommsEngine {
   /** Who is sending on each music channel I may hear: channel id -> (peer id -> name). */
   musicSenders = new Map<string, Map<string, string>>()
   musicError = ''
+  /** How many audio tracks this session has published (a count that keeps climbing means tracks are being re-published). */
+  publishCount = 0
   /** Secret that lets the server relay a music channel's stream URL to me (sent at join). */
   private musicKey = ''
   private musicRx = new Map<string, { ch: string; src: MediaStreamAudioSourceNode; hold: HTMLAudioElement }>()
@@ -852,6 +854,7 @@ export class CommsEngine {
         else if (name !== 'direct') this.channelTx(name.slice(3)).connect(gain)
         gain.connect(dest)
         this.sfuGains.set(name, gain)
+        this.publishCount++
         this.sfuPubs.set(name, await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
           name, source: Track.Source.Unknown, dtx: true, red: false,
           audioPreset: { maxBitrate: 32_000 },
@@ -1108,6 +1111,7 @@ export class CommsEngine {
       }
       const old = this.musicPubs.get(ch)
       if (old?.track) await room.localParticipant.unpublishTrack(old.track, false).catch(() => {})
+      this.publishCount++
       this.musicPubs.set(ch, await room.localParticipant.publishTrack(tx.dest.stream.getAudioTracks()[0], {
         name: `music:${ch}`, source: Track.Source.Unknown, dtx: false, red: false, forceStereo: true,
         audioPreset: { maxBitrate: 128_000 },
