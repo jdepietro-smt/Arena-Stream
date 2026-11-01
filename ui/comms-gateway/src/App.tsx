@@ -37,7 +37,7 @@ async function saveConfig(cfg: GatewayConfig) {
   } catch { /* ignore */ }
 }
 
-/** Just an address (5.78.236.254) means the cloud install: wss://<address>/comms. A full ws:// or wss:// URL is used as typed. */
+/** Just an address (5.161.235.143) means the cloud install: wss://<address>/comms. A full ws:// or wss:// URL is used as typed. */
 const serverUrl = (v: string) => {
   const t = v.trim()
   return /^wss?:\/\//i.test(t) ? t : `wss://${t.replace(/\/+$/, '')}/comms`
@@ -171,7 +171,7 @@ export default function App() {
           <h2 className="lcd">Arena server</h2>
           <div className="grid3">
             <label>Gateway name<input value={cfg.name} onChange={e => patch({ name: e.target.value })} placeholder="Gateway" maxLength={24} /></label>
-            <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.78.236.254" /></label>
+            <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.161.235.143" /></label>
           </div>
           <div className="row">
             <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically at start-up</label>

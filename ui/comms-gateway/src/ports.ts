@@ -86,7 +86,7 @@ export const newPort = (n: number): PortCfg => ({
 
 export const defaultConfig = (): GatewayConfig => ({
   id: crypto.randomUUID(),
-  name: 'Gateway', server: '', username: '', password: '', autoConnect: true,
+  name: 'Gateway', server: '5.161.235.143', username: '', password: '', autoConnect: true,
   device: { inputId: '', outputId: '', inputChannels: 2, outputChannels: 2 },
   asio: [],
   ports: [],
