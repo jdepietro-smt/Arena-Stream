@@ -165,6 +165,10 @@ export class CommsEngine {
   private statsTimer: ReturnType<typeof setInterval> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private lastPong = 0
+  /** Listener jitter buffer (ms): grows when the link loses packets, shrinks back after a clean spell. */
+  jitterTarget = 80
+  private sfuRx = new Map<string, RTCRtpReceiver>()
+  private tune = { lost: 0, received: 0, concealed: 0, samples: 0, cleanSince: 0 }
   private rejoinAttempts = 0
   private mediaStall: ReturnType<typeof setTimeout> | null = null
   private wantMuted = new Set<string>()
@@ -778,7 +782,28 @@ export class CommsEngine {
       } catch { /* peer closed mid-poll */ }
     }
     await this.checkProgramStall()
+    if (this.media === 'sfu') await this.tuneBuffers()
     this.emit()
+  }
+
+  /** Small buffer = low delay, but only while the link is clean: on loss or patched audio, back off to a deeper one. */
+  private async tuneBuffers() {
+    const s = await this.rxStats()
+    if (!s) return
+    const t = this.tune
+    const dl = s.lost - t.lost, dr = s.received - t.received, dc = s.concealed - t.concealed, ds = s.samples - t.samples
+    Object.assign(t, { lost: s.lost, received: s.received, concealed: s.concealed, samples: s.samples })
+    if (dl < 0 || dr < 0 || ds <= 0) return // counters restarted (new session)
+    const loss = dr + dl > 0 ? dl / (dr + dl) : 0
+    const patched = dc / ds
+    const now = Date.now()
+    let next = this.jitterTarget
+    if (loss > 0.03 || patched > 0.05) { next = Math.min(200, next + 40); t.cleanSince = now }
+    else if (loss > 0.005 || patched > 0.01) t.cleanSince = now
+    else if (now - t.cleanSince > 20_000 && next > 40) { next = Math.max(40, next - 20); t.cleanSince = now }
+    if (next === this.jitterTarget) return
+    this.jitterTarget = next
+    for (const rx of this.sfuRx.values()) try { (rx as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = next } catch { /* older Chromium */ }
   }
 
   // ── SFU transport (LiveKit) ────────────────────────────────────────────────
@@ -814,13 +839,14 @@ export class CommsEngine {
       this.applyVolumes()
       const rx = (track as RemoteAudioTrack).receiver as (RTCRtpReceiver & { jitterBufferTarget?: number }) | undefined
       // Through the media server the path is the internet: a deeper buffer rides out jitter and lost packets instead of stretching or breaking the audio.
-      if (rx) try { rx.jitterBufferTarget = 100 } catch { /* older Chromium */ }
+      if (rx) { this.sfuRx.set(sid, rx); try { rx.jitterBufferTarget = this.jitterTarget } catch { /* older Chromium */ } }
     })
     room.on(RoomEvent.TrackUnsubscribed, track => {
       const g = track.sid ? this.gwSrc.get(track.sid) : undefined
       if (g) { g.src.disconnect(); g.hold.srcObject = null; this.gwSrc.delete(track.sid!); return }
       const mu = track.sid ? this.musicRx.get(track.sid) : undefined
       if (mu) { mu.src.disconnect(); mu.hold.srcObject = null; this.musicRx.delete(track.sid!); return }
+      if (track.sid) this.sfuRx.delete(track.sid)
       const v = track.sid ? this.sfuVoices.get(track.sid) : undefined
       if (v) { this.dropVoice(v); this.sfuVoices.delete(track.sid!) }
     })
@@ -901,6 +927,7 @@ export class CommsEngine {
     this.gwSrc.clear()
     this.sfuVoices.forEach(v => this.dropVoice(v))
     this.sfuVoices.clear()
+    this.sfuRx.clear()
     for (const mu of this.musicRx.values()) { mu.src.disconnect(); mu.hold.srcObject = null }
     this.musicRx.clear()
     this.musicPubs.clear()

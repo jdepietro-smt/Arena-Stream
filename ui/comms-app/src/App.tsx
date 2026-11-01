@@ -379,7 +379,7 @@ function LinkLoss({ engine }: { engine: CommsEngine }) {
     <div className="lcd stream-lcd" title="Packet loss to and from the media server over the last 3 s; 'patched' is audio the player had to invent to cover lost packets">
       <span className="sl-title">LINK</span>
       <span className={`sl-chip ${bad ? 'down' : 'live'}`}>
-        send loss {s.tx.toFixed(1)}% · hear loss {s.rx.toFixed(1)}% · patched {s.conceal.toFixed(0)}% · jitter {s.jitter.toFixed(0)} ms
+        send loss {s.tx.toFixed(1)}% · hear loss {s.rx.toFixed(1)}% · patched {s.conceal.toFixed(0)}% · jitter {s.jitter.toFixed(0)} ms · buffer {engine.jitterTarget} ms
       </span>
     </div>
   )
