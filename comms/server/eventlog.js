@@ -27,7 +27,9 @@ export function createEventLog(file = null, now = () => Date.now()) {
 
   return {
     /** kind: join | leave | loss | recovered. */
-    event(kind, name, detail = '') { add({ t: now(), k: kind, name, detail }) },
+    event(kind, name, detail = '') { const e = { t: now(), k: kind, name, detail }; add(e); this.onEvent?.(e) },
+    /** Optional hook, called for every event (the server wires alerts here). */
+    onEvent: null,
 
     /** One link report from a station; folded into a per-minute record. `agg` lives on the peer. */
     link(name, agg, sample) {

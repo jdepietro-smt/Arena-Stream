@@ -17,6 +17,7 @@ import { Directory, seedFromConfig } from './directory.js'
 import { AuthError, createAuth } from './auth.js'
 import { createAdmin } from './admin.js'
 import { createEventLog } from './eventlog.js'
+import { createAlerter } from './alerts.js'
 import { createArenaWatcher } from './arena.js'
 import { createPlayers } from './player.js'
 
@@ -59,6 +60,12 @@ export function createServer(
   const dir = Directory.load(cfg.dataFile ?? null, () => seedFromConfig(cfg))
   const bootstrap = dir.ensureAdmin(process.env.COMMS_ADMIN_PASSWORD)
   const elog = createEventLog(cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'events.jsonl') : null)
+  const alerter = createAlerter(cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'alerts.json') : null, cfg.fetchImpl)
+  const goneGateways = new Set() // gateways we have already announced as offline
+  elog.onEvent = e => {
+    if (e.k === 'loss') void alerter.notify(`${e.name} has packet loss (${e.detail})`, `loss:${e.name}`, 5 * 60_000)
+    if (e.k === 'join' && e.detail === 'gateway' && goneGateways.delete(e.name)) void alerter.notify(`gateway ${e.name} is back online`)
+  }
   // Session tokens are signed with a secret kept next to the directory so they survive restarts.
   const sessionSecret = (() => {
     const file = cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'session.key') : null
@@ -273,7 +280,7 @@ export function createServer(
   dir.onChange(refreshAll)
 
   const admin = createAdmin({
-    dir, auth, kick, players, history: () => ({ events: elog.recent(300), history: elog.history(24) }),
+    dir, auth, kick, players, history: () => ({ events: elog.recent(300), history: elog.history(24) }), alerter,
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
@@ -514,6 +521,15 @@ export function createServer(
         peers.delete(me.id)
         elog.flush(me.user.name, me.linkAgg ?? {})
         elog.event('leave', me.user.name, me.user.gwKey ? 'gateway' : '')
+        if (me.user.gwKey) {
+          // A gateway that does not come back within 45 s is reported (a quick rejoin is not worth an alert).
+          const key = me.user.gwKey, gname = me.user.name
+          setTimeout(() => {
+            if ([...peers.values()].some(p => p.user.gwKey === key)) return
+            goneGateways.add(gname)
+            void alerter.notify(`gateway ${gname} is offline`, `off:${key}`, 60_000)
+          }, cfg.gatewayOfflineMs ?? 45_000).unref?.()
+        }
         if (me.user.gwKey) dir.noteGateway(me.user.gwKey, me.user.name)
         for (const ch of me.musicOn) announceMusic(me, ch, false)
         broadcast({ type: 'peer-leave', id: me.id })

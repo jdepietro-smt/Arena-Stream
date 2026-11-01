@@ -32,7 +32,7 @@ function readJson(req) {
   })
 }
 
-export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [], history = () => ({ events: [], history: [] }) }) {
+export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [], history = () => ({ events: [], history: [] }), alerter = null }) {
   const page = () => fs.readFileSync(path.join(here, 'admin', 'index.html'))
   const idle = { state: 'idle', error: '', since: 0 }
   const playerStates = () => Object.fromEntries(dir.channels.filter(c => c.music || c.withMusic).map(c => [c.id, players?.status(c.id) ?? idle]))
@@ -67,6 +67,17 @@ export function createAdmin({ dir, auth, online, kick, players = null, gateways 
           users: dir.users.map(u => dir.publicUser(u)), online: online(), gateways: gateways(),
           serverPlayer: !!players, players: playerStates(),
         }), true
+      }
+      if (kind === 'alerts' && alerter) {
+        if (method === 'GET') return send(res, 200, { configured: alerter.configured(), host: alerter.host() }), true
+        if (method === 'PUT') {
+          try { alerter.set(body.url) } catch (e) { throw new DirectoryError(e.message, 400) }
+          return send(res, 200, { configured: alerter.configured(), host: alerter.host() }), true
+        }
+        if (method === 'POST' && id === 'test') {
+          const ok = await alerter.notify('test alert: the intercom can reach this channel')
+          return send(res, 200, { ok }), true
+        }
       }
       if (kind === 'history' && method === 'GET') return send(res, 200, history()), true
       if (kind === 'players' && method === 'GET') return send(res, 200, { serverPlayer: !!players, players: playerStates() }), true

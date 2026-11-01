@@ -106,7 +106,7 @@ function signOut() {
 
 async function refresh() {
   S.state = await api('GET', 'state')
-  if (S.tab === 'history') S.hist = await api('GET', 'history')
+  if (S.tab === 'history') { S.hist = await api('GET', 'history'); S.alerts = await api('GET', 'alerts').catch(() => null) }
   render()
 }
 
@@ -365,7 +365,15 @@ function historyView() {
   const H = S.hist
   if (!H) return [h('div', { class: 'muted' }, 'Loading…')]
   const kindChip = { join: ['ok', 'joined'], leave: ['', 'left'], loss: ['bad', 'loss'], recovered: ['ok', 'recovered'] }
-  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Link history'), h('div', { class: 'sub' }, 'Last 24 hours, per person. A loss minute is a minute with over 2% packet loss in either direction.'))),
+  const A = S.alerts
+  const alertCard = A && h('div', { class: 'card', style: 'margin-bottom:18px' },
+    h('h2', {}, 'Alerts'),
+    h('div', { class: 'sub' }, A.configured ? 'Sending to ' + A.host + '. You are told when a gateway is offline for 45 seconds, when it returns, and when someone has heavy packet loss.' : 'Not set up. Paste a webhook address (Slack, Teams or Discord incoming webhook) to be told when a gateway goes offline or a link is losing audio.'),
+    h('div', { class: 'row', style: 'display:flex;gap:8px;margin-top:8px' },
+      h('input', { id: 'alerturl', type: 'url', placeholder: A.configured ? 'Replace the address, or clear it and Save to turn alerts off' : 'https://…', style: 'flex:1' }),
+      h('button', { class: 'btn sm primary', onclick: () => act(async () => { S.alerts = await api('PUT', 'alerts', { url: document.getElementById('alerturl').value }) }, 'Saved') }, 'Save'),
+      A.configured && h('button', { class: 'btn sm', onclick: () => act(async () => { const r = await api('POST', 'alerts/test'); if (!r.ok) throw new Error('The webhook did not accept the test message') }, 'Test alert sent') }, 'Send test')))
+  return [alertCard, h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Link history'), h('div', { class: 'sub' }, 'Last 24 hours, per person. A loss minute is a minute with over 2% packet loss in either direction.'))),
     H.history.length ? h('table', {}, h('tr', {}, ['Name', 'Minutes seen', 'Loss minutes', 'Worst send', 'Worst hear', 'Avg send', 'Avg hear', 'Last seen'].map(x => h('th', {}, x))),
       H.history.map(r => h('tr', {}, h('td', {}, r.name), h('td', {}, String(r.minutes)),
         h('td', {}, r.lossyMinutes ? h('span', { class: 'chip bad' }, String(r.lossyMinutes)) : h('span', { class: 'chip ok' }, '0')),
@@ -383,7 +391,7 @@ function render() {
   $app.replaceChildren()
   if (!S.token || !S.state) { $app.append(login()); return }
   $app.append(h('header', {}, h('div', { class: 'brand' }, 'ARENA ', h('b', {}, 'COMMS'), ' · ADMIN'),
-    h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: async () => { S.tab = k; if (k === 'history') S.hist = await api('GET', 'history').catch(() => null); render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
+    h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: async () => { S.tab = k; if (k === 'history') { S.hist = await api('GET', 'history').catch(() => null); S.alerts = await api('GET', 'alerts').catch(() => null) } render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
     h('button', { class: 'btn sm', onclick: () => { api('POST', 'logout').catch(() => {}); signOut() } }, 'Sign out')),
     h('main', {}, TABS[S.tab][1]()))
 }
