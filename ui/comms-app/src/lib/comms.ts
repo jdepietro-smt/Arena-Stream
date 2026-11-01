@@ -169,6 +169,9 @@ export class CommsEngine {
   private statsTimer: ReturnType<typeof setInterval> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private lastPong = 0
+  /** Has the server accepted this join yet? Until it has, a closing socket means 'cannot reach it', not 'dropped'. */
+  private welcomed = false
+  private failedOpens = 0
   /** Listener jitter buffer (ms): grows when the link loses packets, shrinks back after a clean spell. */
   jitterTarget = 80
   private sfuRx = new Map<string, RTCRtpReceiver>()
@@ -238,6 +241,8 @@ export class CommsEngine {
     this.status = 'connecting'
     this.error = ''
     this.errorCode = ''
+    this.welcomed = false
+    this.failedOpens = 0
     this.emit()
     try {
       await this.initAudio(opts.micId, opts.echoCancel)
@@ -557,6 +562,18 @@ export class CommsEngine {
       this.teardownSession()
       if (this.stopped) return
       if (ev.reason === 'bad-pin' || ev.reason === 'bad-name' || ev.reason === 'full') return // fatal() already ran
+      if (!this.welcomed) {
+        // Never got in: say so plainly after a few tries instead of sitting on "Connecting…" or an empty intercom.
+        // (A gateway never gives up: it starts unattended, possibly before the network is up.)
+        if (++this.failedOpens >= 3 && !this.opts?.gateway) {
+          this.errorCode = 'unreachable'
+          return this.fatal("Can't reach the intercom server. Check the address and your network. If the address starts with a number, this computer must also trust the server's certificate (install the .crt file once). Your sign-in is kept: press Join to try again.")
+        }
+        this.status = this.opts?.gateway ? 'reconnecting' : 'connecting'
+        this.emit()
+        this.reconnectTimer = setTimeout(() => { if (!this.stopped) this.openSocket() }, Math.min(5000, 1200 * this.failedOpens))
+        return
+      }
       this.status = 'reconnecting'
       this.emit()
       // First retry is quick (most drops are a blip); keep backing off to 5 s so a down server isn't hammered.
@@ -569,6 +586,8 @@ export class CommsEngine {
     switch (m.type) {
       case 'welcome': {
         this.myId = m.id
+        this.welcomed = true
+        this.failedOpens = 0
         if (m.session) { this.sessionToken = m.session; if (this.opts) this.opts.token = m.session } // renewed at every join
         this.channels = m.channels
         this.groups = m.groups ?? []
