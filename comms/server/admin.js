@@ -32,7 +32,7 @@ function readJson(req) {
   })
 }
 
-export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [] }) {
+export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [], history = () => ({ events: [], history: [] }) }) {
   const page = () => fs.readFileSync(path.join(here, 'admin', 'index.html'))
   const idle = { state: 'idle', error: '', since: 0 }
   const playerStates = () => Object.fromEntries(dir.channels.filter(c => c.music || c.withMusic).map(c => [c.id, players?.status(c.id) ?? idle]))
@@ -68,6 +68,7 @@ export function createAdmin({ dir, auth, online, kick, players = null, gateways 
           serverPlayer: !!players, players: playerStates(),
         }), true
       }
+      if (kind === 'history' && method === 'GET') return send(res, 200, history()), true
       if (kind === 'players' && method === 'GET') return send(res, 200, { serverPlayer: !!players, players: playerStates() }), true
       if (kind === 'logout' && method === 'POST') { auth.revoke(token); return send(res, 200, { ok: true }), true }
 

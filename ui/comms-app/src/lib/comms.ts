@@ -164,6 +164,9 @@ export class CommsEngine {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private statsTimer: ReturnType<typeof setInterval> | null = null
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private lastPong = 0
+  private rejoinAttempts = 0
+  private mediaStall: ReturnType<typeof setTimeout> | null = null
   private wantMuted = new Set<string>()
   private stopped = true
   private room: Room | null = null
@@ -287,6 +290,8 @@ export class CommsEngine {
     if (this.statsTimer) clearInterval(this.statsTimer)
     if (this.pingTimer) clearInterval(this.pingTimer)
     this.statsTimer = this.pingTimer = null
+    if (this.mediaStall) clearTimeout(this.mediaStall)
+    this.mediaStall = null
   }
 
   // ── audio input / output ───────────────────────────────────────────────────
@@ -546,7 +551,9 @@ export class CommsEngine {
       if (ev.reason === 'bad-pin' || ev.reason === 'bad-name' || ev.reason === 'full') return // fatal() already ran
       this.status = 'reconnecting'
       this.emit()
-      this.reconnectTimer = setTimeout(() => { if (!this.stopped) this.openSocket() }, 1500)
+      // First retry is quick (most drops are a blip); keep backing off to 5 s so a down server isn't hammered.
+      const wait = Math.min(5000, 400 * 2 ** this.rejoinAttempts++)
+      this.reconnectTimer = setTimeout(() => { if (!this.stopped) this.openSocket() }, wait)
     }
   }
 
@@ -586,7 +593,13 @@ export class CommsEngine {
         if (this.program && !this.progWanted) this.startProgram()
         this.updateDuck()
         this.statsTimer = setInterval(() => this.pollStats(), 2000)
-        this.pingTimer = setInterval(() => this.send({ type: 'ping', t: performance.now() }), 3000)
+        this.rejoinAttempts = 0
+        this.lastPong = Date.now()
+        this.pingTimer = setInterval(() => {
+          // A network that silently drops our packets never closes the socket: no answer for 9 s means the link is dead, so rejoin.
+          if (Date.now() - this.lastPong > 9000) { this.ws?.close(); return }
+          this.send({ type: 'ping', t: performance.now() })
+        }, 3000)
         this.emit()
         break
       }
@@ -657,6 +670,7 @@ export class CommsEngine {
         this.onCall(m.from, m.channel)
         break
       case 'pong':
+        this.lastPong = Date.now()
         this.serverRttMs = Math.round(performance.now() - m.t)
         this.emit()
         break
@@ -809,6 +823,15 @@ export class CommsEngine {
       if (mu) { mu.src.disconnect(); mu.hold.srcObject = null; this.musicRx.delete(track.sid!); return }
       const v = track.sid ? this.sfuVoices.get(track.sid) : undefined
       if (v) { this.dropVoice(v); this.sfuVoices.delete(track.sid!) }
+    })
+    // LiveKit retries the media path itself first; if that hasn't worked within 8 s, rejoin from scratch rather than sit silent.
+    room.on(RoomEvent.Reconnecting, () => {
+      if (this.mediaStall) clearTimeout(this.mediaStall)
+      this.mediaStall = setTimeout(() => { if (this.room === room && !this.stopped) this.ws?.close() }, 8000)
+    })
+    room.on(RoomEvent.Reconnected, () => {
+      if (this.mediaStall) clearTimeout(this.mediaStall)
+      this.mediaStall = null
     })
     room.on(RoomEvent.Disconnected, () => {
       // Unexpected media loss: force a full re-join (fresh identity + token).

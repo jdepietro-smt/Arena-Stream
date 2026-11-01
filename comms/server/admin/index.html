@@ -106,6 +106,7 @@ function signOut() {
 
 async function refresh() {
   S.state = await api('GET', 'state')
+  if (S.tab === 'history') S.hist = await api('GET', 'history')
   render()
 }
 
@@ -358,14 +359,31 @@ function gatewaysView() {
         h('td', {}, h('button', { class: 'btn sm danger', disabled: g.online, title: g.online ? 'Online gateways cannot be removed' : '', onclick: () => confirm('Forget gateway ' + g.name + '?') && act(() => api('DELETE', 'gateways/' + g.id), 'Removed') }, 'Remove'))))) : h('div', { class: 'muted' }, 'No gateway has connected yet.')]
 }
 
-const TABS = { users: ['Users', usersView], groups: ['Groups', groupsView], channels: ['Channels', channelsView], gateways: ['Gateways', gatewaysView], online: ['Online', onlineView] }
+// ── history ──────────────────────────────────────────────────────────────────
+function clock(t) { return new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
+function historyView() {
+  const H = S.hist
+  if (!H) return [h('div', { class: 'muted' }, 'Loading…')]
+  const kindChip = { join: ['ok', 'joined'], leave: ['', 'left'], loss: ['bad', 'loss'], recovered: ['ok', 'recovered'] }
+  return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Link history'), h('div', { class: 'sub' }, 'Last 24 hours, per person. A loss minute is a minute with over 2% packet loss in either direction.'))),
+    H.history.length ? h('table', {}, h('tr', {}, ['Name', 'Minutes seen', 'Loss minutes', 'Worst send', 'Worst hear', 'Avg send', 'Avg hear', 'Last seen'].map(x => h('th', {}, x))),
+      H.history.map(r => h('tr', {}, h('td', {}, r.name), h('td', {}, String(r.minutes)),
+        h('td', {}, r.lossyMinutes ? h('span', { class: 'chip bad' }, String(r.lossyMinutes)) : h('span', { class: 'chip ok' }, '0')),
+        h('td', {}, r.worstTx.toFixed(1) + '%'), h('td', {}, r.worstRx.toFixed(1) + '%'),
+        h('td', { class: 'muted' }, r.avgTx.toFixed(2) + '%'), h('td', { class: 'muted' }, r.avgRx.toFixed(2) + '%'), h('td', { class: 'muted' }, ago(r.last))))) : h('div', { class: 'muted' }, 'No link reports yet. They arrive once someone is connected through the media server.'),
+    h('div', { class: 'bar', style: 'margin-top:22px' }, h('div', {}, h('h2', {}, 'Events'), h('div', { class: 'sub' }, 'Joins, leaves and loss episodes, newest first.'))),
+    H.events.length ? h('table', {}, h('tr', {}, ['When', 'Who', 'Event', 'Detail'].map(x => h('th', {}, x))),
+      H.events.map(e => { const [cls, label] = kindChip[e.k] ?? ['', e.k]; return h('tr', {}, h('td', { class: 'muted' }, clock(e.t)), h('td', {}, e.name), h('td', {}, h('span', { class: 'chip ' + cls }, label)), h('td', { class: 'muted' }, e.detail || '')) })) : h('div', { class: 'muted' }, 'Nothing yet.')]
+}
+
+const TABS = { users: ['Users', usersView], groups: ['Groups', groupsView], channels: ['Channels', channelsView], gateways: ['Gateways', gatewaysView], online: ['Online', onlineView], history: ['History', historyView] }
 
 function render() {
   if (document.querySelector('dialog[open]')) return // don't clobber an open editor during polling
   $app.replaceChildren()
   if (!S.token || !S.state) { $app.append(login()); return }
   $app.append(h('header', {}, h('div', { class: 'brand' }, 'ARENA ', h('b', {}, 'COMMS'), ' · ADMIN'),
-    h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: () => { S.tab = k; render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
+    h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: async () => { S.tab = k; if (k === 'history') S.hist = await api('GET', 'history').catch(() => null); render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
     h('button', { class: 'btn sm', onclick: () => { api('POST', 'logout').catch(() => {}); signOut() } }, 'Sign out')),
     h('main', {}, TABS[S.tab][1]()))
 }

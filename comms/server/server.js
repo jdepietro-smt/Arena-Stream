@@ -16,6 +16,7 @@ import { createLiveKit } from './sfu.js'
 import { Directory, seedFromConfig } from './directory.js'
 import { AuthError, createAuth } from './auth.js'
 import { createAdmin } from './admin.js'
+import { createEventLog } from './eventlog.js'
 import { createArenaWatcher } from './arena.js'
 import { createPlayers } from './player.js'
 
@@ -57,6 +58,7 @@ export function createServer(
   const authMode = cfg.auth?.mode === 'open' ? 'open' : 'accounts'
   const dir = Directory.load(cfg.dataFile ?? null, () => seedFromConfig(cfg))
   const bootstrap = dir.ensureAdmin(process.env.COMMS_ADMIN_PASSWORD)
+  const elog = createEventLog(cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'events.jsonl') : null)
   // Session tokens are signed with a secret kept next to the directory so they survive restarts.
   const sessionSecret = (() => {
     const file = cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'session.key') : null
@@ -271,7 +273,7 @@ export function createServer(
   dir.onChange(refreshAll)
 
   const admin = createAdmin({
-    dir, auth, kick, players,
+    dir, auth, kick, players, history: () => ({ events: elog.recent(300), history: elog.history(24) }),
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
@@ -405,6 +407,7 @@ export function createServer(
       clearTimeout(joinTimer)
       const others = [...peers.values()].map(publicInfo)
       peers.set(me.id, me)
+      elog.event('join', user.name, user.gwKey ? 'gateway' : '')
       const joined = me
       const groupNames = user.groups.map(g => dir.group(g)?.name?.toLowerCase())
       const prog = cfg.program
@@ -495,6 +498,7 @@ export function createServer(
           const n = k => (Number.isFinite(msg[k]) ? Math.max(0, Math.min(100, msg[k])) : 0)
           me.link = { tx: n('tx'), rx: n('rx'), conceal: n('conceal'), jitter: Math.min(5000, Math.max(0, Number(msg.jitter) || 0)), at: Date.now() }
           me.linkWorst = Math.max(me.linkWorst ?? 0, me.link.tx, me.link.rx)
+          elog.link(me.user.name, (me.linkAgg ??= {}), me.link)
           break
         }
         case 'ping':
@@ -508,6 +512,8 @@ export function createServer(
       clearTimeout(joinTimer)
       if (me && peers.get(me.id) === me) {
         peers.delete(me.id)
+        elog.flush(me.user.name, me.linkAgg ?? {})
+        elog.event('leave', me.user.name, me.user.gwKey ? 'gateway' : '')
         if (me.user.gwKey) dir.noteGateway(me.user.gwKey, me.user.name)
         for (const ch of me.musicOn) announceMusic(me, ch, false)
         broadcast({ type: 'peer-leave', id: me.id })
