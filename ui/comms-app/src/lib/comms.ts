@@ -948,6 +948,24 @@ export class CommsEngine {
   musicSending(ch: string): boolean { return this.musicTx.has(ch) }
 
   /** Quality of the send link to the media server, from the WebRTC stats (gateways use this for a health readout). */
+  /** Receive link from the media server: packets lost/received on the incoming voice tracks, and audio concealed by the jitter buffer. */
+  async rxStats(): Promise<{ lost: number; received: number; jitterMs: number; concealed: number; samples: number } | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pc = (this.room as any)?.engine?.pcManager?.subscriber
+    let rep: RTCStatsReport | undefined
+    try { rep = await pc?.getStats?.() } catch { return null }
+    if (!rep) return null
+    let lost = 0, received = 0, jitterMs = 0, concealed = 0, samples = 0
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rep.forEach((r: any) => {
+      if (r.type !== 'inbound-rtp' || r.kind !== 'audio') return
+      lost += r.packetsLost || 0; received += r.packetsReceived || 0
+      jitterMs = Math.max(jitterMs, (r.jitter || 0) * 1000)
+      concealed += r.concealedSamples || 0; samples += r.totalSamplesReceived || 0
+    })
+    return { lost, received, jitterMs, concealed, samples }
+  }
+
   async linkStats(): Promise<{ rttMs: number; lost: number; sent: number; jitterMs: number; via: string } | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const pc = (this.room as any)?.engine?.pcManager?.publisher
