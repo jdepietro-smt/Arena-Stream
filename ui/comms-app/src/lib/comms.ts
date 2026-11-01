@@ -168,7 +168,7 @@ export class CommsEngine {
   /** Listener jitter buffer (ms): grows when the link loses packets, shrinks back after a clean spell. */
   jitterTarget = 80
   private sfuRx = new Map<string, RTCRtpReceiver>()
-  private tune = { lost: 0, received: 0, concealed: 0, samples: 0, cleanSince: 0 }
+  private tune = { txLost: 0, txSent: 0, lost: 0, received: 0, concealed: 0, samples: 0, cleanSince: 0, ready: false }
   private rejoinAttempts = 0
   private mediaStall: ReturnType<typeof setTimeout> | null = null
   private wantMuted = new Set<string>()
@@ -782,28 +782,36 @@ export class CommsEngine {
       } catch { /* peer closed mid-poll */ }
     }
     await this.checkProgramStall()
-    if (this.media === 'sfu') await this.tuneBuffers()
+    if (this.media === 'sfu') await this.linkTick()
     this.emit()
   }
 
-  /** Small buffer = low delay, but only while the link is clean: on loss or patched audio, back off to a deeper one. */
-  private async tuneBuffers() {
-    const s = await this.rxStats()
-    if (!s) return
+  /** Link quality over the last interval, both ways (0 until the first measurement). Also what gets reported to the server. */
+  linkNow = { tx: 0, rx: 0, conceal: 0, jitter: 0, ok: false }
+
+  /** Measure the link every poll: report it to the server, and size the listener buffer to match (small while clean, deeper on loss). */
+  private async linkTick() {
+    const [a, b] = await Promise.all([this.linkStats(), this.rxStats()])
+    if (!a || !b) return
     const t = this.tune
-    const dl = s.lost - t.lost, dr = s.received - t.received, dc = s.concealed - t.concealed, ds = s.samples - t.samples
-    Object.assign(t, { lost: s.lost, received: s.received, concealed: s.concealed, samples: s.samples })
-    if (dl < 0 || dr < 0 || ds <= 0) return // counters restarted (new session)
-    const loss = dr + dl > 0 ? dl / (dr + dl) : 0
-    const patched = dc / ds
+    const had = t.ready
+    const dl = a.lost - t.txLost, ds = a.sent - t.txSent
+    const rl = b.lost - t.lost, rr = b.received - t.received, cc = b.concealed - t.concealed, cs = b.samples - t.samples
+    Object.assign(t, { txLost: a.lost, txSent: a.sent, lost: b.lost, received: b.received, concealed: b.concealed, samples: b.samples, ready: true })
+    if (!had || dl < 0 || ds < 0 || rl < 0 || rr < 0 || cs <= 0) return // first sample, or counters restarted (new session)
+    const tx = ds + dl > 0 ? (dl / (ds + dl)) * 100 : 0
+    const rx = rr + rl > 0 ? (rl / (rr + rl)) * 100 : 0
+    const conceal = (cc / cs) * 100
+    this.linkNow = { tx, rx, conceal, jitter: b.jitterMs, ok: true }
+    this.reportLink(this.linkNow)
     const now = Date.now()
     let next = this.jitterTarget
-    if (loss > 0.03 || patched > 0.05) { next = Math.min(200, next + 40); t.cleanSince = now }
-    else if (loss > 0.005 || patched > 0.01) t.cleanSince = now
+    if (rx > 3 || conceal > 5) { next = Math.min(200, next + 40); t.cleanSince = now }
+    else if (rx > 0.5 || conceal > 1) t.cleanSince = now
     else if (now - t.cleanSince > 20_000 && next > 40) { next = Math.max(40, next - 20); t.cleanSince = now }
     if (next === this.jitterTarget) return
     this.jitterTarget = next
-    for (const rx of this.sfuRx.values()) try { (rx as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = next } catch { /* older Chromium */ }
+    for (const r of this.sfuRx.values()) try { (r as RTCRtpReceiver & { jitterBufferTarget?: number }).jitterBufferTarget = next } catch { /* older Chromium */ }
   }
 
   // ── SFU transport (LiveKit) ────────────────────────────────────────────────
@@ -928,6 +936,7 @@ export class CommsEngine {
     this.sfuVoices.forEach(v => this.dropVoice(v))
     this.sfuVoices.clear()
     this.sfuRx.clear()
+    this.tune.ready = false // a new session restarts the counters
     for (const mu of this.musicRx.values()) { mu.src.disconnect(); mu.hold.srcObject = null }
     this.musicRx.clear()
     this.musicPubs.clear()

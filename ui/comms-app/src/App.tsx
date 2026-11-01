@@ -350,33 +350,11 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
 
 /** Packet loss on the link to the media server, both ways, over the last few seconds (a lossy link is heard as missing words). */
 function LinkLoss({ engine }: { engine: CommsEngine }) {
-  const [s, setS] = useState<{ tx: number; rx: number; conceal: number; jitter: number } | null>(null)
-  useEffect(() => {
-    let pt: { lost: number; sent: number } | null = null
-    let pr: { lost: number; received: number; concealed: number; samples: number } | null = null
-    const t = setInterval(async () => {
-      const [a, b] = await Promise.all([engine.linkStats(), engine.rxStats()])
-      if (!a || !b) return
-      const dl = pt ? a.lost - pt.lost : 0, ds = pt ? a.sent - pt.sent : 0
-      const rl = pr ? b.lost - pr.lost : 0, rr = pr ? b.received - pr.received : 0
-      const cs = pr ? b.samples - pr.samples : 0, cc = pr ? b.concealed - pr.concealed : 0
-      const next = {
-        tx: ds + dl > 0 ? (dl / (ds + dl)) * 100 : 0,
-        rx: rr + rl > 0 ? (rl / (rr + rl)) * 100 : 0,
-        conceal: cs > 0 ? (cc / cs) * 100 : 0,
-        jitter: b.jitterMs,
-      }
-      setS(next)
-      engine.reportLink(next)
-      pt = { lost: a.lost, sent: a.sent }
-      pr = { lost: b.lost, received: b.received, concealed: b.concealed, samples: b.samples }
-    }, 3000)
-    return () => clearInterval(t)
-  }, [engine])
-  if (!s) return null
+  const s = engine.linkNow
+  if (!s.ok) return null
   const bad = s.tx > 2 || s.rx > 2 || s.conceal > 5
   return (
-    <div className="lcd stream-lcd" title="Packet loss to and from the media server over the last 3 s; 'patched' is audio the player had to invent to cover lost packets">
+    <div className="lcd stream-lcd" title="Packet loss to and from the media server over the last 2 s; 'patched' is audio the player had to invent to cover lost packets">
       <span className="sl-title">LINK</span>
       <span className={`sl-chip ${bad ? 'down' : 'live'}`}>
         send loss {s.tx.toFixed(1)}% · hear loss {s.rx.toFixed(1)}% · patched {s.conceal.toFixed(0)}% · jitter {s.jitter.toFixed(0)} ms · buffer {engine.jitterTarget} ms
