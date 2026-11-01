@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { CommsEngine, type MusicSource, Channel, PeerInfo, httpBase } from './lib/comms'
+import { CommsEngine, type ConnectionTestResult, type MusicSource, Channel, PeerInfo, httpBase } from './lib/comms'
 import './kp.css'
 import './App.css'
 
@@ -323,6 +323,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
           <Clock />
         </div>
         {engine.media === 'sfu' && <LinkLoss engine={engine} />}
+        {engine.media === 'sfu' && engine.status === 'connected' && <ConnectionTest engine={engine} />}
         {engine.streams.length > 0 && (
           <div className="lcd stream-lcd" title="Arena stream health">
             <span className="sl-title">STREAMS</span>
@@ -359,6 +360,31 @@ function LinkLoss({ engine }: { engine: CommsEngine }) {
       <span className={`sl-chip ${bad ? 'down' : 'live'}`}>
         send loss {s.tx.toFixed(1)}% · hear loss {s.rx.toFixed(1)}% · patched {s.conceal.toFixed(0)}% · jitter {s.jitter.toFixed(0)} ms · buffer {engine.jitterTarget} ms
       </span>
+    </div>
+  )
+}
+
+/** 20-second check of the path to the media server, for qualifying a site's network before an event. */
+function ConnectionTest({ engine }: { engine: CommsEngine }) {
+  const [run, setRun] = useState<{ done: number; total: number } | null>(null)
+  const [res, setRes] = useState<ConnectionTestResult | null>(null)
+  const [err, setErr] = useState('')
+  const start = async () => {
+    setRes(null); setErr(''); setRun({ done: 0, total: 20 })
+    try { setRes(await engine.runConnectionTest(20, (done, total) => setRun({ done, total }))) } catch (e) { setErr((e as Error).message) }
+    setRun(null)
+  }
+  const label = { ready: 'READY FOR AN EVENT', risky: 'RISKY: EXPECT SOME DROPOUTS', poor: 'NOT USABLE YET' }
+  return (
+    <div className="lcd stream-lcd" style={{ flexWrap: 'wrap' }}>
+      <span className="sl-title">TEST</span>
+      <button className="btn sm" disabled={!!run} onClick={() => void start()}>{run ? `Testing… ${run.done}/${run.total} s` : 'Test my connection'}</button>
+      {err && <span className="sl-chip down">{err}</span>}
+      {res && <>
+        <span className={`sl-chip ${res.verdict === 'ready' ? 'live' : 'down'}`}>{label[res.verdict]}</span>
+        <span>delay {Math.round(res.rttAvgMs)} ms · lost {res.lossPct.toFixed(1)}% · jitter {Math.round(res.jitterMs)} ms · {res.via || '?'}</span>
+        {res.notes.map(n => <div key={n} style={{ flexBasis: '100%', opacity: .8 }}>• {n}</div>)}
+      </>}
     </div>
   )
 }

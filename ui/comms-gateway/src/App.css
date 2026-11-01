@@ -121,3 +121,5 @@ label.inline { display: flex; flex-direction: row; align-items: center; gap: 8px
 
 details.adv > summary { cursor: pointer; font: 700 12px var(--label); letter-spacing: .08em; text-transform: uppercase; color: #aab0bb; margin: 0; }
 details.adv[open] > summary { margin-bottom: 10px; }
+
+.conntest { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }

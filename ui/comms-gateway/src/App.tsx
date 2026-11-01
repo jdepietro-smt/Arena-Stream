@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { CommsEngine } from '@engine'
+import { CommsEngine, type ConnectionTestResult } from '@engine'
 import {
   AsioCfg, AsioDevice, GatewayConfig, GatewayRuntime, PortCfg, PortRuntime, RtpCfg, SourceKind,
   SYSTEM_DEV, SYSTEM_INPUTS, defaultConfig, defaultRtp, newAsio, newPort,
@@ -216,7 +216,7 @@ export default function App() {
             )}
             <section className="card">
               <div className="bar"><h2 className="lcd">Connection health</h2></div>
-              {status === 'connected' ? <HealthTiles engine={engine} runtime={runtime} /> : <div className="hint">Connect to the server to see how good the link is.</div>}
+              {status === 'connected' ? <><HealthTiles engine={engine} runtime={runtime} /><ConnectionTest engine={engine} /></> : <div className="hint">Connect to the server to see how good the link is.</div>}
             </section>
             <section className="card">
               <div className="bar"><h2 className="lcd">On air</h2><span className="hint">{onAir.length ? `${onAir.length} channel${onAir.length > 1 ? 's' : ''} routed` : ''}</span></div>
@@ -582,6 +582,34 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
         {problem && <span className="warn">{problem}</span>}
       </div>
     </section>
+  )
+}
+
+/** 20-second check of the path to the server: is this site's network good enough for an event? */
+function ConnectionTest({ engine }: { engine: CommsEngine }) {
+  const [run, setRun] = useState<{ done: number; total: number } | null>(null)
+  const [res, setRes] = useState<ConnectionTestResult | null>(null)
+  const [err, setErr] = useState('')
+  const start = async () => {
+    setRes(null); setErr(''); setRun({ done: 0, total: 20 })
+    try { setRes(await engine.runConnectionTest(20, (done, total) => setRun({ done, total }))) } catch (e) { setErr((e as Error).message) }
+    setRun(null)
+  }
+  const label = { ready: 'Ready for an event', risky: 'Risky: expect some dropouts', poor: 'Not usable yet' }
+  const cls = res ? (res.verdict === 'ready' ? 'good' : res.verdict === 'risky' ? 'ok' : 'bad') : 'idle'
+  return (
+    <div className="conntest">
+      <div className="row"><button className="btn" disabled={!!run} onClick={() => void start()}>{run ? `Testing… ${run.done} of ${run.total} s` : 'Test this connection'}</button>
+        <span className="hint">Sends 20 seconds of quiet test audio to the server (nobody hears it) and grades the network.</span></div>
+      {err && <div className="error">{err}</div>}
+      {res && (
+        <div className={`tile ${cls}`}>
+          <span>Result</span><b style={{ fontSize: 20 }}>{label[res.verdict]}</b>
+          <em>delay {Math.round(res.rttAvgMs)} ms (worst {Math.round(res.rttMaxMs)}) · audio lost {res.lossPct.toFixed(1)}% · jitter {Math.round(res.jitterMs)} ms · {res.via || '?'}</em>
+          {res.notes.map(n => <div key={n} className="hint">• {n}</div>)}
+        </div>
+      )}
+    </div>
   )
 }
 

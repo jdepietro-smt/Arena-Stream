@@ -26,6 +26,10 @@ export interface ArenaStream { id: string; name: string; channel: string | null;
 export interface ArenaAlert { text: string; level: 'warn' | 'ok'; at: number; stream: string | null }
 export type ProgramState = 'off' | 'connecting' | 'live' | 'error'
 export interface PeerInfo { id: string; name: string; role: string; talk: string[]; listen: string[]; gateway?: boolean }
+export interface ConnectionTestResult {
+  verdict: 'ready' | 'risky' | 'poor'
+  lossPct: number; rttAvgMs: number; rttMaxMs: number; jitterMs: number; via: string; packets: number; notes: string[]
+}
 export type Status = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error'
 
 export interface JoinOptions {
@@ -784,6 +788,58 @@ export class CommsEngine {
     await this.checkProgramStall()
     if (this.media === 'sfu') await this.linkTick()
     this.emit()
+  }
+
+  /**
+   * Connection test: sends a quiet tone nobody is subscribed to on a temporary track for `seconds` (no silence
+   * suppression, no redundancy, so the network's real behaviour shows) and reads delay, loss and jitter from the
+   * media server's reports. Resolves with a verdict an operator can act on.
+   */
+  async runConnectionTest(seconds = 20, onProgress?: (done: number, total: number) => void): Promise<ConnectionTestResult> {
+    const room = this.room, ctx = this.ctx
+    if (!room || !ctx || room.state !== 'connected') throw new Error('Connect to the server first')
+    const osc = ctx.createOscillator(), gain = ctx.createGain(), dest = ctx.createMediaStreamDestination()
+    osc.frequency.value = 440; gain.gain.value = 0.15
+    osc.connect(gain); gain.connect(dest); osc.start()
+    const pub = await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
+      name: 'probe', source: Track.Source.Unknown, dtx: false, red: false, audioPreset: { maxBitrate: 32_000 },
+    })
+    const rtts: number[] = []
+    let first: { lost: number; sent: number } | null = null, last = { lost: 0, sent: 0 }, jitter = 0, via = ''
+    try {
+      for (let i = 0; i < seconds; i++) {
+        await new Promise(r => setTimeout(r, 1000))
+        if (this.room !== room) throw new Error('The connection dropped during the test')
+        const s = await this.linkStats()
+        if (s) {
+          if (!first) first = { lost: s.lost, sent: s.sent }
+          last = { lost: s.lost, sent: s.sent }
+          if (s.rttMs > 0) rtts.push(s.rttMs)
+          jitter = Math.max(jitter, s.jitterMs); via = s.via || via
+        }
+        onProgress?.(i + 1, seconds)
+      }
+    } finally {
+      osc.stop(); osc.disconnect(); gain.disconnect()
+      if (pub.track) await room.localParticipant.unpublishTrack(pub.track, false).catch(() => {})
+    }
+    const lost = first ? last.lost - first.lost : 0
+    const sent = first ? last.sent - first.sent : 0
+    const lossPct = sent + lost > 0 ? (lost / (sent + lost)) * 100 : 0
+    const rttAvg = rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length : 0
+    const rttMax = rtts.length ? Math.max(...rtts) : 0
+    const tcp = via.startsWith('tcp')
+    const verdict: ConnectionTestResult['verdict'] =
+      sent < 200 ? 'poor'
+      : lossPct < 1 && rttAvg < 100 && jitter < 30 && !tcp ? 'ready'
+      : lossPct < 3 && rttAvg < 200 ? 'risky' : 'poor'
+    const notes: string[] = []
+    if (sent < 200) notes.push('Almost no audio got through to the server. Check that UDP traffic is allowed out of this network.')
+    if (lossPct >= 1) notes.push(`${lossPct.toFixed(1)}% of audio was lost on the way to the server.`)
+    if (rttAvg >= 100) notes.push(`Delay to the server is ${Math.round(rttAvg)} ms on average.`)
+    if (jitter >= 30) notes.push(`Delay varies by up to ${Math.round(jitter)} ms.`)
+    if (tcp) notes.push('Audio is travelling over TCP, not UDP. Delay will spike when the network drops packets; ask IT to allow UDP port 7882 to the server.')
+    return { verdict, lossPct, rttAvgMs: rttAvg, rttMaxMs: rttMax, jitterMs: jitter, via, packets: sent + lost, notes }
   }
 
   /** Link quality over the last interval, both ways (0 until the first measurement). Also what gets reported to the server. */
