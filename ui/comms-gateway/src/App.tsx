@@ -9,6 +9,8 @@ import './App.css'
 
 const LS_KEY = 'arena-comms-gateway-config'
 
+type Page = 'home' | 'routing' | 'interfaces' | 'channels' | 'settings'
+
 /** Older configs held a single ASIO interface as one object; now it is a list. */
 function migrateAsio(old: unknown): AsioCfg[] {
   if (Array.isArray(old)) return old.map((a, i) => ({ ...newAsio(i + 1), ...a }))
@@ -53,6 +55,7 @@ export default function App() {
   const [cfg, setCfg] = useState<GatewayConfig | null>(null)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const autoTried = useRef(false)
+  const [page, setPage] = useState<Page>('home')
   const [asioDevices, setAsioDevices] = useState<AsioDevice[]>([])
   const [asioErr, setAsioErr] = useState('')
   const refreshAsio = async () => {
@@ -157,99 +160,177 @@ export default function App() {
   const devFor = (a: AsioCfg) => asioDevices.find(d => d.name === a.driver) ?? asioDevices.find(d => d.id === a.deviceId)
   const interfaces = cfg.asio.map(a => ({ cfg: a, dev: devFor(a) }))
 
+  const hasInterface = cfg.asio.length > 0
+  const hasRoutes = cfg.ports.some(p => p.channel)
+  const steps = [
+    { done: connected, title: 'Connect to the server', text: connected ? `Connected as ${engine.myName}.` : 'Enter the server address and press Connect.', go: 'settings' as Page, label: 'Server settings' },
+    { done: hasInterface, title: 'Add your audio interface', text: hasInterface ? `${cfg.asio.length} interface${cfg.asio.length > 1 ? 's' : ''} added.` : 'Pick the ASIO driver of your interface (Focusrite, Dante Virtual Soundcard…).', go: 'interfaces' as Page, label: 'Add interface' },
+    { done: hasRoutes, title: 'Route channels', text: hasRoutes ? `${cfg.ports.filter(p => p.channel).length} channel${cfg.ports.filter(p => p.channel).length > 1 ? 's' : ''} routed.` : 'Click where an interface input meets an intercom channel.', go: 'routing' as Page, label: 'Open routing' },
+  ]
+  const nav: { id: Page; label: string; hint: string }[] = [
+    { id: 'home', label: 'Home', hint: 'Status and setup' },
+    { id: 'routing', label: 'Routing', hint: 'Inputs and outputs' },
+    { id: 'interfaces', label: 'Interfaces', hint: 'ASIO audio drivers' },
+    { id: 'channels', label: 'Channels', hint: 'Levels and voice gating' },
+    { id: 'settings', label: 'Settings', hint: 'Server and network' },
+  ]
+  const onAir = cfg.ports.filter(p => p.enabled && p.channel).map(p => ({ p, l: live.get(p.id) }))
+
   return (
     <div className="app">
       <div className="titlebar">
         <div className="brand"><img src="logo.png" alt="" /><span>ARENA</span><b>COMMS</b><span className="gw">GATEWAY</span></div>
         <div className="title-right">
-          {status === 'connected' && <LinkHealth engine={engine} runtime={runtime} />}
-          <span className={`pill ${status}`}>{status === 'connected' ? `Connected · ${engine.myName}` : status === 'error' ? 'Error' : status}</span>
+          <span className={`pill ${status}`}>{status === 'connected' ? `Connected · ${engine.myName}` : status === 'error' ? 'Error' : status === 'reconnecting' ? 'Reconnecting…' : status === 'connecting' ? 'Connecting…' : 'Not connected'}</span>
+          {connected
+            ? <button className="btn sm danger" onClick={disconnect}>Disconnect</button>
+            : <button className="btn sm primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
         </div>
       </div>
-      <div className="content">
-        <section className="card">
-          <h2 className="lcd">Arena server</h2>
-          <div className="grid3">
-            <label>Gateway name<input value={cfg.name} onChange={e => patch({ name: e.target.value })} placeholder="Gateway" maxLength={24} /></label>
-            <label>Server<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.161.235.143" /></label>
-          </div>
-          <div className="row">
-            <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically at start-up</label>
-            <span className="grow" />
-            {connected
-              ? <button className="btn danger" onClick={disconnect}>Disconnect</button>
-              : <button className="btn primary" disabled={!cfg.server} onClick={connect}>Connect</button>}
-          </div>
-          <div className="row">
-            <label className="check" title="Use this if the readout at the top shows packet loss: TCP resends what the network drops, at the cost of a little extra delay."><input type="checkbox" checked={!!cfg.forceTcp} onChange={e => patch({ forceTcp: e.target.checked })} />Send audio over TCP (for a network that loses packets)</label>
-            {!!cfg.forceTcp !== tcpAtStart.current && <button className="btn" onClick={() => void saveConfig(cfg).then(() => window.gw?.relaunch())}>Restart to apply</button>}
-          </div>
-          {status === 'error' && <div className="error">{engine.error}</div>}
-          <p className="hint">No account needed: enter the server address and connect. The gateway talks and listens on every channel. If it stays on reconnecting, Windows does not trust the server's certificate yet (install it under Trusted Root Certification Authorities).</p>
-        </section>
+      <div className="shell">
+        <nav className="side">
+          {nav.map(n => (
+            <button key={n.id} className={`navbtn ${page === n.id ? 'on' : ''}`} onClick={() => setPage(n.id)}>
+              <b>{n.label}</b><span>{n.hint}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="content">
+          {status === 'error' && <div className="error">{engine.error}{' '}<button className="btn sm" onClick={() => setPage('settings')}>Check server settings</button></div>}
 
-        <section className="card">
-          <div className="bar"><h2 className="lcd">Audio device</h2><button className="btn sm" onClick={() => void refreshDevices()}>Refresh devices</button></div>
-          <div className="grid4">
-            <label>Input (from comms system)
-              <select value={cfg.device.inputId} onChange={e => patchDevice({ inputId: e.target.value })}>
-                <option value="">System default</option>
-                {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Input'}</option>)}
-              </select>
-            </label>
-            <label>Output (to comms system)
-              <select value={cfg.device.outputId} onChange={e => patchDevice({ outputId: e.target.value })}>
-                <option value="">System default</option>
-                {outs.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Output'}</option>)}
-              </select>
-            </label>
-            <label>Input channels<input type="number" min={1} max={64} value={cfg.device.inputChannels} onChange={e => patchDevice({ inputChannels: Math.max(1, +e.target.value || 1) })} /></label>
-            <label>Output channels<input type="number" min={1} max={64} value={cfg.device.outputChannels} onChange={e => patchDevice({ outputChannels: Math.max(1, +e.target.value || 1) })} /></label>
-          </div>
-          {runtime.deviceError && <div className="error">{runtime.deviceError}</div>}
-        </section>
-
-        <section className="card">
-          <div className="bar"><h2 className="lcd">ASIO interfaces</h2><span className="grow" /><button className="btn sm" onClick={() => void refreshAsio()}>Refresh drivers</button><button className="btn sm primary" onClick={addAsio}>Add interface</button></div>
-          {cfg.asio.length === 0 && <div className="hint">Add an interface for each ASIO driver you want to use: a Focusrite, Dante Virtual Soundcard, and so on. Every channel of each one appears in the routing grid.</div>}
-          {cfg.asio.map((a, n) => {
-            const info = runtime.asioInfo.get(a.id)
-            const used = new Set(cfg.asio.filter(o => o !== a).map(o => o.driver))
-            return (
-              <div key={a.id} className="iface">
-                <div className="grid4">
-                  <label>Interface {n + 1}: ASIO driver
-                    <select value={a.driver} onChange={e => patchAsio(a.id, { driver: e.target.value, deviceId: asioDevices.find(d => d.name === e.target.value)?.id ?? -1 })}>
-                      <option value="">none</option>
-                      {a.driver && !asioDevices.some(d => d.name === a.driver) && <option value={a.driver}>{a.driver} (not found)</option>}
-                      {asioDevices.map(d => <option key={d.id} value={d.name} disabled={used.has(d.name)}>{d.name} ({d.inputChannels} in / {d.outputChannels} out){used.has(d.name) ? ' · in use above' : ''}</option>)}
-                    </select>
-                  </label>
-                  <label>Buffer size
-                    <select value={a.frames} onChange={e => patchAsio(a.id, { frames: +e.target.value })}>
-                      {[64, 128, 256, 512, 1024].map(f => <option key={f} value={f}>{f} samples ({(f / 48).toFixed(1)} ms)</option>)}
-                    </select>
-                  </label>
-                  <label>&nbsp;<button className="btn sm danger" onClick={() => confirm(`Remove interface ${n + 1}? Ports using it lose their routes.`) && removeAsio(a.id)}>Remove</button></label>
-                </div>
-                {info?.ok && <div className="hint">Open: {info.driver} · {info.inputChannels} in / {info.outputChannels} out · {info.frames}-sample buffer</div>}
-                {info && !info.ok && <div className="error">{info.error}</div>}
+          {page === 'home' && <>
+            <header className="pagehead"><h1>Home</h1><p>Everything this gateway is doing right now.</p></header>
+            {steps.some(x => !x.done) && (
+              <section className="card">
+                <h2 className="lcd">Getting started</h2>
+                <ol className="steps">
+                  {steps.map((x, i) => (
+                    <li key={x.title} className={x.done ? 'done' : ''}>
+                      <span className="stepno">{x.done ? '✓' : i + 1}</span>
+                      <div className="grow"><b>{x.title}</b><div className="hint">{x.text}</div></div>
+                      {!x.done && <button className="btn sm" onClick={() => setPage(x.go)}>{x.label}</button>}
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+            <section className="card">
+              <div className="bar"><h2 className="lcd">Connection health</h2></div>
+              {status === 'connected' ? <HealthTiles engine={engine} runtime={runtime} /> : <div className="hint">Connect to the server to see how good the link is.</div>}
+            </section>
+            <section className="card">
+              <div className="bar"><h2 className="lcd">On air</h2><span className="hint">{onAir.length ? `${onAir.length} channel${onAir.length > 1 ? 's' : ''} routed` : ''}</span></div>
+              {onAir.length === 0 && <div className="hint">No channels routed yet. Open Routing and click a cell to connect an interface input to a channel.</div>}
+              <div className="onair">
+                {onAir.map(({ p, l }) => {
+                  const ch = engine.channels.find(c => c.id === p.channel)
+                  const inDb = l?.inDb() ?? -120, outDb = l?.outDb() ?? -120
+                  return (
+                    <div key={p.id} className={`airrow ${l?.open ? 'talking' : ''}`}>
+                      <div className="airname"><i className={`led red ${l?.open ? 'on' : ''}`} /><b>{ch?.name ?? p.name}</b>{l?.open && <span className="tag live">SENDING</span>}</div>
+                      <div className="airmeter"><span>To intercom</span><div className="ledmeter out"><div style={{ width: pct(outDb) }} /></div></div>
+                      <div className="airmeter"><span>From intercom</span><div className="ledmeter"><div style={{ width: pct(inDb) }} /></div></div>
+                      {(l?.error || (l?.access === 'none' && connected)) && <span className="warn">{l?.error || 'This gateway has no access to this channel'}</span>}
+                    </div>
+                  )
+                })}
               </div>
-            )
-          })}
-          {asioErr && <div className="error">{asioErr}</div>}
-          {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
-        </section>
+            </section>
+          </>}
 
-        {<RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels} groups={engine.groups} setCfg={setCfg} setName={setChName} />}
+          {page === 'routing' && <>
+            <header className="pagehead"><h1>Routing</h1><p>Connect your interface to the intercom channels.</p></header>
+            <RoutingGrid interfaces={interfaces} cfg={cfg} runtime={runtime} channels={engine.channels} groups={engine.groups} setCfg={setCfg} setName={setChName} />
+          </>}
 
-        <div className="bar"><h2 className="lcd">Ports</h2><button className="btn primary" onClick={addPort}>Add port</button></div>
-        {cfg.ports.length === 0 && <div className="muted">No ports yet. Each port bridges one comms-system audio path to one Arena channel.</div>}
-        {cfg.ports.map(p => (
-          <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected} mics={mics} outs={outs} interfaces={interfaces}
-            dupChannel={!!p.channel && cfg.ports.some(o => o !== p && o.enabled && p.enabled && o.channel === p.channel)}
-            onChange={x => patchPort(p.id, x)} onRemove={() => removePort(p.id)} />
-        ))}
+          {page === 'interfaces' && <>
+            <header className="pagehead"><h1>Interfaces</h1><p>The audio hardware this gateway uses. Add one entry per ASIO driver.</p></header>
+            <section className="card">
+              <div className="bar"><span className="hint">{asioDevices.length ? `${asioDevices.length} driver${asioDevices.length > 1 ? 's' : ''} found` : ''}</span><span className="grow" /><button className="btn sm" onClick={() => void refreshAsio()}>Refresh drivers</button><button className="btn sm primary" onClick={addAsio}>Add interface</button></div>
+              {cfg.asio.length === 0 && <div className="hint">Nothing added yet. Press <b>Add interface</b>, then choose your driver (a Focusrite, Dante Virtual Soundcard, and so on). Every channel of it then appears in Routing.</div>}
+              {cfg.asio.map((a, n) => {
+                const info = runtime.asioInfo.get(a.id)
+                const used = new Set(cfg.asio.filter(o => o !== a).map(o => o.driver))
+                return (
+                  <div key={a.id} className="iface">
+                    <div className="grid4">
+                      <label>Interface {n + 1}: ASIO driver
+                        <select value={a.driver} onChange={e => patchAsio(a.id, { driver: e.target.value, deviceId: asioDevices.find(d => d.name === e.target.value)?.id ?? -1 })}>
+                          <option value="">none</option>
+                          {a.driver && !asioDevices.some(d => d.name === a.driver) && <option value={a.driver}>{a.driver} (not found)</option>}
+                          {asioDevices.map(d => <option key={d.id} value={d.name} disabled={used.has(d.name)}>{d.name} ({d.inputChannels} in / {d.outputChannels} out){used.has(d.name) ? ' · in use above' : ''}</option>)}
+                        </select>
+                      </label>
+                      <label>Buffer size
+                        <select value={a.frames} onChange={e => patchAsio(a.id, { frames: +e.target.value })}>
+                          {[64, 128, 256, 512, 1024].map(f => <option key={f} value={f}>{f} samples ({(f / 48).toFixed(1)} ms)</option>)}
+                        </select>
+                      </label>
+                      <label>&nbsp;<button className="btn sm danger" onClick={() => confirm(`Remove interface ${n + 1}? Ports using it lose their routes.`) && removeAsio(a.id)}>Remove</button></label>
+                    </div>
+                    {info?.ok && <div className="hint ok">● Working: {info.driver} · {info.inputChannels} in / {info.outputChannels} out · {info.frames}-sample buffer</div>}
+                    {info && !info.ok && <div className="error">{info.error}</div>}
+                  </div>
+                )
+              })}
+              {asioErr && <div className="error">{asioErr}</div>}
+              {!asioErr && asioDevices.length === 0 && <div className="hint">No ASIO drivers found. Install your interface driver (Focusrite, or Dante Virtual Soundcard for Dante) and press Refresh drivers.</div>}
+            </section>
+          </>}
+
+          {page === 'channels' && <>
+            <header className="pagehead"><h1>Channels</h1><p>Fine-tune each routed channel: levels, voice gating and test tone. Channels you route appear here automatically.</p></header>
+            <div className="bar"><span className="hint">{cfg.ports.length} channel{cfg.ports.length === 1 ? '' : 's'}</span><button className="btn" onClick={addPort}>Add channel manually</button></div>
+            {cfg.ports.length === 0 && <div className="muted">Nothing here yet. Route a channel on the Routing page first.</div>}
+            {cfg.ports.map(p => (
+              <PortCard key={p.id} cfg={p} live={live.get(p.id)} engine={engine} connected={connected} mics={mics} outs={outs} interfaces={interfaces}
+                dupChannel={!!p.channel && cfg.ports.some(o => o !== p && o.enabled && p.enabled && o.channel === p.channel)}
+                onChange={x => patchPort(p.id, x)} onRemove={() => removePort(p.id)} />
+            ))}
+          </>}
+
+          {page === 'settings' && <>
+            <header className="pagehead"><h1>Settings</h1><p>How this gateway reaches the intercom server.</p></header>
+            <section className="card">
+              <h2 className="lcd">Intercom server</h2>
+              <div className="grid3">
+                <label>Gateway name<input value={cfg.name} onChange={e => patch({ name: e.target.value })} placeholder="Gateway" maxLength={24} /></label>
+                <label>Server address<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.161.235.143" /></label>
+              </div>
+              <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically when the gateway starts</label>
+              <p className="hint">Just the address is enough. If it stays on Reconnecting, Windows doesn't trust the server's certificate yet: install it under Trusted Root Certification Authorities.</p>
+            </section>
+            <section className="card">
+              <h2 className="lcd">Network</h2>
+              <div className="row">
+                <label className="check" title="TCP resends what the network drops, at the cost of a little extra delay."><input type="checkbox" checked={!!cfg.forceTcp} onChange={e => patch({ forceTcp: e.target.checked })} />Send audio over TCP</label>
+                {!!cfg.forceTcp !== tcpAtStart.current && <button className="btn sm" onClick={() => void saveConfig(cfg).then(() => window.gw?.relaunch())}>Restart to apply</button>}
+              </div>
+              <p className="hint">Only turn this on if Home shows packet loss that won't go away. Leave it off otherwise: it adds delay.</p>
+            </section>
+            <details className="card adv">
+              <summary>Advanced: use a normal Windows audio device instead of ASIO</summary>
+              <div className="bar"><span className="hint">Most setups use ASIO and can ignore this.</span><button className="btn sm" onClick={() => void refreshDevices()}>Refresh devices</button></div>
+              <div className="grid4">
+                <label>Input (from comms system)
+                  <select value={cfg.device.inputId} onChange={e => patchDevice({ inputId: e.target.value })}>
+                    <option value="">System default</option>
+                    {mics.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Input'}</option>)}
+                  </select>
+                </label>
+                <label>Output (to comms system)
+                  <select value={cfg.device.outputId} onChange={e => patchDevice({ outputId: e.target.value })}>
+                    <option value="">System default</option>
+                    {outs.map(d => <option key={d.deviceId} value={d.deviceId}>{d.label || 'Output'}</option>)}
+                  </select>
+                </label>
+                <label>Input channels<input type="number" min={1} max={64} value={cfg.device.inputChannels} onChange={e => patchDevice({ inputChannels: Math.max(1, +e.target.value || 1) })} /></label>
+                <label>Output channels<input type="number" min={1} max={64} value={cfg.device.outputChannels} onChange={e => patchDevice({ outputChannels: Math.max(1, +e.target.value || 1) })} /></label>
+              </div>
+              {runtime.deviceError && <div className="error">{runtime.deviceError}</div>}
+            </details>
+          </>}
+        </div>
       </div>
     </div>
   )
@@ -504,8 +585,8 @@ function PortCard({ cfg, live, engine, connected, mics, outs, interfaces, dupCha
   )
 }
 
-/** Live health: loss/delay on the send link to the server, and dropouts in each interface's input buffer. */
-function LinkHealth({ engine, runtime }: { engine: CommsEngine; runtime: GatewayRuntime }) {
+/** Live health in plain words: delay, packet loss and audio dropouts, each with a verdict. */
+function HealthTiles({ engine, runtime }: { engine: CommsEngine; runtime: GatewayRuntime }) {
   const [link, setLink] = useState<{ rttMs: number; lost: number; sent: number; jitterMs: number; via: string } | null>(null)
   useEffect(() => {
     let prev: { lost: number; sent: number } | null = null
@@ -519,10 +600,21 @@ function LinkHealth({ engine, runtime }: { engine: CommsEngine; runtime: Gateway
   }, [engine])
   const dry = [...runtime.asioHealth.values()].reduce((n, h) => n + h.dry, 0)
   const trims = [...runtime.asioHealth.values()].reduce((n, h) => n + h.trims, 0)
-  const pct = link && link.sent > 0 ? (link.lost / (link.sent + link.lost)) * 100 : 0
+  const pctLoss = link && link.sent > 0 ? (link.lost / (link.sent + link.lost)) * 100 : 0
+  const grade = (v: number, good: number, ok: number) => (v <= good ? 'good' : v <= ok ? 'ok' : 'bad')
+  const delay = link ? grade(link.rttMs, 60, 150) : 'idle'
+  const loss = link ? grade(pctLoss, 1, 3) : 'idle'
+  const drops = grade(dry + trims, 0, 5)
+  const word = { good: 'Good', ok: 'Fair', bad: 'Poor', idle: '…' } as const
   return (
-    <span className="muted" title="Send link to the server over the last 3 s, and ASIO input buffer dropouts since the gateway connected" style={{ marginRight: 10, fontSize: 12 }}>
-      {link ? `link ${Math.round(link.rttMs)} ms · loss ${pct.toFixed(1)}% (${link.lost}/${link.sent + link.lost}) · jitter ${link.jitterMs.toFixed(0)} ms · ${link.via || '?'}` : 'link …'} · publishes {engine.publishCount} · buffer dropouts {dry} · skips {trims}{engine.musicError ? ` · ${engine.musicError}` : ''}
-    </span>
+    <>
+      <div className="tiles">
+        <div className={`tile ${delay}`} title="Round-trip time to the server"><span>Delay to server</span><b>{link ? `${Math.round(link.rttMs)} ms` : '…'}</b><em>{word[delay]}</em></div>
+        <div className={`tile ${loss}`} title="Share of audio packets lost on the way to the server, last 3 seconds"><span>Audio lost</span><b>{link ? `${pctLoss.toFixed(1)}%` : '…'}</b><em>{word[loss]}</em></div>
+        <div className={`tile ${drops}`} title="Gaps in the audio interface input since the gateway connected"><span>Interface dropouts</span><b>{dry + trims}</b><em>{word[drops]}</em></div>
+      </div>
+      <div className="hint">{link ? `Sending ${link.via || '…'} · jitter ${link.jitterMs.toFixed(0)} ms · ${engine.publishCount} channel feeds` : ''}{engine.musicError ? ` · ${engine.musicError}` : ''}</div>
+      {loss === 'bad' && <div className="warn">Audio is being lost on the network. Check the connection, or try Settings → Send audio over TCP.</div>}
+    </>
   )
 }

@@ -77,3 +77,47 @@ label.inline { display: flex; flex-direction: row; align-items: center; gap: 8px
 .rgrid .ifhead { text-align: left; padding: 6px 10px; background: #151a21; color: #ffb81c; letter-spacing: .1em; text-transform: uppercase; font-size: 11px; position: sticky; left: 0; }
 .iface { border-top: 1px solid #1f232a; margin-top: 10px; padding-top: 6px; }
 .rgrid .sysname { display: inline-block; width: 170px; padding: 0 6px; font-size: 12px; }
+
+/* Layout: sidebar + pages */
+.shell { flex: 1; display: flex; min-height: 0; }
+.side { width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; padding: 14px 10px; border-right: 1px solid #1d2026; background: rgba(8,9,12,.6); }
+.navbtn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; color: #aab0bb; }
+.navbtn b { font: 700 13px var(--label); letter-spacing: .08em; text-transform: uppercase; }
+.navbtn span { font-size: 11px; color: var(--muted); }
+.navbtn:hover { background: #14171c; color: #fff; }
+.navbtn.on { background: #1b1f26; border-color: #2e333c; color: var(--lcd); box-shadow: inset 3px 0 0 var(--lcd); }
+.shell .content { max-width: none; margin: 0; }
+.pagehead h1 { font: 700 20px var(--label); letter-spacing: .08em; text-transform: uppercase; }
+.pagehead p { color: var(--muted); margin-top: 4px; font-size: 13px; }
+.title-right { display: flex; align-items: center; gap: 10px; }
+.hint.ok { color: var(--success); }
+
+/* Getting started steps */
+.steps { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.steps li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 8px; background: #101216; border: 1px solid #23272e; }
+.steps li.done { opacity: .6; }
+.stepno { width: 26px; height: 26px; flex-shrink: 0; display: grid; place-items: center; border-radius: 50%; font: 700 12px var(--label); background: #262a31; color: var(--lcd); }
+.steps li.done .stepno { background: rgba(52,208,88,.18); color: var(--success); }
+.steps b { font-size: 14px; }
+
+/* Health tiles */
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.tile { display: flex; flex-direction: column; gap: 4px; padding: 14px; border-radius: 10px; background: #101216; border: 1px solid #23272e; border-top: 3px solid #3a3f48; }
+.tile span { font: 700 10px var(--label); letter-spacing: .14em; text-transform: uppercase; color: #8c93a0; }
+.tile b { font: 700 26px var(--mono); color: #e4e7ec; }
+.tile em { font-style: normal; font-size: 12px; color: var(--muted); }
+.tile.good { border-top-color: var(--success); } .tile.good em { color: var(--success); }
+.tile.ok { border-top-color: var(--warn); } .tile.ok em { color: var(--warn); }
+.tile.bad { border-top-color: var(--danger); } .tile.bad em { color: #ff8277; }
+
+/* On air list */
+.onair { display: flex; flex-direction: column; gap: 8px; }
+.airrow { display: grid; grid-template-columns: 220px 1fr 1fr; align-items: center; gap: 14px; padding: 10px 12px; border-radius: 8px; background: #101216; border: 1px solid #23272e; border-left: 4px solid #3a3f48; }
+.airrow.talking { border-left-color: var(--danger); }
+.airname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.airname b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.airmeter { display: flex; flex-direction: column; gap: 4px; } .airmeter span { font-size: 10px; color: var(--muted); letter-spacing: .08em; text-transform: uppercase; }
+.airrow .warn { grid-column: 1 / -1; }
+
+details.adv > summary { cursor: pointer; font: 700 12px var(--label); letter-spacing: .08em; text-transform: uppercase; color: #aab0bb; margin: 0; }
+details.adv[open] > summary { margin-bottom: 10px; }
