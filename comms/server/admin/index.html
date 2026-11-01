@@ -333,9 +333,11 @@ function channelsView() {
 function onlineView() {
   const o = S.state.online
   return [h('div', { class: 'bar' }, h('div', {}, h('h2', {}, 'Online now'), h('div', { class: 'sub' }, o.length + ' connected'))),
-    o.length ? h('table', {}, h('tr', {}, ['Name', 'Title', 'Type', ''].map(x => h('th', {}, x))),
+    o.length ? h('table', {}, h('tr', {}, ['Name', 'Title', 'Type', 'Link (now)', 'Worst loss', ''].map(x => h('th', {}, x))),
       o.map(p => h('tr', {}, h('td', {}, h('span', { class: 'dot on' }), p.name), h('td', {}, p.title),
         h('td', {}, p.ephemeral ? h('span', { class: 'chip' }, 'guest') : h('span', { class: 'chip ok' }, 'account')),
+        h('td', { class: 'muted' }, p.link ? h('span', { class: 'chip ' + (p.link.tx > 2 || p.link.rx > 2 ? 'bad' : 'ok') }, 'send ' + p.link.tx.toFixed(1) + '% · hear ' + p.link.rx.toFixed(1) + '%') : '—'),
+        h('td', { class: 'muted' }, p.linkWorst == null ? '—' : p.linkWorst.toFixed(1) + '%'),
         h('td', {}, h('button', { class: 'btn sm danger', onclick: () => confirm('Remove ' + p.name + ' from the intercom?') && act(() => api('POST', 'kick/' + p.id), 'Removed') }, 'Kick'))))) : h('div', { class: 'muted' }, 'Nobody is connected.')]
 }
 

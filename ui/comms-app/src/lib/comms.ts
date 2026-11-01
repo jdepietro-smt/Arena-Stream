@@ -857,7 +857,7 @@ export class CommsEngine {
         this.sfuGains.set(name, gain)
         this.publishCount++
         this.sfuPubs.set(name, await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
-          name, source: Track.Source.Unknown, dtx: true, red: false,
+          name, source: Track.Source.Unknown, dtx: true, red: true, // RED repeats the previous frame in each packet, so a single lost packet costs nothing audible
           audioPreset: { maxBitrate: 32_000 },
         }))
       }
@@ -948,6 +948,9 @@ export class CommsEngine {
   musicSending(ch: string): boolean { return this.musicTx.has(ch) }
 
   /** Quality of the send link to the media server, from the WebRTC stats (gateways use this for a health readout). */
+  /** Tell the server how this station's link is doing (shown in the admin Online tab). */
+  reportLink(l: { tx: number; rx: number; conceal: number; jitter: number }) { this.send({ type: 'link', ...l }) }
+
   /** Receive link from the media server: packets lost/received on the incoming voice tracks, and audio concealed by the jitter buffer. */
   async rxStats(): Promise<{ lost: number; received: number; jitterMs: number; concealed: number; samples: number } | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

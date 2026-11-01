@@ -275,6 +275,7 @@ export function createServer(
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
+      link: p.link && Date.now() - p.link.at < 15_000 ? p.link : null, linkWorst: p.linkWorst ?? null,
     })),
   })
 
@@ -488,6 +489,12 @@ export function createServer(
               send(p, { type: 'call', from: me.id, channel: msg.channel })
             }
           }
+          break
+        }
+        case 'link': {
+          const n = k => (Number.isFinite(msg[k]) ? Math.max(0, Math.min(100, msg[k])) : 0)
+          me.link = { tx: n('tx'), rx: n('rx'), conceal: n('conceal'), jitter: Math.min(5000, Math.max(0, Number(msg.jitter) || 0)), at: Date.now() }
+          me.linkWorst = Math.max(me.linkWorst ?? 0, me.link.tx, me.link.rx)
           break
         }
         case 'ping':

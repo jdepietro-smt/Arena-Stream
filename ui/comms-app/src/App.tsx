@@ -360,12 +360,14 @@ function LinkLoss({ engine }: { engine: CommsEngine }) {
       const dl = pt ? a.lost - pt.lost : 0, ds = pt ? a.sent - pt.sent : 0
       const rl = pr ? b.lost - pr.lost : 0, rr = pr ? b.received - pr.received : 0
       const cs = pr ? b.samples - pr.samples : 0, cc = pr ? b.concealed - pr.concealed : 0
-      setS({
+      const next = {
         tx: ds + dl > 0 ? (dl / (ds + dl)) * 100 : 0,
         rx: rr + rl > 0 ? (rl / (rr + rl)) * 100 : 0,
         conceal: cs > 0 ? (cc / cs) * 100 : 0,
         jitter: b.jitterMs,
-      })
+      }
+      setS(next)
+      engine.reportLink(next)
       pt = { lost: a.lost, sent: a.sent }
       pr = { lost: b.lost, received: b.received, concealed: b.concealed, samples: b.samples }
     }, 3000)
