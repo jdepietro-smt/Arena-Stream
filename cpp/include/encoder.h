@@ -140,7 +140,7 @@ public:
         ctx_->rc_buffer_size = int(ctx_->bit_rate / std::max(fps, 30));
     }
 
-    // Submit black NV12 frames with negative PTS to warm up the GPU encoder
+    // Submit black frames (NV12 or YUV420P, whichever ctx_->pix_fmt is) with negative PTS to warm up the GPU encoder
     // pipeline before real capture begins.  Without this, NVENC takes several
     // seconds before it starts producing output packets; during that window audio
     // accumulates and then arrives out of sync with video.  After prewarm the
@@ -148,11 +148,18 @@ public:
     // Uses PTS -num_frames … -1 so the real stream can start cleanly at pts=0.
     void prewarm(int num_frames = 60) {
         av_frame_make_writable(frame_);
-        // Black in NV12: Y-plane = 16, UV-plane = 128
+        // Black: Y = 16, chroma = 128.  NV12 has one interleaved UV plane at full
+        // width; YUV420P (interlaced path) has separate U and V planes at half width.
         for (int y = 0; y < ctx_->height; ++y)
             std::memset(frame_->data[0] + (size_t)y * frame_->linesize[0], 16, ctx_->width);
-        for (int y = 0; y < ctx_->height / 2; ++y)
-            std::memset(frame_->data[1] + (size_t)y * frame_->linesize[1], 128, ctx_->width);
+        if (ctx_->pix_fmt == AV_PIX_FMT_NV12) {
+            for (int y = 0; y < ctx_->height / 2; ++y)
+                std::memset(frame_->data[1] + (size_t)y * frame_->linesize[1], 128, ctx_->width);
+        } else {
+            for (int p = 1; p <= 2; ++p)
+                for (int y = 0; y < ctx_->height / 2; ++y)
+                    std::memset(frame_->data[p] + (size_t)y * frame_->linesize[p], 128, ctx_->width / 2);
+        }
         int first_output = -1;
         for (int i = num_frames; i > 0; --i) {
             frame_->pts = -(int64_t)i;
