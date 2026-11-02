@@ -963,13 +963,22 @@ export class CommsEngine {
     }
   }
 
+  /** Gateway only: the channels its ports send on. Only those get a published track (null = every channel it may talk on). */
+  private gwTx: Set<string> | null = null
+  setGatewayTx(ids: string[]) {
+    const next = new Set(ids)
+    if (this.gwTx && this.gwTx.size === next.size && [...next].every(i => this.gwTx!.has(i))) return
+    this.gwTx = next
+    void this.syncSfuTracks()
+  }
+
   /** Publish a track for every channel I may talk on (plus `direct`); retire the rest. Serialised. */
   private syncSfuTracks(): Promise<void> {
     this.sfuSync = this.sfuSync.then(async () => {
       const room = this.room
       const ctx = this.ctx
       if (!room || !ctx || !this.micGain || room.state !== 'connected') return
-      const want = new Set(['direct', ...this.channels.filter(c => c.canTalk && !c.music).map(c => `ch:${c.id}`)])
+      const want = new Set(['direct', ...this.channels.filter(c => c.canTalk && !c.music && (!this.opts?.gateway || !this.gwTx || this.gwTx.has(c.id))).map(c => `ch:${c.id}`)])
       for (const [name, gain] of [...this.sfuGains]) {
         if (want.has(name)) continue
         const pub = this.sfuPubs.get(name)

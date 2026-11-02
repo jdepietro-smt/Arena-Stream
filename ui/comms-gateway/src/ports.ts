@@ -231,6 +231,7 @@ export class GatewayRuntime {
       const ctx = this.engine.audioContext
       if (!ctx) throw new Error('Audio context not ready')
       const active = cfg.ports.filter(p => p.enabled)
+      this.engine.setGatewayTx(active.filter(p => p.channel).map(p => p.channel)) // publish only what is routed, not every channel the account may talk on
       this.deviceError = ''
 
       // ── audio devices: the shared one plus any a port picks for itself, each opened once ──
