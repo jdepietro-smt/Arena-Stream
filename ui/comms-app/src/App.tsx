@@ -319,11 +319,11 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
   const dock = (
     <div className="dock">
       <div className="dock-group">
-        <Knob label="MIC" value={engine.micVolume} min={0} max={2} onChange={v => engine.setMicVolume(v)} readout={`${Math.round(engine.micVolume * 100)}`} />
+        <Fader label="MIC" value={engine.micVolume} min={0} max={2} onChange={v => engine.setMicVolume(v)} readout={`${Math.round(engine.micVolume * 100)}`} />
         <LedMeter engine={engine} source="mic" />
       </div>
       <div className="dock-group">
-        <Knob label="LISTEN" value={engine.masterVolume} min={0} max={1} onChange={v => engine.setMasterVolume(v)} readout={`${Math.round(engine.masterVolume * 100)}`} />
+        <Fader label="LISTEN" value={engine.masterVolume} min={0} max={1} onChange={v => engine.setMasterVolume(v)} readout={`${Math.round(engine.masterVolume * 100)}`} />
       </div>
       <span className="grow" />
       {editable && <button className={`cap sm hw${editing ? ' on' : ''}`} onClick={() => setEditing(e => !e)} title="Choose which channels are on your panel, and their order">MY PANEL</button>}
@@ -481,7 +481,7 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
         onPointerUp={() => engine.release(ch.id)}
         onPointerCancel={() => engine.release(ch.id)}
       ><i className={`led red ${talking ? 'on' : ''}`} />TALK</button>
-      <Knob mini label={`${ch.name} level`} value={engine.channelLevel(ch.id)} min={0} max={1}
+      <Fader mini label={`${ch.name} level`} value={engine.channelLevel(ch.id)} min={0} max={1}
             onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
       </div>
       <div className="subkeys">
@@ -519,7 +519,7 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
       </div>
       <div className="pgm-mid">
         <LedMeter engine={engine} source="program" />
-        <Knob label="LEVEL" value={engine.programVolume} min={0} max={1} onChange={v => engine.setProgramVolume(v)} readout={`${Math.round(engine.programVolume * 100)}`} />
+        <Fader label="LEVEL" value={engine.programVolume} min={0} max={1} onChange={v => engine.setProgramVolume(v)} readout={`${Math.round(engine.programVolume * 100)}`} />
       </div>
       <div className="subkeys one">
         <button className="cap sm" onClick={() => engine.toggleProgramMute()}>
@@ -604,7 +604,7 @@ function MusicKey({ ch, engine }: { ch: Channel; engine: CommsEngine }) {
         </div>
       </div>
       <div className="pgm-mid">
-        <Knob label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
+        <Fader label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
           onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
       </div>
       <div className="subkeys one">
@@ -638,37 +638,16 @@ function Person({ p, engine }: { p: PeerInfo; engine: CommsEngine }) {
 }
 
 // ── Controls ─────────────────────────────────────────────────────────────────
-/** Rotary encoder: drag up/down (or wheel / arrow keys) to turn. `mini` is the per-key version. */
-function Knob({ label, value, min, max, onChange, readout, mini }: {
+/** Horizontal slider for a volume. `mini` is the compact per-key version. */
+function Fader({ label, value, min, max, onChange, readout, mini }: {
   label: string; value: number; min: number; max: number; onChange: (v: number) => void; readout: string; mini?: boolean
 }) {
-  const drag = useRef<{ y: number; v: number } | null>(null)
-  const set = (v: number) => onChange(Math.min(max, Math.max(min, v)))
-  const span = max - min
-  const angle = -135 + ((value - min) / span) * 270
-  const tick = (i: number) => {
-    const a = ((-135 + (i / 10) * 270 - 90) * Math.PI) / 180
-    return { x1: 32 + Math.cos(a) * 26, y1: 32 + Math.sin(a) * 26, x2: 32 + Math.cos(a) * 30, y2: 32 + Math.sin(a) * 30 }
-  }
-  const size = mini ? 44 : 58
+  const pct = ((value - min) / (max - min)) * 100
   return (
-    <div className={`knob ${mini ? 'mini' : ''}`} role="slider" tabIndex={0} aria-label={label} title={`${label}: ${readout}`}
-      aria-valuemin={min} aria-valuemax={max} aria-valuenow={+value.toFixed(2)}
-      onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId); drag.current = { y: e.clientY, v: value } }}
-      onPointerMove={e => { if (drag.current) set(drag.current.v + ((drag.current.y - e.clientY) / 140) * span) }}
-      onPointerUp={() => { drag.current = null }} onPointerCancel={() => { drag.current = null }}
-      onWheel={e => set(value - Math.sign(e.deltaY) * (span / 40))}
-      onKeyDown={e => {
-        if (e.key === 'ArrowUp' || e.key === 'ArrowRight') { e.preventDefault(); set(value + span / 20) }
-        if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') { e.preventDefault(); set(value - span / 20) }
-      }}>
-      <svg viewBox="0 0 64 64" width={size} height={size}>
-        {Array.from({ length: 11 }, (_, i) => <line key={i} {...tick(i)} className={i / 10 <= (value - min) / span + 0.001 ? 'tk on' : 'tk'} />)}
-        <circle cx="32" cy="32" r="21" className="kbody" />
-        <circle cx="32" cy="32" r="16" className="kcap" />
-        <line x1="32" y1="32" x2="32" y2="18" className="kind" transform={`rotate(${angle} 32 32)`} />
-      </svg>
-      {!mini && <><div className="kname">{label}</div><div className="kread">{readout}</div></>}
+    <div className={`fader ${mini ? 'mini' : ''}`} title={`${label}: ${readout}`}>
+      {!mini && <div className="fhead"><span className="kname">{label}</span><span className="kread">{readout}</span></div>}
+      <input type="range" min={min} max={max} step={(max - min) / 100} value={value} aria-label={label}
+        style={{ ['--fill' as string]: `${pct}%` }} onChange={e => onChange(Number(e.target.value))} />
     </div>
   )
 }
