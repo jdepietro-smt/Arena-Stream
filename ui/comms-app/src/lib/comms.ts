@@ -861,6 +861,31 @@ export class CommsEngine {
     return { verdict, lossPct, rttAvgMs: rttAvg, rttMaxMs: rttMax, jitterMs: jitter, via, packets: sent + lost, notes }
   }
 
+  /** Per-stream view of what I send (for diagnosing loss): one row per outbound stream, plus the connection's own counters. */
+  async linkDetail(): Promise<{ streams: { name: string; sent: number; lost: number; jitterMs: number; kbps: number }[]; pair: Record<string, number | string> } | null> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pc = (this.room as any)?.engine?.pcManager?.publisher
+    let rep: RTCStatsReport | undefined
+    try { rep = await pc?.getStats?.() } catch { return null }
+    if (!rep) return null
+    const names = new Map<string, string>()
+    for (const [n, pub] of this.sfuPubs) { const id = pub.track?.mediaStreamTrack?.id; if (id) names.set(id, n) }
+    const out = new Map<string, { name: string; sent: number; bytes: number; ssrc: string }>()
+    const streams: { name: string; sent: number; lost: number; jitterMs: number; kbps: number }[] = []
+    const remote: { local: string; lost: number; jitter: number }[] = []
+    const pair: Record<string, number | string> = {}
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rep.forEach((r: any) => {
+      if (r.type === 'outbound-rtp' && r.kind === 'audio') out.set(r.id, { name: names.get(r.trackIdentifier) ?? r.mid ?? r.ssrc, sent: r.packetsSent, bytes: r.bytesSent, ssrc: String(r.ssrc) })
+      if (r.type === 'remote-inbound-rtp' && r.kind === 'audio') remote.push({ local: r.localId, lost: r.packetsLost, jitter: r.jitter })
+      if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+        for (const k of ['bytesSent', 'packetsSent', 'packetsDiscardedOnSend', 'availableOutgoingBitrate', 'currentRoundTripTime', 'requestsReceived', 'consentRequestsSent']) if (r[k] != null) pair[k] = r[k]
+      }
+    })
+    for (const r of remote) { const o = out.get(r.local); if (o) streams.push({ name: o.name, sent: o.sent, lost: r.lost, jitterMs: (r.jitter || 0) * 1000, kbps: o.bytes }) }
+    return { streams, pair }
+  }
+
   /** Link quality over the last interval, both ways (0 until the first measurement). Also what gets reported to the server. */
   linkNow = { tx: 0, rx: 0, conceal: 0, jitter: 0, ok: false }
 

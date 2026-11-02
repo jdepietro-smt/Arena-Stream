@@ -626,6 +626,25 @@ function HealthTiles({ engine, runtime }: { engine: CommsEngine; runtime: Gatewa
     }, 3000)
     return () => clearInterval(t)
   }, [engine])
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [detail, setDetail] = useState('')
+  useEffect(() => {
+    if (!detailOpen) return
+    let prev = new Map<string, { sent: number; lost: number }>()
+    const t = setInterval(async () => {
+      const d = await engine.linkDetail()
+      if (!d) return
+      const now = new Map<string, { sent: number; lost: number }>()
+      const rows = d.streams.map(s => {
+        const p = prev.get(s.name); now.set(s.name, s)
+        const ds = p ? s.sent - p.sent : 0, dl = p ? s.lost - p.lost : 0
+        return `${s.name.padEnd(14)} sent ${String(s.sent).padStart(6)}  lost ${String(s.lost).padStart(5)}   last 2 s: sent ${ds}, lost ${dl}`
+      })
+      prev = now
+      setDetail(rows.join('\n') + '\n\n' + Object.entries(d.pair).map(([k, v]) => `${k}: ${typeof v === 'number' ? Math.round(v * 1000) / 1000 : v}`).join('\n'))
+    }, 2000)
+    return () => clearInterval(t)
+  }, [detailOpen, engine])
   const dry = [...runtime.asioHealth.values()].reduce((n, h) => n + h.dry, 0)
   const trims = [...runtime.asioHealth.values()].reduce((n, h) => n + h.trims, 0)
   const pctLoss = link && link.sent > 0 ? (link.lost / (link.sent + link.lost)) * 100 : 0
@@ -641,6 +660,10 @@ function HealthTiles({ engine, runtime }: { engine: CommsEngine; runtime: Gatewa
         <div className={`tile ${loss}`} title="Share of audio packets lost on the way to the server, last 3 seconds"><span>Audio lost</span><b>{link ? `${pctLoss.toFixed(1)}%` : '…'}</b><em>{word[loss]}</em></div>
         <div className={`tile ${drops}`} title="Gaps in the audio interface input since the gateway connected"><span>Interface dropouts</span><b>{dry + trims}</b><em>{word[drops]}</em></div>
       </div>
+      <details className="adv" onToggle={e => setDetailOpen((e.target as HTMLDetailsElement).open)}>
+        <summary>Technical detail (for support)</summary>
+        <pre className="hint" style={{ whiteSpace: 'pre-wrap' }}>{detail}</pre>
+      </details>
       <div className="hint">{link ? `Sending ${link.via || '…'} · jitter ${link.jitterMs.toFixed(0)} ms · ${engine.publishCount} channel feeds` : ''}{engine.musicError ? ` · ${engine.musicError}` : ''}</div>
       {loss === 'bad' && <div className="warn">Audio is being lost on the network. Check the connection, or try Settings → Send audio over TCP.</div>}
     </>
