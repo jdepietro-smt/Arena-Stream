@@ -861,6 +861,13 @@ export class CommsEngine {
     return { verdict, lossPct, rttAvgMs: rttAvg, rttMaxMs: rttMax, jitterMs: jitter, via, packets: sent + lost, notes }
   }
 
+  /** Drop the current connection and join again at once (after the network route changed, so it is made on the new route). */
+  reconnect() {
+    if (this.stopped || !this.ws) return
+    this.rejoinAttempts = 0
+    try { this.ws.close() } catch { /* already closing */ }
+  }
+
   /** Per-stream view of what I send (for diagnosing loss): one row per outbound stream, plus the connection's own counters. */
   async linkDetail(): Promise<{ streams: { name: string; sent: number; lost: number; jitterMs: number; kbps: number }[]; pair: Record<string, number | string> } | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

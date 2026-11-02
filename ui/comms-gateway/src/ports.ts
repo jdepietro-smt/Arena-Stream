@@ -60,6 +60,7 @@ export const SYSTEM_INPUTS = ['Mix (left + right)', 'Left', 'Right']
 interface SystemGraph { splitter: ChannelSplitterNode; mix: GainNode; analysers: AnalyserNode[] }
 const MAX_NODE_CH = 32
 interface AsioGraph { splitters: ChannelSplitterNode[]; /** 0-based device input -> its place among the channels sent to the window */ useIdx: Map<number, number>; chans: number; mergers: ChannelMergerNode[]; outs: number; devIn: number; devOut: number }
+export interface NetAdapter { alias: string; description: string; speed: string; metric: number; auto: boolean; gateway: boolean }
 export interface DeviceCfg { inputId: string; outputId: string; inputChannels: number; outputChannels: number }
 export interface GatewayConfig {
   /** Stable id of this gateway (generated once), so the server can tell which gateways are online or offline. */
@@ -69,6 +70,8 @@ export interface GatewayConfig {
   server: string; username: string; password: string; autoConnect: boolean
   /** Send and receive audio over TCP instead of UDP (for a network that drops UDP packets). Applies after a restart. */
   forceTcp?: boolean
+  /** Backup internet line: switch to a second network adapter when the main one loses audio. Needs administrator rights. */
+  backup?: { enabled: boolean; primary: string; secondary: string }
   device: DeviceCfg
   asio: AsioCfg[]
   ports: PortCfg[]
@@ -109,6 +112,9 @@ declare global {
     gw?: {
       getConfig(): Promise<GatewayConfig | null>
       relaunch(): Promise<void>
+      relaunchAdmin(): Promise<{ ok: boolean; error?: string }>
+      netInfo(): Promise<{ admin: boolean; adapters: NetAdapter[] }>
+      netPrefer(alias: string | null): Promise<{ ok: true } | { ok: false; error: string; needsAdmin?: boolean }>
       setConfig(c: GatewayConfig): Promise<void>
       rtpOpen(id: string, c: RtpCfg): Promise<{ ok: boolean; error?: string }>
       rtpClose(id: string): Promise<void>

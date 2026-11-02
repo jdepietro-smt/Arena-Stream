@@ -4,6 +4,7 @@ import * as path from 'path'
 import { RtpReceiver, RtpSender, RxStats } from './rtp'
 import { PcmFormat } from './rtp-codec'
 import { asioClose, registerAsio } from './asio'
+import { registerNetFail } from './netfail'
 
 // An unattended gateway has no user to click before audio may start.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -54,6 +55,7 @@ function createWindow() {
 const configFile = () => path.join(app.getPath('userData'), 'gateway-config.json')
 
 ipcMain.handle('app:relaunch', () => { app.relaunch(); app.exit(0) })
+registerNetFail()
 
 ipcMain.handle('config:get', () => {
   try {

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { CommsEngine, type ConnectionTestResult } from '@engine'
 import {
-  AsioCfg, AsioDevice, GatewayConfig, GatewayRuntime, PortCfg, PortRuntime, RtpCfg, SourceKind,
+  AsioCfg, AsioDevice, GatewayConfig, GatewayRuntime, NetAdapter, PortCfg, PortRuntime, RtpCfg, SourceKind,
   SYSTEM_DEV, SYSTEM_INPUTS, defaultConfig, defaultRtp, newAsio, newPort,
 } from './ports'
+import { LineFailover } from './failover'
 import './kp.css'
 import './App.css'
 
@@ -49,6 +50,7 @@ export default function App() {
   const engine = useMemo(() => new CommsEngine(), [])
   const [, bump] = useState(0)
   const runtime = useMemo(() => new GatewayRuntime(engine, () => bump(n => n + 1)), [engine])
+  const failover = useMemo(() => new LineFailover(engine, () => bump(n => n + 1)), [engine])
   useSyncExternalStore(engine.subscribe, engine.getVersion)
   if (import.meta.env.DEV) Object.assign(window, { __gw: { engine, runtime } })
 
@@ -74,6 +76,12 @@ export default function App() {
     if (cfg.asio.some(a => !a.driver && asioDevices.some(d => d.id === a.deviceId)))
       setCfg(c => c && { ...c, asio: c.asio.map(a => (a.driver ? a : { ...a, driver: asioDevices.find(d => d.id === a.deviceId)?.name ?? '' })) })
   }, [cfg, asioDevices])
+
+  const bk = cfg?.backup
+  useEffect(() => { if (cfg) failover.configure(bk) }, [!!cfg, bk?.enabled, bk?.primary, bk?.secondary]) // eslint-disable-line react-hooks/exhaustive-deps
+  const [net, setNet] = useState<{ admin: boolean; adapters: NetAdapter[] } | null>(null)
+  const refreshNet = () => { void window.gw?.netInfo().then(setNet).catch(() => setNet(null)) }
+  useEffect(() => { if (page === 'settings') refreshNet() }, [page])
 
   const tcpAtStart = useRef(false)
   useEffect(() => { void loadConfig().then(c => { tcpAtStart.current = !!c.forceTcp; setCfg(c) }) }, [])
@@ -216,7 +224,7 @@ export default function App() {
             )}
             <section className="card">
               <div className="bar"><h2 className="lcd">Connection health</h2></div>
-              {status === 'connected' ? <><HealthTiles engine={engine} runtime={runtime} /><ConnectionTest engine={engine} /></> : <div className="hint">Connect to the server to see how good the link is.</div>}
+              {status === 'connected' ? <><HealthTiles engine={engine} runtime={runtime} /><LineStatus failover={failover} cfg={cfg} /><ConnectionTest engine={engine} /></> : <div className="hint">Connect to the server to see how good the link is.</div>}
             </section>
             <section className="card">
               <div className="bar"><h2 className="lcd">On air</h2><span className="hint">{onAir.length ? `${onAir.length} channel${onAir.length > 1 ? 's' : ''} routed` : ''}</span></div>
@@ -307,6 +315,32 @@ export default function App() {
                 {!!cfg.forceTcp !== tcpAtStart.current && <button className="btn sm" onClick={() => void saveConfig(cfg).then(() => window.gw?.relaunch())}>Restart to apply</button>}
               </div>
               <p className="hint">Only turn this on if Home shows packet loss that won't go away. Leave it off otherwise: it adds delay.</p>
+            </section>
+            <section className="card">
+              <h2 className="lcd">Backup internet line</h2>
+              <p className="hint">If this PC has a second connection (a USB cellular modem, a phone tether, or a second network cable), the gateway can move onto it when the main line starts losing audio, and go back later.</p>
+              {!window.gw?.netInfo ? <p className="hint">This needs the desktop app.</p> : <>
+                {net && !net.admin && <div className="row"><span className="warn">Switching lines needs administrator rights.</span><button className="btn sm" onClick={() => void window.gw?.relaunchAdmin()}>Restart as administrator</button></div>}
+                <label className="check"><input type="checkbox" checked={!!cfg.backup?.enabled} onChange={e => patch({ backup: { primary: '', secondary: '', ...cfg.backup, enabled: e.target.checked } })} />Use a backup line when the main one loses audio</label>
+                {cfg.backup?.enabled && (
+                  <div className="grid3">
+                    {(['primary', 'secondary'] as const).map(k => (
+                      <label key={k}>{k === 'primary' ? 'Main line' : 'Backup line'}
+                        <select value={cfg.backup?.[k] ?? ''} onChange={e => patch({ backup: { enabled: true, primary: '', secondary: '', ...cfg.backup, [k]: e.target.value } })}>
+                          <option value="">Choose…</option>
+                          {(net?.adapters ?? []).map(a => <option key={a.alias} value={a.alias}>{a.alias} · {a.description}{a.speed ? ` · ${a.speed}` : ''}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <div className="row">
+                  <button className="btn sm" onClick={refreshNet}>Refresh adapters</button>
+                  {cfg.backup?.enabled && failover.state !== 'off' && <button className="btn sm" onClick={() => void failover.testSwitch()}>Test: switch to the other line now</button>}
+                </div>
+                {failover.error && <div className="error">{failover.error}</div>}
+                <p className="hint">The switch uses Windows' own routing: the backup adapter is given priority, and everything goes back to automatic when the gateway closes. Cellular data costs money, so the gateway returns to the main line after 10 minutes or more.</p>
+              </>}
             </section>
             <details className="card adv">
               <summary>Advanced: use a normal Windows audio device instead of ASIO</summary>
@@ -609,6 +643,18 @@ function ConnectionTest({ engine }: { engine: CommsEngine }) {
           {res.notes.map(n => <div key={n} className="hint">• {n}</div>)}
         </div>
       )}
+    </div>
+  )
+}
+
+/** Which internet line the gateway is on, and what the backup switching has done. */
+function LineStatus({ failover, cfg }: { failover: LineFailover; cfg: GatewayConfig }) {
+  if (failover.state === 'off' && !failover.log.length) return null
+  const name = failover.state === 'backup' ? cfg.backup?.secondary : cfg.backup?.primary
+  return (
+    <div className="hint" style={{ margin: '8px 0' }}>
+      <b>Internet line:</b> {failover.state === 'backup' ? `BACKUP (${name})` : failover.state === 'error' ? 'could not switch' : failover.state === 'main' ? `main (${name})` : 'backup switching is off'}
+      {failover.log.slice(0, 3).map(e => <div key={e.t}>{new Date(e.t).toLocaleTimeString()} · {e.text}</div>)}
     </div>
   )
 }
