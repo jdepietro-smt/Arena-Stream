@@ -344,6 +344,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
           <div className="hl-mid">
             <span className={`hl-state ${engine.status}`}>{engine.status === 'connected' ? 'ON LINE' : engine.status.toUpperCase()}</span>
             <span>{engine.media.toUpperCase()}{engine.serverRttMs != null ? ` · ${engine.serverRttMs} ms` : ''}</span>
+            <span className="dim" title="When this copy of the panel was built">v {__BUILD__}</span>
           </div>
           <Clock />
         </div>
