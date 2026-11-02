@@ -96,9 +96,9 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .keymod.program.ducked { box-shadow: 0 0 0 1px #ffb020, 0 0 18px -6px #ffb020; }
 .pgm-mid { display: flex; align-items: center; gap: 10px; padding: 2px 6px; min-height: 68px; }
 
-.dock { display: flex; align-items: center; gap: 22px; padding: 10px 16px; border-radius: 9px; background: linear-gradient(#1a1c21, #14161a); border: 1px solid #2a2e35; box-shadow: inset 0 2px 8px rgba(0,0,0,.55); }
-.dock-group { display: flex; align-items: center; gap: 12px; }
-.dock .ledmeter { width: 150px; flex: none; }
+.dock { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; padding: 10px 16px; border-radius: 9px; background: linear-gradient(#1a1c21, #14161a); border: 1px solid #2a2e35; box-shadow: inset 0 2px 8px rgba(0,0,0,.55); }
+.dock-group { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
+.dock .ledmeter { flex: 1 1 60px; width: auto; min-width: 60px; max-width: 150px; }
 
 /* Direct-call directory */
 .directory { width: 240px; flex-shrink: 0; margin: 14px 14px 14px 0; padding: 14px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
