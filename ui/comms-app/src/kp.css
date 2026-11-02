@@ -101,14 +101,3 @@ select option { background: #0b0d10; }
 
 /* Night mode: dim every lit surface for dark control rooms */
 body.night .panel, body.night .directory, body.night .drawer, body.night .chassis { filter: brightness(.5) saturate(.75); }
-
-/* Volume slider: a slim console fader */
-.fader { display: flex; flex-direction: column; gap: 2px; flex: 1 1 130px; min-width: 110px; max-width: 220px; }
-.fader.mini { flex: 0 0 38%; max-width: 140px; min-width: 84px; }
-.fader .fhead { display: flex; justify-content: space-between; align-items: baseline; }
-.fader input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 28px; margin: 0; background: transparent; cursor: pointer; touch-action: none; outline: none; }
-.fader input[type=range]::-webkit-slider-runnable-track { height: 5px; border-radius: 3px; background: linear-gradient(to right, var(--lcd) var(--fill), #1b1e24 var(--fill)); box-shadow: inset 0 1px 2px rgba(0,0,0,.8), 0 0 0 1px #05060a; }
-.fader input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 24px; margin-top: -9.5px; border-radius: 3px; border: 1px solid #0a0b0e;
-  background: linear-gradient(to right, #2f343c 0 42%, var(--lcd) 42% 58%, #2f343c 58%); box-shadow: 0 2px 4px rgba(0,0,0,.7), inset 0 0 0 1px #4a505a; }
-.fader input[type=range]:hover::-webkit-slider-thumb { box-shadow: 0 2px 5px rgba(0,0,0,.8), inset 0 0 0 1px #8c93a0; }
-.fader input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 2px #818cf8; }

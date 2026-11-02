@@ -639,16 +639,33 @@ function Person({ p, engine }: { p: PeerInfo; engine: CommsEngine }) {
 }
 
 // ── Controls ─────────────────────────────────────────────────────────────────
-/** Horizontal slider for a volume. `mini` is the compact per-key version. */
+/** Volume control drawn as a bar of LED segments: drag or click to set it. `mini` is the tall per-key version. */
 function Fader({ label, value, min, max, onChange, readout, mini }: {
   label: string; value: number; min: number; max: number; onChange: (v: number) => void; readout: string; mini?: boolean
 }) {
-  const pct = ((value - min) / (max - min)) * 100
+  const bar = useRef<HTMLDivElement>(null)
+  const n = mini ? 14 : 30
+  const frac = (value - min) / (max - min)
+  const lit = Math.round(frac * n)
+  const setFrom = (e: React.PointerEvent) => {
+    const r = bar.current!.getBoundingClientRect()
+    const f = mini ? 1 - (e.clientY - r.top) / r.height : (e.clientX - r.left) / r.width
+    onChange(min + Math.min(1, Math.max(0, f)) * (max - min))
+  }
+  const step = (max - min) / 20
   return (
     <div className={`fader ${mini ? 'mini' : ''}`} title={`${label}: ${readout}`}>
       {!mini && <div className="fhead"><span className="kname">{label}</span><span className="kread">{readout}</span></div>}
-      <input type="range" min={min} max={max} step={(max - min) / 100} value={value} aria-label={label}
-        style={{ ['--fill' as string]: `${pct}%` }} onChange={e => onChange(Number(e.target.value))} />
+      <div ref={bar} className="ledbar" role="slider" tabIndex={0} aria-label={label} aria-orientation={mini ? 'vertical' : 'horizontal'}
+        aria-valuemin={min} aria-valuemax={max} aria-valuenow={+value.toFixed(2)}
+        onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId); setFrom(e) }}
+        onPointerMove={e => { if (e.buttons) setFrom(e) }}
+        onKeyDown={e => {
+          if (e.key === 'ArrowUp' || e.key === 'ArrowRight') { e.preventDefault(); onChange(Math.min(max, value + step)) }
+          if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') { e.preventDefault(); onChange(Math.max(min, value - step)) }
+        }}>
+        {Array.from({ length: n }, (_, i) => <i key={i} className={i < lit ? 'on' : ''} />)}
+      </div>
     </div>
   )
 }
