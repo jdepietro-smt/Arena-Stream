@@ -357,15 +357,16 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
         )}
         {editing && (
           <div className="lcd panel-edit">
-            <div className="pe-head"><span>MY PANEL</span><button className="cap sm" onClick={() => setEditing(false)}>DONE</button></div>
+            <div className="pe-head"><span>MY PANEL</span><button className="cap hw" onClick={() => setEditing(false)}>DONE</button></div>
+            <div className="pe-hint">Tick the channels you want on your panel. Unticked ones are hidden and muted.</div>
             {ordered.map((c, i) => {
               const on = !prefs.hidden.includes(c.id)
               return (
-                <div key={c.id} className="pe-row">
+                <div key={c.id} className={`pe-row${on ? '' : ' off'}`}>
                   <label><input type="checkbox" checked={on} onChange={e => setShown(c.id, e.target.checked)} /> {c.name}</label>
-                  <span>
-                    <button className="cap sm" disabled={i === 0} onClick={() => move(c.id, -1)} aria-label={`Move ${c.name} up`}>▲</button>
-                    <button className="cap sm" disabled={i === ordered.length - 1} onClick={() => move(c.id, 1)} aria-label={`Move ${c.name} down`}>▼</button>
+                  <span className="pe-move">
+                    <button className="cap hw" disabled={i === 0} onClick={() => move(c.id, -1)} aria-label={`Move ${c.name} up`}>▲</button>
+                    <button className="cap hw" disabled={i === ordered.length - 1} onClick={() => move(c.id, 1)} aria-label={`Move ${c.name} down`}>▼</button>
                   </span>
                 </div>
               )
