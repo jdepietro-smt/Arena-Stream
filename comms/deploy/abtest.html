@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Loss check</title>
+<style>body{font:16px system-ui;background:#111;color:#eee;margin:24px;max-width:560px}button{font:inherit;padding:10px 16px;margin:4px 8px 4px 0}pre{background:#000;padding:12px;min-height:9em;white-space:pre-wrap}</style>
+<h2>Loss check (stock LiveKit client)</h2>
+<p>Sends one audio track for 20 seconds and reports what the server received. Nobody hears it.</p>
+<button id="mic">Test with microphone</button><button id="tone">Test with a tone</button>
+<pre id="out">Press a button.</pre>
+<script src="abtest-lk.js"></script>
+<script>
+const out = document.getElementById('out'), log = t => { out.textContent += '\n' + t }
+async function run(kind) {
+  out.textContent = 'Connecting…'
+  const L = window.LivekitClient, room = new L.Room()
+  try {
+    await room.connect('wss://' + location.host + '/livekit', '__TOKEN__')
+    let pub
+    if (kind === 'mic') pub = await room.localParticipant.setMicrophoneEnabled(true)
+    else {
+      const ctx = new AudioContext(), o = ctx.createOscillator(), g = ctx.createGain(), d = ctx.createMediaStreamDestination()
+      g.gain.value = 0.15; o.connect(g); g.connect(d); o.start()
+      pub = await room.localParticipant.publishTrack(d.stream.getAudioTracks()[0], { name: 'tone' })
+    }
+    const sender = (pub.track || pub).sender
+    let first = null, last = null
+    for (let i = 1; i <= 20; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      let lost = 0, sent = 0, rtt = 0, jit = 0, via = ''
+      ;(await sender.getStats()).forEach(r => {
+        if (r.type === 'outbound-rtp') sent += r.packetsSent
+        if (r.type === 'remote-inbound-rtp') { lost += r.packetsLost; rtt = (r.roundTripTime || 0) * 1000; jit = (r.jitter || 0) * 1000 }
+      })
+      first = first || { lost, sent }; last = { lost, sent }
+      const dl = last.lost - first.lost, ds = last.sent - first.sent
+      out.textContent = `second ${i}/20\nsent ${ds}  lost ${dl}  loss ${(ds + dl > 0 ? dl / (ds + dl) * 100 : 0).toFixed(1)}%\ndelay ${rtt.toFixed(0)} ms  jitter ${jit.toFixed(0)} ms`
+    }
+    out.textContent += '\n\nDONE. Tell Claude the final loss % above.'
+  } catch (e) { out.textContent += '\n' + (e.message || e) }
+  await room.disconnect()
+}
+document.getElementById('mic').onclick = () => run('mic')
+document.getElementById('tone').onclick = () => run('tone')
+</script>
