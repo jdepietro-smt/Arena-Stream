@@ -38,6 +38,14 @@ interface Prefs {
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
   musicSrcBy: Record<string, string>; musicLinkBy: Record<string, string>
+  hidden: string[]; order: string[] // my own panel: channels I took off it, and the order of the rest
+}
+
+/** My channels in my order, minus the ones I hid. New channels the server adds show up at the end. */
+function arrange(all: Channel[], prefs: Pick<Prefs, 'hidden' | 'order'>) {
+  const rank = (id: string) => { const i = prefs.order.indexOf(id); return i < 0 ? prefs.order.length : i }
+  const ordered = all.map((c, i) => ({ c, i })).sort((a, b) => rank(a.c.id) - rank(b.c.id) || a.i - b.i).map(x => x.c)
+  return { ordered, shown: ordered.filter(c => !prefs.hidden.includes(c.id)) }
 }
 
 function loadPrefs(): Prefs {
@@ -49,7 +57,7 @@ function loadPrefs(): Prefs {
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
-    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {},
+    spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {}, hidden: [], order: [],
   }
   try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
 }
@@ -275,12 +283,28 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
 }) {
   const roster = engine.roster().filter(p => !p.gateway) // a gateway cannot be called
   const keyed = useRef(new Map<string, string>()) // keyboard code -> target
+  const { ordered, shown } = arrange(engine.channels, prefs)
+  const shownRef = useRef(shown); shownRef.current = shown // hotkeys follow my panel order
+  const [editing, setEditing] = useState(false)
+  const editable = engine.channels.length > 1
+
+  const setOrder = (ids: string[]) => patch({ order: ids })
+  const move = (id: string, d: -1 | 1) => {
+    const ids = ordered.map(c => c.id), i = ids.indexOf(id), j = i + d
+    if (j < 0 || j >= ids.length) return
+    ;[ids[i], ids[j]] = [ids[j], ids[i]]
+    setOrder(ids)
+  }
+  const setShown = (id: string, on: boolean) => {
+    patch({ hidden: on ? prefs.hidden.filter(h => h !== id) : [...prefs.hidden, id], order: ordered.map(c => c.id) })
+    engine.setListen(id, on) // a channel off my panel is not heard either
+  }
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.repeat || (e.target as HTMLElement).matches('input,select,textarea')) return
       const n = /^Digit([1-9])$/.exec(e.code)
-      const ch = n && engine.channels[Number(n[1]) - 1]
+      const ch = n && shownRef.current[Number(n[1]) - 1]
       if (ch) { keyed.current.set(e.code, ch.id); engine.press(ch.id) }
     }
     const up = (e: KeyboardEvent) => {
@@ -302,6 +326,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
         <Knob label="LISTEN" value={engine.masterVolume} min={0} max={1} onChange={v => engine.setMasterVolume(v)} readout={`${Math.round(engine.masterVolume * 100)}`} />
       </div>
       <span className="grow" />
+      {editable && <button className={`cap sm hw${editing ? ' on' : ''}`} onClick={() => setEditing(e => !e)} title="Choose which channels are on your panel, and their order">MY PANEL</button>}
       <button className="cap sm hw" onClick={onAudio}>AUDIO</button>
       {onAdmin && <button className="cap sm hw" onClick={onAdmin}>ADMIN</button>}
       <button className="cap sm hw leave" onClick={onLeave}>LEAVE</button>
@@ -330,9 +355,26 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
             {engine.streams.map(st => <span key={st.id} className={`sl-chip ${st.state}`}>{st.name}</span>)}
           </div>
         )}
+        {editing && (
+          <div className="lcd panel-edit">
+            <div className="pe-head"><span>MY PANEL</span><button className="cap sm" onClick={() => setEditing(false)}>DONE</button></div>
+            {ordered.map((c, i) => {
+              const on = !prefs.hidden.includes(c.id)
+              return (
+                <div key={c.id} className="pe-row">
+                  <label><input type="checkbox" checked={on} onChange={e => setShown(c.id, e.target.checked)} /> {c.name}</label>
+                  <span>
+                    <button className="cap sm" disabled={i === 0} onClick={() => move(c.id, -1)} aria-label={`Move ${c.name} up`}>▲</button>
+                    <button className="cap sm" disabled={i === ordered.length - 1} onClick={() => move(c.id, 1)} aria-label={`Move ${c.name} down`}>▼</button>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
         <div className="keys">
           {engine.program && <ProgramKey engine={engine} />}
-          {engine.channels.map((c, i) => (c.music
+          {shown.map((c, i) => (c.music
             ? <MusicKey key={c.id} ch={c} engine={engine} />
             : <ChannelKey key={c.id} ch={c} index={i} engine={engine} name={name} prefs={prefs} patch={patch} devices={devices} />))}
         </div>

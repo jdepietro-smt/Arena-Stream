@@ -167,3 +167,9 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .musicbtns { display: flex; gap: 6px; }
 .musicbtns .cap.sm { flex: 1; min-width: 0; padding: 7px 4px; flex-direction: row; justify-content: center; gap: 6px; }
 .keymod:not(.music) .musiccontrols { padding-top: 6px; border-top: 1px solid #30343b; }
+
+.panel-edit { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; margin: 0 0 10px; }
+.panel-edit .pe-head { display: flex; justify-content: space-between; align-items: center; letter-spacing: .12em; }
+.panel-edit .pe-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.panel-edit .pe-row label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.panel-edit .pe-row span { display: flex; gap: 4px; }
