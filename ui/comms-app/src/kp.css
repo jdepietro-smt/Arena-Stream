@@ -3,8 +3,8 @@
    key caps, LEDs, knobs, level meter and form controls. Display colour/brightness
    come from --lcd, --lcd-rgb and --lcd-bright, set from the Audio settings. */
 :root {
-  --label: 'Bahnschrift', 'Segoe UI Semibold', 'Arial Narrow', system-ui, sans-serif;
-  --mono: Consolas, 'Lucida Console', monospace;
+  --label: 'Barlow Semi Condensed', 'Bahnschrift', 'Arial Narrow', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', Consolas, 'Lucida Console', monospace;
   --lcd: #ffb938; --lcd-rgb: 255, 185, 56; --lcd-bright: 1;
   --steel-hi: #1f2227; --steel-lo: #15171b; --edge: #30343b; --well: #0e1013;
 }

@@ -197,6 +197,12 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .lcd { background: #030405 repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px 3px); border: 1px solid #000; border-radius: 6px;
   box-shadow: inset 0 0 0 1px #14171c, inset 0 4px 14px rgba(0,0,0,.9), 0 1px 0 rgba(255,255,255,.06); text-shadow: 0 0 8px rgba(var(--lcd-rgb), .45); }
 .header-lcd { padding: 10px 16px; }
+.hl-name { font: 700 22px var(--label); letter-spacing: .05em; } .hl-sub { font: 500 12px var(--label); letter-spacing: .12em; }
+.hl-mid { font-size: 12.5px; } .hl-clock { font: 600 24px var(--mono); }
+.brand { font-size: 15px; }
+.cap.hw { font-size: 14px; padding: 10px 18px 8px; } .btn { font-size: 13px; }
+.kname { font: 600 11.5px var(--label); letter-spacing: .16em; } .kread { font: 500 12px var(--mono); }
+.dir-head { font: 600 12.5px var(--label); letter-spacing: .14em; } .pname { font: 600 15px var(--label); letter-spacing: .03em; } .pname em { font: 500 11.5px var(--label); }
 .hl-clock { text-shadow: 0 0 12px rgba(var(--lcd-rgb), .6); }
 
 /* channel modules */
@@ -212,17 +218,17 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 /* OLED name display */
 .legend { margin: 0; min-height: 50px; padding: 8px 10px 7px; border: 1px solid #000; border-radius: 6px; box-shadow: inset 0 0 0 1px #14171c, inset 0 3px 10px rgba(0,0,0,.9);
   background: #020304 repeating-linear-gradient(0deg, rgba(255,255,255,.04) 0 1px, transparent 1px 3px); filter: none; font-family: var(--label); color: #fff; }
-.legend .lg-top { font-size: 14px; font-weight: 700; letter-spacing: .08em; text-shadow: 0 0 10px color-mix(in srgb, var(--ch) 55%, transparent); }
-.legend .lg-num { font: 700 11px var(--mono); padding: 1px 6px; border: 1px solid color-mix(in srgb, var(--ch) 70%, #000); border-radius: 3px; background: transparent; color: var(--ch); opacity: 1; }
+.legend .lg-top { font-size: 18px; font-weight: 700; letter-spacing: .05em; text-shadow: 0 0 10px color-mix(in srgb, var(--ch) 55%, transparent); }
+.legend .lg-num { font: 600 11.5px var(--mono); padding: 1px 6px; border: 1px solid color-mix(in srgb, var(--ch) 70%, #000); border-radius: 3px; background: transparent; color: var(--ch); opacity: 1; }
 .legend .lg-tag { color: var(--mute); border-color: #3a3f49; }
-.legend .lg-sub { font: 600 10.5px var(--mono); letter-spacing: .1em; color: var(--ch); text-shadow: 0 0 6px color-mix(in srgb, var(--ch) 50%, transparent); }
+.legend .lg-sub { font: 500 11px var(--mono); letter-spacing: .1em; color: var(--ch); text-shadow: 0 0 6px color-mix(in srgb, var(--ch) 50%, transparent); }
 .legend .lg-sub .dim { color: var(--mute); text-shadow: none; opacity: 1; }
 .app[data-density=comfortable] .legend { min-height: 62px; padding: 10px 12px 9px; }
 
 /* TALK: a backlit key cap with a glowing lower edge */
 .keyrow { gap: 10px; align-items: stretch; }
 .cap.talkkey, .app[data-density=comfortable] .cap.talkkey {
-  height: var(--keyh); font-size: 21px; letter-spacing: .3em; border-radius: 9px; overflow: hidden; color: var(--ch); text-indent: .3em;
+  height: var(--keyh); font-size: 27px; font-weight: 600; letter-spacing: .24em; border-radius: 9px; overflow: hidden; color: var(--ch); text-indent: .3em;
   background: linear-gradient(180deg, #31353d 0%, #1d2027 55%, #171a20 100%); border: 1px solid #3b404a; border-bottom: 1px solid #06070a;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -14px 20px rgba(0,0,0,.35), 0 4px 0 #050608, 0 8px 14px rgba(0,0,0,.6);
   text-shadow: 0 0 12px color-mix(in srgb, var(--ch) 70%, transparent), 0 1px 0 #000; transition: transform .05s, box-shadow .05s, background .08s;
@@ -254,8 +260,8 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 .cap:hover:not(:disabled), .btn:hover:not(:disabled) { color: #fff; background: linear-gradient(180deg, #373b44, #20232a); border-color: #4a505c; }
 .cap:active:not(:disabled), .btn:active:not(:disabled) { transform: translateY(2px); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 1px 0 #050608; }
 .cap:disabled, .btn:disabled { background: repeating-linear-gradient(135deg, #1e2127 0 6px, #1a1d22 6px 12px); box-shadow: none; }
-.cap.sm { padding: 9px 2px 8px; font-size: 10px; gap: 5px; }
-.app[data-density=comfortable] .cap.sm { padding: 12px 2px 10px; font-size: 11px; }
+.cap.sm { padding: 8px 2px 7px; font-size: 12.5px; gap: 4px; letter-spacing: .1em; }
+.app[data-density=comfortable] .cap.sm { padding: 11px 2px 9px; font-size: 13.5px; }
 .btn.primary { background: linear-gradient(color-mix(in srgb, var(--lcd) 85%, #fff), var(--lcd)); border-color: var(--lcd); color: #0b0c0f; text-shadow: none; box-shadow: 0 0 16px -4px var(--lcd), inset 0 1px 0 rgba(255,255,255,.5); }
 .led { width: 8px; height: 8px; box-shadow: inset 0 0 2px #000, 0 0 0 1px #050608; }
 .led.red.on { box-shadow: 0 0 10px 2px rgba(255,59,48,.8), 0 0 0 1px #050608; }
