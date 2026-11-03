@@ -288,6 +288,23 @@ bool parse_args(int argc, char** argv, Args& a) {
 std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop = true; }
 
+// Live bitrate control. The parent app writes "bitrate <kbps>" lines to our
+// stdin; the heartbeat loop turns that into the new ceiling (and, with ABR
+// off, the new target). Encoder::set_bitrate is only ever called from the
+// video worker, which picks up g_enc_bitrate_req between frames — so the
+// encoder context is never touched from two threads at once.
+std::atomic<int> g_user_bitrate_req{0};
+std::atomic<int> g_enc_bitrate_req{0};
+
+void stdin_control_loop() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        int kbps = 0;
+        if (std::sscanf(line.c_str(), "bitrate %d", &kbps) == 1 && kbps >= 100 && kbps <= 200000)
+            g_user_bitrate_req.store(kbps);
+    }
+}
+
 #ifdef _WIN32
 // Windows console control handler — fires for CTRL+C, CTRL+BREAK, and window close.
 // SIGTERM is never delivered by the OS on Windows, so this is the canonical way
@@ -768,8 +785,10 @@ int main(int argc, char** argv) {
             // Skip encoding entirely when there is no SRT destination
             // (NDI-only mode or preview-only mode).  Encoding at full bitrate
             // with no output is pure CPU waste and adds frame latency.
-            if (srt_enabled)
+            if (srt_enabled) {
+                if (const int want = g_enc_bitrate_req.exchange(0)) enc.set_bitrate(want);
                 enc.encode(*f, [&](AVPacket* pkt) { do_write_video(pkt); });
+            }
         }
     });
 
@@ -820,10 +839,12 @@ int main(int argc, char** argv) {
     // (this sender goes through libavformat's SRT muxer, not raw libsrt, so
     // srt_bistats() isn't available here the way it is in sdi_player.cpp's
     // receive path).
-    int      abr_current_kbps  = args.bitrate_kbps;
+    int      abr_ceiling_kbps  = args.bitrate_kbps;   // --bitrate, or the latest live change
+    int      abr_current_kbps  = abr_ceiling_kbps;
     uint64_t abr_last_netq_drop = 0;
     int      abr_clean_streak   = 0;
-    const int abr_floor_kbps = std::max(1, args.bitrate_kbps * args.abr_floor_pct / 100);
+    int      abr_floor_kbps = std::max(1, abr_ceiling_kbps * args.abr_floor_pct / 100);
+    std::thread(stdin_control_loop).detach();
     constexpr double kAbrStepDownFactor        = 0.80;  // -20% per congested second
     constexpr double kAbrStepUpFactor          = 1.05;  // +5% per clean second, once streak is long enough
     constexpr int    kAbrCleanSecondsBeforeUp  = 5;
@@ -861,6 +882,19 @@ int main(int argc, char** argv) {
 
         last_v = v; last_a = a;
 
+        if (const int want = g_user_bitrate_req.exchange(0)) {
+            if (!enc.supports_live_bitrate()) {
+                std::cerr << "bitrate: " << enc.name()
+                          << " can't change bitrate mid-stream — restart the stream to apply " << want << " kbps\n";
+            } else if (want != abr_ceiling_kbps) {
+                abr_ceiling_kbps = abr_current_kbps = want;
+                abr_floor_kbps   = std::max(1, want * args.abr_floor_pct / 100);
+                abr_clean_streak = 0;
+                g_enc_bitrate_req.store(want);
+                std::cerr << "bitrate: live change to " << want << " kbps\n";
+            }
+        }
+
         if (args.abr) {
             const bool congested = nd > abr_last_netq_drop;
             abr_last_netq_drop = nd;
@@ -871,20 +905,20 @@ int main(int argc, char** argv) {
                     int(abr_current_kbps * kAbrStepDownFactor));
                 if (stepped < abr_current_kbps) {
                     abr_current_kbps = stepped;
-                    enc.set_bitrate(abr_current_kbps);
+                    g_enc_bitrate_req.store(abr_current_kbps);
                     std::cerr << "abr: network congestion (netq dropping) — stepping down to "
                               << abr_current_kbps << " kbps\n";
                 }
             } else {
                 ++abr_clean_streak;
                 if (abr_clean_streak >= kAbrCleanSecondsBeforeUp &&
-                    abr_current_kbps < args.bitrate_kbps) {
+                    abr_current_kbps < abr_ceiling_kbps) {
                     abr_clean_streak = 0;
-                    const int stepped = std::min(args.bitrate_kbps,
+                    const int stepped = std::min(abr_ceiling_kbps,
                         int(abr_current_kbps * kAbrStepUpFactor));
                     if (stepped > abr_current_kbps) {
                         abr_current_kbps = stepped;
-                        enc.set_bitrate(abr_current_kbps);
+                        g_enc_bitrate_req.store(abr_current_kbps);
                         std::cerr << "abr: network clean for " << kAbrCleanSecondsBeforeUp
                                   << "s — stepping up to " << abr_current_kbps << " kbps\n";
                     }

@@ -162,12 +162,25 @@ public:
         // not to avio_open2 (which isn't used for rtsp — see above).
         if (is_rtsp)
             av_dict_set(&opts, "rtsp_transport", "udp", 0);
+        // MPEG-TS over SRT: don't hold packets back for the other stream.
+        // av_interleaved_write_frame keeps a video packet until an audio packet
+        // with a LATER dts has arrived; audio is timestamped and Opus-framed
+        // behind video, so every video frame was waiting ~175 ms for it
+        // (measured: 700 ms vs 530 ms end to end with audio off). The muxer
+        // only needs each stream's own dts to be monotonic, and receivers
+        // demux by PID, so write in arrival order. Likewise flush the PES per
+        // packet instead of accumulating 2930 bytes of audio, and flush the
+        // I/O buffer per packet so a frame's tail isn't parked until the next.
+        if (!is_rtp && !is_rtsp) {
+            av_dict_set(&opts, "pes_payload_size", "0", 0);
+            fmt_->flags |= AVFMT_FLAG_FLUSH_PACKETS;
+        }
         if (avformat_write_header(fmt_, &opts) < 0) {
             av_dict_free(&opts);
             throw std::runtime_error("avformat_write_header failed");
         }
         av_dict_free(&opts);
-        is_write_frame_ = is_rtp || is_rtsp;
+        is_write_frame_ = true;   // arrival order, no cross-stream interleave hold (see above)
     }
 
     ~SrtOutput() {

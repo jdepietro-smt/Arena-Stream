@@ -251,6 +251,7 @@ struct Stats {
     int64_t pkt_loss     = 0;
     int64_t pkt_drop     = 0;
     int     decoded_fps  = 0;
+    double  rx_ms        = -1;   // mean age of a frame when its packet arrives, before decode (-1 = none)
     double  g2g_ms       = -1;   // mean camera-to-decoder delay over the last second (-1 = no stamp seen)
     double  g2g_max_ms   = -1;
     std::string format;
@@ -263,6 +264,7 @@ static void emit_stats(const Stats& s) {
               << ",\"pktLoss\":"     << s.pkt_loss
               << ",\"pktDrop\":"     << s.pkt_drop
               << ",\"decodedFps\":"  << s.decoded_fps
+              << ",\"rxMs\":"        << s.rx_ms
               << ",\"g2gMs\":"       << s.g2g_ms
               << ",\"g2gMaxMs\":"    << s.g2g_max_ms
               << ",\"format\":\""    << s.format << "\""
@@ -447,7 +449,12 @@ int main(int argc, char** argv) {
     const AVCodec* vdec = avcodec_find_decoder(vpar->codec_id);
     AVCodecContext* vdec_ctx = avcodec_alloc_context3(vdec);
     avcodec_parameters_to_context(vdec_ctx, vpar);
+    // Frame threading holds back one frame per thread before the first output
+    // (3 extra frames = ~50 ms at 60 fps). The stream has no B-frames, so
+    // slice threads + low-delay output give the same picture with no hold-back.
     vdec_ctx->thread_count = 4;
+    vdec_ctx->thread_type  = FF_THREAD_SLICE;
+    vdec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY;
     avcodec_open2(vdec_ctx, vdec, nullptr);
 
     // ── 7. Audio decoder (Opus, if present). ────────────────────────────
@@ -492,6 +499,7 @@ int main(int argc, char** argv) {
     auto t_last_fps   = std::chrono::steady_clock::now();
     int  fps_count    = 0;
     double g2g_sum = 0, g2g_max = 0; int g2g_n = 0;   // glass-to-glass accumulators (see latency_stamp.h)
+    double rx_sum = 0; int rx_n = 0;                  // same stamp, read off the packet before decoding: splits network from decode delay
     int64_t bytes_recv = 0, bytes_prev = 0;
     auto t_bytes = std::chrono::steady_clock::now();
     uint64_t video_seq = 0, audio_seq = 0;
@@ -512,6 +520,16 @@ int main(int argc, char** argv) {
         bytes_recv += pkt->size;
 
         if (pkt->stream_index == vsi) {
+            {   // Stamp sits in an SEI near the start of the access unit.
+                const uint8_t* b = pkt->data;
+                const size_t n = std::min<size_t>(size_t(pkt->size), 1024);
+                const uint8_t* e = b + n;
+                const uint8_t* hit = std::search(b, e, std::begin(sdi::latency::kUuid), std::end(sdi::latency::kUuid));
+                if (hit != e && size_t(e - hit) >= sdi::latency::kSize)
+                    if (auto t = sdi::latency::unpack(hit, size_t(e - hit))) {
+                        rx_sum += double(sdi::latency::now_utc_us() - *t) / 1000.0; ++rx_n;
+                    }
+            }
             if (avcodec_send_packet(vdec_ctx, pkt) >= 0) {
                 while (avcodec_receive_frame(vdec_ctx, vframe) == 0) {
                     fps_count++;
@@ -675,8 +693,9 @@ int main(int argc, char** argv) {
                         stats.decoded_fps = int(std::lround(fps_count * 1000.0 / fps_ms));
                         fps_count = 0;
                         stats.g2g_ms     = g2g_n ? g2g_sum / g2g_n : -1;
+                        stats.rx_ms      = rx_n ? rx_sum / rx_n : -1;
                         stats.g2g_max_ms = g2g_n ? g2g_max : -1;
-                        g2g_sum = g2g_max = 0; g2g_n = 0;
+                        g2g_sum = g2g_max = 0; g2g_n = 0; rx_sum = 0; rx_n = 0;
                         t_last_fps = now;
                     }
                 }

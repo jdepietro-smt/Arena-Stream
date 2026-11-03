@@ -133,6 +133,11 @@ public:
     // same way the constructor derives it, so the one-frame VBV constraint
     // (see the constructor's comment on burst size vs. receiver buffers)
     // stays correct at the new bitrate instead of clamping to the original.
+    // libx264 is opened with nal-hrd=cbr, and x264 refuses any rate change
+    // while a CBR HRD is active (bitrate_switch_check shows it holding the
+    // original rate), so only the hardware encoders retarget live.
+    bool supports_live_bitrate() const { return encoder_name_ != "libx264"; }
+
     void set_bitrate(int new_kbps) {
         ctx_->bit_rate    = int64_t(new_kbps) * 1000;
         ctx_->rc_max_rate = ctx_->bit_rate;

@@ -340,7 +340,8 @@ select option { background: var(--field); }
 .encoder-resolved {
   font: 10px var(--mono); letter-spacing: 0;
   text-transform: none; color: var(--muted);
-  position: absolute; top: 1px; right: 0; white-space: nowrap;
+  display: block; margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* Relay preset: amber LCD readout */

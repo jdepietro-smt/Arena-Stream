@@ -885,7 +885,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
     send('log', `[sdi_stream] ${sdiStream} ${captureArgs.join(' ')}`)
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     captureProcs.set(device.id, proc)
     captureProc = proc  // last-clicked channel drives the shared preview panel
@@ -976,7 +976,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
 
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     captureProcs.set(device.id, proc)
     captureProc = proc
@@ -1048,7 +1048,7 @@ ipcMain.handle('start-capture', (_, device: Device, opts: StreamOpts) => withDev
     send('log', `[arena_stream] ${sdiStream} ${captureArgs.join(' ')}`)
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     captureProcs.set(device.id, proc)
     captureProc = proc
@@ -1361,7 +1361,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     ]
     await new Promise(r => setTimeout(r, 300))
     send('log', `[sdi_stream] ${protocol} → ${destUri}${protocol === 'rtp' ? ' (audio disabled — RTP is video-only)' : ''}`)
-    const proc = spawn(sdiStream, captureArgs, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn(sdiStream, captureArgs, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     replaceStreamProc(proc)
     streamMjpegFrames(proc, device.id)
     let buf = ''
@@ -1409,7 +1409,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     send('log', `[ndi] broadcasting as "${ndiName}" on LAN`)
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     replaceStreamProc(proc)
     streamMjpegFrames(proc, device.id)
@@ -1444,6 +1444,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
 
   // ── SRT (default) — relay > direct caller > listener ──────────────────────
   let externalSrt: string, viewerUri: string
+  let lowLatUri = ''
 
   if (relayUrl) {
     // Parse optional credentials: user:pass@host[:port]
@@ -1469,6 +1470,13 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     const wanLatUs = Math.max(200, lat) * 1000  // minimum 200ms for WAN relay
     externalSrt = `srt://${authPfx}${relayHost}:${relaySrtPort}?streamid=publish:${srtRelayName}&mode=caller&latency=${wanLatUs}${srtPassphraseParam}`
     viewerUri   = `srt://${relayHost}:${relaySrtPort}?streamid=${srtRelayName}&mode=caller&latency=${wanLatUs}`
+    // Low-latency lane: a second copy straight to the relay's pass-through SRT
+    // service (no remux), so delay is just the SRT windows. The passphrase rides
+    // in the streamid because that service authenticates publishers that way.
+    if ((opts.lowLatencyMs ?? 0) > 0 && effectivePassphrase && !/[:&?\s]/.test(effectivePassphrase)) {
+      lowLatUri = `srt://${relayHost}:8895?streamid=publish:${srtRelayName}:${effectivePassphrase}&mode=caller&latency=${Math.round(opts.lowLatencyMs! * 1000)}`
+      send('log', `[lowlat] second copy to ${relayHost}:8895, ${opts.lowLatencyMs} ms window`)
+    }
     send('log', `[relay] publishing to ${relayHost}:${relaySrtPort} as "${streamName}"`)
   } else if (destIp && destIp !== '0.0.0.0') {
     externalSrt = `srt://${destIp}:${port}?mode=caller&latency=${lat * 1000}`
@@ -1503,13 +1511,14 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
       '--acodec',    (opts.audioEnabled ?? true) ? 'libopus' : 'none',
       '--achannels', '2',
       '--dest',      destUri,
+      ...(lowLatUri ? ['--dest2', lowLatUri] : []),
       '--latency',   String(Math.max(200, lat)),
     ]
     await new Promise(r => setTimeout(r, 300))
     send('log', `[sdi_stream/${captureBackend}] go live → ${destUri}`)
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     replaceStreamProc(proc)
     // stdout = binary MJPEG frames — must use streamMjpegFrames, NOT a text reader
@@ -1577,7 +1586,7 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
     send('log', `[arena_stream/decklink] go live → ${dlDestUri}`)
     const proc = spawn(sdiStream, captureArgs, {
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
     replaceStreamProc(proc)
     streamMjpegFrames(proc, device.id)
@@ -1635,6 +1644,20 @@ ipcMain.handle('start-stream', async (_, device: Device, opts: StreamOpts) => wi
   send('stream-url', { id: device.id, url: viewerUri })
   return { ok: true, viewerUri }
 }))
+
+// Live bitrate change: the engine reads "bitrate <kbps>" lines on stdin and
+// retargets the running encoder, so the stream keeps publishing untouched.
+// Also refreshes the beacon so discovery shows the new rate.
+ipcMain.handle('set-bitrate', (_, deviceId: string, kbps: number) => {
+  const proc = captureProcs.get(deviceId)
+  if (!proc?.stdin?.writable || !Number.isFinite(kbps)) return { ok: false }
+  proc.stdin.write(`bitrate ${Math.round(kbps)}
+`)
+  const entry = beaconEntries.get(deviceId) as Record<string, unknown> | undefined
+  if (entry) { entry.bitrateKbps = Math.round(kbps); writeDiscoveryFile() }
+  send('log', `[bitrate] live change to ${Math.round(kbps)} kbps`)
+  return { ok: true }
+})
 
 ipcMain.handle('stop-stream', (_, deviceId: string) => withDeviceLock(deviceId, async () => {
   relayStop = true
@@ -1757,6 +1780,7 @@ interface StreamOpts {
   relayUrl:     string   // relay server URL — if set, publish to relay instead of direct
   streamName:   string   // stream name for relay publish (shown in receiver)
   srtPassphrase?: string // must match the receiving server's srtPublishPassphrase
+  lowLatencyMs?:  number  // >0: also publish to the relay's low-latency lane (UDP 8895) with this SRT window
   abrEnabled?:    boolean // adaptive bitrate — --bitrate becomes a ceiling, steps down under real network congestion
   protocol:      string   // 'srt' | 'udp' | 'rtp' | 'ndi'
   audioCodec:    string

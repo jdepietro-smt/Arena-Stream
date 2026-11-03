@@ -18,6 +18,7 @@ interface StreamOpts {
   relayUrl:         string
   streamName:       string
   srtPassphrase:    string    // must match the receiving server's srtPublishPassphrase
+  lowLatencyMs?:    number    // >0: second copy to the relay's low-latency lane with this SRT window
   abrEnabled?:      boolean   // adaptive bitrate — bitrateKbps becomes a ceiling
   audioCodec:       string
   audioBitrateKbps: number
@@ -234,6 +235,7 @@ export default function App() {
     srtPassphrase: localStorage.getItem('arenaStream.srtPassphrase') || '',
     audioCodec: 'aac', audioBitrateKbps: 192, audioEnabled: true,
     ndiName: 'Arena Stream',
+    lowLatencyMs: Number(localStorage.getItem('arenaStream.lowLatencyMs') ?? 120),
   })
   const [rttInfo, setRttInfo] = useState<{rttMs?: number; recommendedMs?: number; error?: string} | null>(null)
   const [measuringRtt, setMeasuringRtt] = useState(false)
@@ -803,7 +805,12 @@ export default function App() {
               </label>
               <label>BITRATE
                 <select value={opts.bitrateKbps}
-                  onChange={e => setOpts(o => ({...o, bitrateKbps: +e.target.value}))}>
+                  onChange={e => {
+                    const kbps = +e.target.value
+                    setOpts(o => ({...o, bitrateKbps: kbps}))
+                    // Retarget the running encoder in place — no restart.
+                    if (selected && liveIds.has(selected.id)) sdi.setBitrate(selected.id, kbps)
+                  }}>
                   <option value={2500}>2.5 Mbps</option>
                   <option value={5000}>5 Mbps</option>
                   <option value={7500}>7.5 Mbps</option>
@@ -821,6 +828,16 @@ export default function App() {
                   onChange={e => setOpts(o => ({...o, abrEnabled: e.target.checked}))}
                 />
                 ADAPTIVE BITRATE
+              </label>
+              <label title="Also sends a second copy to the server's pass-through SRT lane (UDP 8895) so decoders can read it without the server's re-mux delay. The number is the SRT window for that hop. Applies at the next Go Live.">LOW-LATENCY LANE
+                <select value={opts.lowLatencyMs ?? 0}
+                  onChange={e => { const v = +e.target.value; localStorage.setItem('arenaStream.lowLatencyMs', String(v)); setOpts(o => ({...o, lowLatencyMs: v})) }}>
+                  <option value={0}>Off</option>
+                  <option value={80}>80 ms</option>
+                  <option value={100}>100 ms</option>
+                  <option value={120}>120 ms</option>
+                  <option value={160}>160 ms</option>
+                </select>
               </label>
               <label>AUDIO
                 <select value={opts.audioEnabled ? 'on' : 'off'}

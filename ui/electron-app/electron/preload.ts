@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('sdi', {
   stopStream:    (deviceId: string)      => ipcRenderer.invoke('stop-stream', deviceId),
   openDvr:       (o: unknown)            => ipcRenderer.invoke('open-dvr', o),
   shareLink:     (o: unknown)            => ipcRenderer.invoke('share-link', o),
+  setBitrate:    (id: string, kbps: number) => ipcRenderer.invoke('set-bitrate', id, kbps),
 
   onPreviewFrame:   (cb: (d: string) => void)                       => ipcRenderer.on('preview-frame',   (_, d) => cb(d)),
   onPreviewYuv:     (cb: (id: string, w: number, h: number, d: Buffer) => void) => ipcRenderer.on('preview-yuv',     (_, id, w, h, d) => cb(id, w, h, d)),

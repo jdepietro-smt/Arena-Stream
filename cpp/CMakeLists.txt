@@ -319,6 +319,25 @@ target_include_directories(latency_encode_check PRIVATE include)
 target_link_libraries(latency_encode_check PRIVATE sdi_core)
 sdi_target_warnings(latency_encode_check)
 
+# Confirms Encoder::set_bitrate retargets a running encoder (live bitrate change).
+add_executable(bitrate_switch_check tests/bitrate_switch_check.cpp)
+target_include_directories(bitrate_switch_check PRIVATE include)
+target_link_libraries(bitrate_switch_check PRIVATE sdi_core)
+sdi_target_warnings(bitrate_switch_check)
+
+# Publishes paced synthetic video via Encoder+SrtOutput to measure pipeline/relay delay.
+add_executable(srt_latency_check tests/srt_latency_check.cpp)
+target_include_directories(srt_latency_check PRIVATE include)
+target_link_libraries(srt_latency_check PRIVATE sdi_core)
+sdi_target_warnings(srt_latency_check)
+
+# Low-latency SRT fan-out relay for the server (no FFmpeg; libsrt only).
+add_executable(srt_relay relay/srt_relay.cpp)
+target_link_libraries(srt_relay PRIVATE sdi_core)   # same libsrt/CRT flags as the other tools
+if(WIN32)
+    target_link_libraries(srt_relay PRIVATE ws2_32)
+endif()
+
 # ----------------------------------------------------------------------
 # Receiver binary — SMPTE 2022-7 protection-switch gateway.
 # No vendor SDK dependency; just sdi_core (FFmpeg + SRT).
