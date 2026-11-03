@@ -9,6 +9,7 @@ import * as net from 'net'
 import * as dgram from 'dgram'
 import * as http from 'http'
 import { SRT_PASSPHRASE_FALLBACK } from './secrets'
+import { makeShareLink } from './share-link'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SRT passphrase fallback — read once from a userData-local file so going
@@ -484,6 +485,23 @@ ipcMain.handle('open-dvr', async (_, opts: { host: string; streamName: string })
     win.setMenu(null)
     win.loadURL(`http://127.0.0.1:${port}/`)
     return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: String(e.message) }
+  }
+})
+
+// Signed, expiring SRT read link for a relay stream (see share-link.ts).
+ipcMain.handle('share-link', async (_, o: { relayUrl: string; streamName: string; hours: number; latencyMs: number }) => {
+  try {
+    const stripped = o.relayUrl.replace(/^(https?|srt):\/\//, '')
+    const hostPart = stripped.includes('@') ? stripped.split('@')[1] : stripped
+    const [host, port] = hostPart.split(':')
+    const { link, expiresAt } = makeShareLink({
+      keyPath: path.join(app.getPath('userData'), 'link-signing-key.pem'),
+      host, port: port ? parseInt(port) : 8890,
+      streamName: o.streamName || 'stream', hours: o.hours, latencyMs: o.latencyMs,
+    })
+    return { ok: true, link, expiresAt }
   } catch (e: any) {
     return { ok: false, error: String(e.message) }
   }

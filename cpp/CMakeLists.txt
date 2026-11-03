@@ -308,6 +308,17 @@ target_include_directories(codec_policy_test PRIVATE include)
 sdi_target_warnings(codec_policy_test)
 add_test(NAME codec_policy COMMAND codec_policy_test)
 
+add_executable(latency_stamp_test tests/latency_stamp_test.cpp)
+target_include_directories(latency_stamp_test PRIVATE include)
+sdi_target_warnings(latency_stamp_test)
+add_test(NAME latency_stamp COMMAND latency_stamp_test)
+
+# Needs a working libx264; confirms the stamp survives the real encoder.
+add_executable(latency_encode_check tests/latency_encode_check.cpp)
+target_include_directories(latency_encode_check PRIVATE include)
+target_link_libraries(latency_encode_check PRIVATE sdi_core)
+sdi_target_warnings(latency_encode_check)
+
 # ----------------------------------------------------------------------
 # Receiver binary — SMPTE 2022-7 protection-switch gateway.
 # No vendor SDK dependency; just sdi_core (FFmpeg + SRT).

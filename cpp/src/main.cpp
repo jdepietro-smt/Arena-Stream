@@ -126,32 +126,23 @@ public:
         // Copy frame into working buffer so we don't touch the encoder's copy.
         std::memcpy(di_buf_.data(), vf.data.data(), vf.data.size());
 
-        // Vertical linear-blend deinterlace: fuse the two temporally-offset
-        // fields so motion (tickers, crawls, action) appears smooth. Only
-        // odd lines are rewritten; even lines (field 1) are kept intact.
-        // Gated on vf.mode.interlaced — this used to run unconditionally on
-        // every frame, including genuinely progressive sources, silently
-        // averaging every other row together with its neighbors on content
-        // that was never interlaced and had nothing to fix. That's a real,
-        // uniform vertical blur, and it only ever hit this local preview
-        // path (the real encoder's own deinterlace, in main()'s vworker
-        // below, was already correctly gated) — confirmed live: a static
-        // on-screen graphic (crisp in the actual broadcast/relay output)
-        // read as visibly blurred only in Arena Stream's own preview
-        // window on a plain progressive 720p source.
+        // Motion-adaptive deinterlace on luma.  Only pixels that show combing
+        // (odd-line sample outside both neighbours by a clear margin) are
+        // replaced by the neighbour average; static picture and graphics keep
+        // full vertical resolution, so text stays HD-sharp.  UYVY422: luma
+        // sits on the odd bytes.
         if (vf.mode.interlaced) {
+            constexpr int kComb = 28;
             for (int y = 1; y < src_h_ - 1; y += 2) {
                 const uint8_t* prev = di_buf_.data() + (y - 1) * stride;
                 uint8_t*       curr = di_buf_.data() +  y      * stride;
                 const uint8_t* next = di_buf_.data() + (y + 1) * stride;
-                for (int x = 0; x < stride; ++x)
-                    curr[x] = uint8_t((uint16_t(prev[x]) + uint16_t(next[x])) >> 1);
-            }
-            // Bottom edge: if the last line is odd, replicate its predecessor.
-            if (src_h_ > 1 && (src_h_ & 1) == 0) {
-                std::memcpy(di_buf_.data() + (src_h_ - 1) * stride,
-                            di_buf_.data() + (src_h_ - 2) * stride,
-                            stride);
+                for (int x = 1; x < stride; x += 2) {
+                    const int p = prev[x], c = curr[x], n = next[x];
+                    const int up = c - p, dn = c - n;
+                    if (((up > kComb && dn > kComb) || (up < -kComb && dn < -kComb)))
+                        curr[x] = uint8_t((p + n) >> 1);
+                }
             }
         }
 
@@ -761,27 +752,11 @@ int main(int argc, char** argv) {
             auto f = vq.pop();
             if (!f) break;
 
-            // Deinterlace once, in-place, before both the encoder and the
-            // preview see the frame.  The same vertical linear-blend pass that
-            // PreviewEncoder used to do is now applied to the raw UYVY buffer
-            // so the H.264 output (SRT / RTP / UDP) is also progressive.
-            // PreviewEncoder still has its own blend code as a safety net, but
-            // with already-blended input the second pass is a cheap no-op.
-            if (mode.interlaced) {
-                const int stride = int(f->stride);
-                const int h      = int(mode.height);
-                uint8_t*  base   = f->data.data();
-                for (int y = 1; y < h - 1; y += 2) {
-                    const uint8_t* prev = base + (y - 1) * stride;
-                    uint8_t*       curr = base +  y      * stride;
-                    const uint8_t* next = base + (y + 1) * stride;
-                    for (int x = 0; x < stride; ++x)
-                        curr[x] = uint8_t((uint16_t(prev[x]) + uint16_t(next[x])) >> 1);
-                }
-                // Last odd line (even-height frames): copy from the line above.
-                if (h > 1 && (h & 1) == 0)
-                    std::memcpy(base + (h - 1) * stride, base + (h - 2) * stride, stride);
-            }
+            // No deinterlacing here.  The encoder runs yadif on interlaced
+            // sources and the preview has its own motion-adaptive pass; a
+            // blanket line blend at this point halved vertical resolution on
+            // every frame (static graphics included) and left yadif nothing
+            // to work with.
 
             // NDI gets the raw frame first — before the encoder runs.
             // This eliminates the encode latency from the NDI signal path.

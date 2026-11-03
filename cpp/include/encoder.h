@@ -11,6 +11,7 @@
 // requires, and accumulates samples into full codec frames internally so
 // callers feed raw AudioFrames without worrying about framing boundaries.
 
+#include "latency_stamp.h"
 #include "frame.h"
 
 extern "C" {
@@ -210,6 +211,13 @@ public:
             out_frame = filt_frame_;
         }
 
+        // Wall-clock capture stamp for the decoder's glass-to-glass readout.
+        // (Taken at encode time, so it excludes the sub-frame wait in the queue.)
+        av_frame_remove_side_data(out_frame, AV_FRAME_DATA_SEI_UNREGISTERED);
+        if (AVFrameSideData* sd = av_frame_new_side_data(out_frame, AV_FRAME_DATA_SEI_UNREGISTERED,
+                                                         sdi::latency::kSize))
+            sdi::latency::pack(sd->data, sdi::latency::now_utc_us());
+
         if (avcodec_send_frame(ctx_, out_frame) < 0) {
             if (out_frame == filt_frame_) av_frame_unref(filt_frame_);
             return;
@@ -348,6 +356,7 @@ private:
             av_opt_set(ctx_->priv_data, "tune",           "ll",  0);
             av_opt_set(ctx_->priv_data, "rc",             "cbr", 0);
             av_opt_set(ctx_->priv_data, "zerolatency",    "1",   0);
+            av_opt_set(ctx_->priv_data, "udu_sei",        "1",   0);   // carries the latency stamp
             av_opt_set_int(ctx_->priv_data, "delay",      0,     0);
             // SPS/PPS on every IDR — mid-stream join / packet-loss recovery.
             av_opt_set_int(ctx_->priv_data, "repeat_headers", 1, 0);
@@ -378,6 +387,7 @@ private:
         } else if (name == "libx264") {
             av_opt_set(ctx_->priv_data, "preset",    "veryfast",    0);
             av_opt_set(ctx_->priv_data, "tune",      "zerolatency", 0);
+            av_opt_set(ctx_->priv_data, "udu_sei",   "1",           0);   // carries the latency stamp
             // repeat-headers=1 — SPS/PPS before every IDR so mediamtx and other
             // relay servers can begin forwarding to new readers at keyframe boundaries.
             // intra-refresh intentionally absent: cyclic intra-refresh produces no

@@ -37,6 +37,16 @@ type FrameData = { w: number; h: number; data: Uint8Array }
 // canvas driven by a single "latest frame" ref — multi-channel capture needs
 // one of these per active channel so all of them can be visible at once
 // instead of only whichever one was most recently selected.
+// Raw encoder stats arrive as one JSON line per second; show them as a short readout.
+function prettyLog(line: string): string {
+  if (!line.startsWith('{"type":"stats"')) return line
+  try {
+    const j = JSON.parse(line)
+    const drops = (j.vq_drop || 0) + (j.aq_drop || 0) + (j.netq_drop || 0)
+    return `STATS  ${j.video_fps} fps  ${j.mode ?? ''}  ${j.encoder ?? ''}  drops ${drops}  ${j.dest && j.dest !== 'none' ? '→ ' + j.dest : '(no stream)'}`
+  } catch { return line }
+}
+
 function VideoTile({
   deviceId, framesRef, label, isLive, onClick, isSelected,
 }: {
@@ -51,7 +61,7 @@ function VideoTile({
   const glStateRef = useRef<{
     gl: WebGLRenderingContext
     yTex: WebGLTexture; uTex: WebGLTexture; vTex: WebGLTexture
-    w: number; h: number
+    w: number; h: number; prog: WebGLProgram; uRatio: WebGLUniformLocation | null
   } | null>(null)
   const rafRef = useRef(0)
 
@@ -59,7 +69,6 @@ function VideoTile({
     let glState: typeof glStateRef.current = null
 
     const initGl = (canvas: HTMLCanvasElement, w: number, h: number) => {
-      canvas.width = w; canvas.height = h
       const gl = canvas.getContext('webgl', { alpha: false, antialias: false, desynchronized: false })
       if (!gl) return null
 
@@ -71,24 +80,30 @@ function VideoTile({
         void main() { gl_Position = vec4(aPos,0.0,1.0); vTex = aTex; }
       `)
       const frag = mkShader(gl.FRAGMENT_SHADER, `
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
+        precision highp float;
+        #else
         precision mediump float;
-        uniform sampler2D uY, uCb, uCr; uniform vec2 uTexel; varying vec2 vTex;
+        #endif
+        uniform sampler2D uY, uCb, uCr; uniform vec2 uTexel; uniform float uRatio; varying vec2 vTex;
         void main() {
-          /* Source is native-resolution SDI (720p/1080), but the preview
-             canvas is almost always displayed larger than that (it fills
-             the app's main panel) — plain bilinear upscaling alone reads
-             visibly soft next to the actual broadcast output (confirmed:
-             a frame pulled directly from the live relay was pin-sharp,
-             while the app's own preview of the same moment looked notably
-             blurred). A small unsharp mask on luma only — chroma is already
-             subsampled and doesn't carry edge detail — recovers perceived
-             sharpness without amplifying color noise. */
-          float yC = texture2D(uY, vTex).r;
-          float yN = texture2D(uY, vTex + vec2(0.0,  uTexel.y)).r;
-          float yS = texture2D(uY, vTex - vec2(0.0,  uTexel.y)).r;
-          float yE = texture2D(uY, vTex + vec2(uTexel.x, 0.0)).r;
-          float yW = texture2D(uY, vTex - vec2(uTexel.x, 0.0)).r;
-          float y  = clamp(yC + 0.6 * (yC * 4.0 - yN - yS - yE - yW), 0.0, 1.0) - 0.0627;
+          /* No sharpening: unsharp masks ring around text on solid panels. The
+             canvas is drawn at its displayed pixel size, so a larger source is
+             downsampled here with 4 taps over uRatio source px per output px. */
+          float yC;
+          if (uRatio > 1.0) {
+            /* Downscale: 4 taps over the source footprint of one output pixel. */
+            vec2 s = uTexel * uRatio;
+            yC = 0.25 * (texture2D(uY, vTex + 0.25*s * vec2( 1.0,  1.0)).r
+                       + texture2D(uY, vTex + 0.25*s * vec2(-1.0,  1.0)).r
+                       + texture2D(uY, vTex + 0.25*s * vec2( 1.0, -1.0)).r
+                       + texture2D(uY, vTex + 0.25*s * vec2(-1.0, -1.0)).r);
+          } else {
+            /* Upscale: plain bilinear. Catmull-Rom was tried and looked worse on
+               real (compressed) video, so it was backed out. */
+            yC = texture2D(uY, vTex).r;
+          }
+          float y = yC - 0.0627;
           /* BT.709 limited-range — correct for all HD SDI (1080i/p, 720p). */
           float cb = texture2D(uCb, vTex).r - 0.5;
           float cr = texture2D(uCr, vTex).r - 0.5;
@@ -102,6 +117,7 @@ function VideoTile({
       const prog = gl.createProgram()!
       gl.attachShader(prog, vert); gl.attachShader(prog, frag); gl.linkProgram(prog); gl.useProgram(prog)
       gl.uniform2f(gl.getUniformLocation(prog, 'uTexel'), 1.0 / w, 1.0 / h)
+      const uRatio = gl.getUniformLocation(prog, 'uRatio')
 
       const vbuf = gl.createBuffer()
       gl.bindBuffer(gl.ARRAY_BUFFER, vbuf)
@@ -119,7 +135,7 @@ function VideoTile({
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
         gl.uniform1i(gl.getUniformLocation(prog, name), unit); return t
       }
-      return { gl, yTex: mkTex(0,'uY'), uTex: mkTex(1,'uCb'), vTex: mkTex(2,'uCr'), w, h }
+      return { gl, yTex: mkTex(0,'uY'), uTex: mkTex(1,'uCb'), vTex: mkTex(2,'uCr'), w, h, prog, uRatio }
     }
 
     let diagCount = 0
@@ -151,7 +167,16 @@ function VideoTile({
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, vTex)
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w>>1, h>>1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data.subarray(ySz+uvSz))
 
-      gl.viewport(0, 0, w, h)
+      // Size the drawing buffer to the pixels the picture is actually shown at.
+      const tile = canvas.parentElement
+      const dpr  = window.devicePixelRatio || 1
+      const boxW = (tile?.clientWidth  || w) * dpr
+      const boxH = (tile?.clientHeight || h) * dpr
+      const fit  = Math.min(boxW / w, boxH / h)
+      const cw   = Math.max(2, Math.round(w * fit)), ch = Math.max(2, Math.round(h * fit))
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch }
+      gl.uniform1f(glState.uRatio, w / cw > 1.001 ? w / cw : 1.0)
+      gl.viewport(0, 0, cw, ch)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
     rafRef.current = requestAnimationFrame(render)
@@ -184,6 +209,10 @@ export default function App() {
   const [togglingIds,    setTogglingIds]    = useState<Set<string>>(new Set())
   const [viewerUrls,     setViewerUrls]      = useState<Record<string, string>>({})
   const [logs,           setLogs]           = useState<string[]>([])
+  const [showLog,        setShowLog]        = useState(false)
+  const [showConn,       setShowConn]       = useState(false)
+  const [shareHours,     setShareHours]     = useState(24)
+  const [shareState,     setShareState]     = useState<'' | 'copied' | 'error'>('')
   const [urlCopied,      setUrlCopied]      = useState(false)
   // list-codecs output: every concrete encoder, plus "gpu" and "cpu" entries
   // that say what each would resolve to on this machine.
@@ -497,6 +526,18 @@ export default function App() {
     setTimeout(() => setUrlCopied(false), 2000)
   }
 
+  async function copyShareLink() {
+    const r = await sdi.shareLink({
+      relayUrl: opts.relayUrl, streamName: opts.streamName || selected?.name || 'stream',
+      hours: shareHours, latencyMs: opts.latencyMs,
+    })
+    if (r.ok) { navigator.clipboard.writeText(r.link); setShareState('copied') }
+    else { setLogs(prev => [...prev.slice(-200), `[error] share link failed: ${r.error}`]); setShareState('error') }
+    setTimeout(() => setShareState(''), 2500)
+  }
+
+  const connOpen = showConn || !opts.relayUrl || opts.protocol === 'ndi'
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
@@ -510,6 +551,21 @@ export default function App() {
           </span>
         </div>
         <div className="titlebar-right">
+          {selected && liveIds.has(selected.id) && opts.relayUrl && (
+            <span className="share-box">
+              <select value={shareHours} onChange={e => setShareHours(+e.target.value)} title="How long the link keeps working">
+                <option value={1}>1 hour</option>
+                <option value={8}>8 hours</option>
+                <option value={24}>24 hours</option>
+                <option value={168}>7 days</option>
+                <option value={0}>No expiry</option>
+              </select>
+              <button className="share-btn" onClick={copyShareLink} title="Copy a protected SRT link for receivers">
+                {shareState === 'copied' ? '✓ Link copied' : shareState === 'error' ? 'Failed' : 'Copy share link'}
+              </button>
+            </span>
+          )}
+          <button className={`log-toggle ${showLog ? 'on' : ''}`} onClick={() => setShowLog(v => !v)} title="Show or hide the encoder log">LOG</button>
           {selected && viewerUrls[selected.id] && (
             <button className="url-pill" onClick={copyUrl}>
               {urlCopied ? '✓ Copied' : viewerUrls[selected.id]}
@@ -620,6 +676,9 @@ export default function App() {
 
           <div className="controls">
             <div className="config-row">
+              <div className="group group-dest">
+              <div className="group-title">Destination</div>
+              <div className="group-grid">
               {opts.protocol !== 'ndi' && <>
                 <label>RELAY
                   <span className="relay-preset">West</span>
@@ -631,15 +690,28 @@ export default function App() {
                     onChange={e => setOpts(o => ({...o, streamName: e.target.value}))}
                     onBlur={e => { if (selected) renameDevice(selected.id, e.target.value.trim()) }}
                     onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-                    style={{width: 100}}
                   />
                 </label>
+                {opts.relayUrl && (
+                  <div className="conn-summary">
+                    <span className="conn-text">
+                      {(opts.protocol || 'srt').toUpperCase()} · :{opts.destPort}
+                      {opts.protocol === 'srt' && (
+                        <span className={`pass-led ${opts.srtPassphrase ? 'ok' : 'bad'}`}
+                              title={opts.srtPassphrase ? 'Passphrase saved' : 'No passphrase set'} />
+                      )}
+                    </span>
+                    <button className="conn-edit" onClick={() => setShowConn(v => !v)}>
+                      {showConn ? 'Hide connection' : 'Edit connection'}
+                    </button>
+                  </div>
+                )}
+                {connOpen && <>
                 <label>DEST IP
                   <input
                     type="text" placeholder="blank = listener"
                     value={opts.destIp}
                     onChange={e => { setOpts(o => ({...o, destIp: e.target.value})); setRttInfo(null) }}
-                    style={{width: 120}}
                   />
                 </label>
                 <label>DEST PORT
@@ -656,12 +728,12 @@ export default function App() {
                         setOpts(o => ({...o, srtPassphrase: v}))
                         localStorage.setItem('arenaStream.srtPassphrase', v)
                       }}
-                      style={{width: 140}}
                     />
                   </label>
                 )}
+                </>}
               </>}
-              <label>PROTOCOL
+              {connOpen && <label>PROTOCOL
                 <select value={opts.protocol}
                   onChange={e => setOpts(o => ({...o, protocol: e.target.value as StreamOpts['protocol']}))}>
                   <option value="srt">SRT</option>
@@ -669,19 +741,23 @@ export default function App() {
                   <option value="rtp">RTP / H.264 (Optics PRO)</option>
                   <option value="ndi">NDI (LAN)</option>
                 </select>
-              </label>
+              </label>}
               {opts.protocol === 'ndi' && (
                 <label>NDI NAME
                   <input
                     type="text" placeholder="SDI Stream"
                     value={opts.ndiName}
                     onChange={e => setOpts(o => ({...o, ndiName: e.target.value}))}
-                    style={{width: 140}}
                     title="Name visible to NDI receivers on the LAN"
                   />
                 </label>
               )}
-              {opts.protocol !== 'ndi' && (
+              </div>
+              </div>
+              <div className="group group-quality">
+              <div className="group-title">Quality</div>
+              <div className="group-grid">
+              {opts.protocol !== 'ndi' && connOpen && (
               <label className="latency-label">
                 <span>LATENCY ms</span>
                 {rttInfo && !rttInfo.error && (
@@ -753,6 +829,8 @@ export default function App() {
                   <option value="off">Disabled</option>
                 </select>
               </label>
+              </div>
+              </div>
             </div>
 
             {/* Receive command — shown for UDP and RTP protocols */}
@@ -770,6 +848,7 @@ export default function App() {
               )
             })()}
 
+            <div className="actions">
             <button
               className={`go-live-btn ${selected && liveIds.has(selected.id) ? 'stop' : ''}`}
               onClick={toggleStream}
@@ -791,14 +870,17 @@ export default function App() {
                 DVR Monitor
               </button>
             )}
+            </div>
           </div>
 
           {/* Log */}
-          <div className="log-panel" ref={logRef}>
-            {logs.map((line, i) => (
-              <div key={i} className="log-line">{line}</div>
-            ))}
-          </div>
+          {showLog && (
+            <div className="log-panel" ref={logRef}>
+              {logs.map((line, i) => (
+                <div key={i} className="log-line">{prettyLog(line)}</div>
+              ))}
+            </div>
+          )}
         </main>
       </div>
     </div>

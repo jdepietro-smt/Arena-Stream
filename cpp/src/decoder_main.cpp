@@ -15,6 +15,7 @@
 // arena_stream and sdi_player, so existing log-parsing UI code applies here
 // too).
 
+#include "latency_stamp.h"
 #include "playout_device.h"
 #include "frame_queue.h"
 
@@ -250,6 +251,8 @@ struct Stats {
     int64_t pkt_loss     = 0;
     int64_t pkt_drop     = 0;
     int     decoded_fps  = 0;
+    double  g2g_ms       = -1;   // mean camera-to-decoder delay over the last second (-1 = no stamp seen)
+    double  g2g_max_ms   = -1;
     std::string format;
 };
 
@@ -260,6 +263,8 @@ static void emit_stats(const Stats& s) {
               << ",\"pktLoss\":"     << s.pkt_loss
               << ",\"pktDrop\":"     << s.pkt_drop
               << ",\"decodedFps\":"  << s.decoded_fps
+              << ",\"g2gMs\":"       << s.g2g_ms
+              << ",\"g2gMaxMs\":"    << s.g2g_max_ms
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
 }
@@ -486,6 +491,7 @@ int main(int argc, char** argv) {
     auto t_last_stats = std::chrono::steady_clock::now();
     auto t_last_fps   = std::chrono::steady_clock::now();
     int  fps_count    = 0;
+    double g2g_sum = 0, g2g_max = 0; int g2g_n = 0;   // glass-to-glass accumulators (see latency_stamp.h)
     int64_t bytes_recv = 0, bytes_prev = 0;
     auto t_bytes = std::chrono::steady_clock::now();
     uint64_t video_seq = 0, audio_seq = 0;
@@ -509,6 +515,16 @@ int main(int argc, char** argv) {
             if (avcodec_send_packet(vdec_ctx, pkt) >= 0) {
                 while (avcodec_receive_frame(vdec_ctx, vframe) == 0) {
                     fps_count++;
+
+                    for (int sdi_i = 0; sdi_i < vframe->nb_side_data; ++sdi_i) {
+                        const AVFrameSideData* sd = vframe->side_data[sdi_i];
+                        if (sd->type != AV_FRAME_DATA_SEI_UNREGISTERED) continue;
+                        if (auto t = sdi::latency::unpack(sd->data, sd->size)) {
+                            const double ms = double(sdi::latency::now_utc_us() - *t) / 1000.0;
+                            g2g_sum += ms; ++g2g_n;
+                            if (ms > g2g_max) g2g_max = ms;
+                        }
+                    }
 
                     if (!have_out_mode && vframe->width > 0) {
                         const double fps_d = vdec_ctx->framerate.num > 0
@@ -658,6 +674,9 @@ int main(int argc, char** argv) {
                     if (fps_ms >= 1000) {
                         stats.decoded_fps = int(std::lround(fps_count * 1000.0 / fps_ms));
                         fps_count = 0;
+                        stats.g2g_ms     = g2g_n ? g2g_sum / g2g_n : -1;
+                        stats.g2g_max_ms = g2g_n ? g2g_max : -1;
+                        g2g_sum = g2g_max = 0; g2g_n = 0;
                         t_last_fps = now;
                     }
                 }
