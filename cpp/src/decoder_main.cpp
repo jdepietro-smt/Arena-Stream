@@ -19,6 +19,7 @@
 #include "playout_device.h"
 #include "frame_queue.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -254,6 +255,9 @@ struct Stats {
     double  rx_ms        = -1;   // mean age of a frame when its packet arrives, before decode (-1 = none)
     double  g2g_ms       = -1;   // mean camera-to-decoder delay over the last second (-1 = no stamp seen)
     double  g2g_max_ms   = -1;
+    double  decode_ms    = 0;    // mean time in the decoder per frame (diagnoses a CPU-bound decode PC)
+    double  out_ms       = 0;    // mean time blocked handing a frame to the SDI output
+    int64_t skipped      = 0;    // frames not output while catching up after falling behind (cumulative)
     std::string format;
 };
 
@@ -267,6 +271,9 @@ static void emit_stats(const Stats& s) {
               << ",\"rxMs\":"        << s.rx_ms
               << ",\"g2gMs\":"       << s.g2g_ms
               << ",\"g2gMaxMs\":"    << s.g2g_max_ms
+              << ",\"decodeMs\":"    << s.decode_ms
+              << ",\"outMs\":"       << s.out_ms
+              << ",\"skipped\":"     << s.skipped
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
 }
@@ -456,6 +463,13 @@ int main(int argc, char** argv) {
     vdec_ctx->thread_type  = FF_THREAD_SLICE;
     vdec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY;
     avcodec_open2(vdec_ctx, vdec, nullptr);
+    // NVENC writes one slice per frame, so slice threading is effectively a single
+    // thread. That is fine on a fast CPU, but a slow decode PC then can't hold 60 fps
+    // (measured 60 ms/frame). If decoding averages over kSlowDecodeMs, the decoder is
+    // reopened with frame threading, which spreads frames across cores at the cost of
+    // a few frames of delay. Done between packets; the picture recovers at the next IDR.
+    bool want_frame_threads = false, using_frame_threads = false;
+    constexpr double kSlowDecodeMs = 12.0;
 
     // ── 7. Audio decoder (Opus, if present). ────────────────────────────
     AVCodecContext* adec_ctx = nullptr;
@@ -499,6 +513,13 @@ int main(int argc, char** argv) {
     auto t_last_fps   = std::chrono::steady_clock::now();
     int  fps_count    = 0;
     double g2g_sum = 0, g2g_max = 0; int g2g_n = 0;   // glass-to-glass accumulators (see latency_stamp.h)
+    double dec_sum = 0, out_sum = 0; int dec_n = 0, out_n = 0; int64_t skipped = 0;
+    // Catch-up: if frames are reaching the decoder more than this long after the
+    // encoder stamped them, the output has fallen behind the source (slow decode
+    // PC, or output clock slower than the source). Decoding continues, but frames
+    // are not converted/output until the backlog is gone, instead of letting the
+    // delay grow without bound.
+    constexpr double kCatchUpMs = 800.0;
     double rx_sum = 0; int rx_n = 0;                  // same stamp, read off the packet before decoding: splits network from decode delay
     int64_t bytes_recv = 0, bytes_prev = 0;
     auto t_bytes = std::chrono::steady_clock::now();
@@ -530,9 +551,24 @@ int main(int argc, char** argv) {
                         rx_sum += double(sdi::latency::now_utc_us() - *t) / 1000.0; ++rx_n;
                     }
             }
+            if (want_frame_threads && !using_frame_threads) {
+                avcodec_free_context(&vdec_ctx);
+                vdec_ctx = avcodec_alloc_context3(vdec);
+                avcodec_parameters_to_context(vdec_ctx, vpar);
+                const unsigned hc = std::thread::hardware_concurrency();
+                vdec_ctx->thread_count = int(std::clamp(hc ? hc : 4u, 2u, 8u));
+                vdec_ctx->thread_type  = FF_THREAD_FRAME | FF_THREAD_SLICE;
+                avcodec_open2(vdec_ctx, vdec, nullptr);
+                using_frame_threads = true;
+                std::cerr << "sdi_decoder: decode is slow on this PC - switched to " << vdec_ctx->thread_count
+                          << " frame threads (a little more delay, keeps up at 60 fps)\n";
+            }
+            const auto t_dec0 = std::chrono::steady_clock::now();
             if (avcodec_send_packet(vdec_ctx, pkt) >= 0) {
                 while (avcodec_receive_frame(vdec_ctx, vframe) == 0) {
                     fps_count++;
+                    bool frame_behind = false;
+                    dec_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_dec0).count(); ++dec_n;
 
                     for (int sdi_i = 0; sdi_i < vframe->nb_side_data; ++sdi_i) {
                         const AVFrameSideData* sd = vframe->side_data[sdi_i];
@@ -541,6 +577,7 @@ int main(int argc, char** argv) {
                             const double ms = double(sdi::latency::now_utc_us() - *t) / 1000.0;
                             g2g_sum += ms; ++g2g_n;
                             if (ms > g2g_max) g2g_max = ms;
+                            frame_behind = ms > kCatchUpMs;
                         }
                     }
 
@@ -613,7 +650,8 @@ int main(int argc, char** argv) {
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
                     }
 
-                    if (sws && playout_started) {
+                    if (frame_behind) ++skipped;
+                    if (sws && playout_started && !frame_behind) {
                         uint8_t* dst[4]     = { uyvy_buf.data(), nullptr, nullptr, nullptr };
                         int      dst_ls[4]  = { int(out_mode.width) * 2, 0, 0, 0 };
                         sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height,
@@ -626,7 +664,9 @@ int main(int argc, char** argv) {
                         vf.pts      = sdi::Nanos{
                             int64_t(video_seq) * out_mode.frame_duration().count()};
                         vf.sequence = video_seq++;
+                        const auto t_out0 = std::chrono::steady_clock::now();
                         playout->write_video(std::move(vf));
+                        out_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_out0).count(); ++out_n;
                     }
 
                     // Preview: separate YUV420P conversion, written to stdout
@@ -634,7 +674,7 @@ int main(int argc, char** argv) {
                     // whenever the output mode is known, independent of
                     // whether SDI hardware is attached — the user should be
                     // able to watch a stream without owning/selecting a card.
-                    if (have_out_mode) {
+                    if (have_out_mode && !frame_behind) {
                         if (ffmt != preview_sws_src_fmt) {
                             if (preview_sws) sws_freeContext(preview_sws);
                             preview_sws_src_fmt = ffmt;
@@ -695,7 +735,11 @@ int main(int argc, char** argv) {
                         stats.g2g_ms     = g2g_n ? g2g_sum / g2g_n : -1;
                         stats.rx_ms      = rx_n ? rx_sum / rx_n : -1;
                         stats.g2g_max_ms = g2g_n ? g2g_max : -1;
-                        g2g_sum = g2g_max = 0; g2g_n = 0; rx_sum = 0; rx_n = 0;
+                        stats.decode_ms  = dec_n ? dec_sum / dec_n : 0;
+                        if (!using_frame_threads && dec_n >= 30 && stats.decode_ms > kSlowDecodeMs) want_frame_threads = true;
+                        stats.out_ms     = out_n ? out_sum / out_n : 0;
+                        stats.skipped    = skipped;
+                        g2g_sum = g2g_max = 0; g2g_n = 0; rx_sum = 0; rx_n = 0; dec_sum = out_sum = 0; dec_n = out_n = 0;
                         t_last_fps = now;
                     }
                 }
