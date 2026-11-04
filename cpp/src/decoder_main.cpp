@@ -59,6 +59,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -322,6 +323,46 @@ static void preview_pacer_loop(std::stop_token st,
     }
 }
 
+// Hardware decode (D3D11VA, then DXVA2): a slow decode PC cannot software-decode
+// 1080p60 in real time, and frame threading to compensate adds whole frames of
+// delay. The GPU decodes in one pass with no hold-back. Frames are copied back to
+// system memory (NV12) for the existing swscale/SDI/preview path.
+static AVPixelFormat g_hw_pix_fmt = AV_PIX_FMT_NONE;
+static AVPixelFormat pick_hw_format(AVCodecContext*, const AVPixelFormat* fmts) {
+    for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; ++p)
+        if (*p == g_hw_pix_fmt) return *p;
+    return AV_PIX_FMT_NONE;   // hw surface not offered: avcodec_open/decode fails -> caller falls back
+}
+
+// Opens `ctx` for `vdec` with a GPU device; returns the device name or nullptr.
+static const char* open_hw_decoder(AVCodecContext* ctx, const AVCodec* vdec) {
+    static const struct { AVHWDeviceType type; AVPixelFormat fmt; const char* name; } kTry[] = {
+        { AV_HWDEVICE_TYPE_D3D11VA, AV_PIX_FMT_D3D11,     "d3d11va" },
+        { AV_HWDEVICE_TYPE_DXVA2,   AV_PIX_FMT_DXVA2_VLD, "dxva2"   },
+    };
+    for (const auto& t : kTry) {
+        bool supported = false;
+        for (int i = 0;; ++i) {
+            const AVCodecHWConfig* c = avcodec_get_hw_config(vdec, i);
+            if (!c) break;
+            if ((c->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && c->device_type == t.type) { supported = true; break; }
+        }
+        if (!supported) continue;
+        AVBufferRef* dev = nullptr;
+        if (av_hwdevice_ctx_create(&dev, t.type, nullptr, nullptr, 0) < 0) continue;
+        ctx->hw_device_ctx = av_buffer_ref(dev);
+        av_buffer_unref(&dev);
+        g_hw_pix_fmt = t.fmt;
+        ctx->get_format = pick_hw_format;
+        ctx->thread_count = 1;
+        ctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+        if (avcodec_open2(ctx, vdec, nullptr) == 0) return t.name;
+        av_buffer_unref(&ctx->hw_device_ctx);
+        return nullptr;
+    }
+    return nullptr;
+}
+
 int main(int argc, char** argv) {
     // Handle --list before anything else (no network/device setup needed).
     for (int i = 1; i < argc; ++i) {
@@ -459,10 +500,21 @@ int main(int argc, char** argv) {
     // Frame threading holds back one frame per thread before the first output
     // (3 extra frames = ~50 ms at 60 fps). The stream has no B-frames, so
     // slice threads + low-delay output give the same picture with no hold-back.
-    vdec_ctx->thread_count = 4;
-    vdec_ctx->thread_type  = FF_THREAD_SLICE;
-    vdec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY;
-    avcodec_open2(vdec_ctx, vdec, nullptr);
+    const char* hw_name = std::getenv("ARENA_DECODER_SW") ? nullptr : open_hw_decoder(vdec_ctx, vdec);
+    if (hw_name) {
+        std::cerr << "sdi_decoder: hardware decode on (" << hw_name << ")\n";
+    } else {
+        // Failed hw open leaves the context half-configured: start clean.
+        avcodec_free_context(&vdec_ctx);
+        vdec_ctx = avcodec_alloc_context3(vdec);
+        avcodec_parameters_to_context(vdec_ctx, vpar);
+        vdec_ctx->thread_count = 4;
+        vdec_ctx->thread_type  = FF_THREAD_SLICE;
+        vdec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY;
+        avcodec_open2(vdec_ctx, vdec, nullptr);
+        std::cerr << "sdi_decoder: software decode\n";
+    }
+    AVFrame* hwframe = av_frame_alloc();   // receives GPU surfaces; vframe holds the CPU copy
     // NVENC writes one slice per frame, so slice threading is effectively a single
     // thread. That is fine on a fast CPU, but a slow decode PC then can't hold 60 fps
     // (measured 60 ms/frame). If decoding averages over kSlowDecodeMs, the decoder is
@@ -551,7 +603,7 @@ int main(int argc, char** argv) {
                         rx_sum += double(sdi::latency::now_utc_us() - *t) / 1000.0; ++rx_n;
                     }
             }
-            if (want_frame_threads && !using_frame_threads) {
+            if (want_frame_threads && !using_frame_threads && !hw_name) {
                 avcodec_free_context(&vdec_ctx);
                 vdec_ctx = avcodec_alloc_context3(vdec);
                 avcodec_parameters_to_context(vdec_ctx, vpar);
@@ -565,7 +617,15 @@ int main(int argc, char** argv) {
             }
             const auto t_dec0 = std::chrono::steady_clock::now();
             if (avcodec_send_packet(vdec_ctx, pkt) >= 0) {
-                while (avcodec_receive_frame(vdec_ctx, vframe) == 0) {
+                while (avcodec_receive_frame(vdec_ctx, hwframe) == 0) {
+                    av_frame_unref(vframe);
+                    if (hw_name && hwframe->format == g_hw_pix_fmt) {
+                        if (av_hwframe_transfer_data(vframe, hwframe, 0) < 0) { av_frame_unref(hwframe); continue; }
+                        av_frame_copy_props(vframe, hwframe);
+                        av_frame_unref(hwframe);
+                    } else {
+                        av_frame_move_ref(vframe, hwframe);
+                    }
                     fps_count++;
                     bool frame_behind = false;
                     dec_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_dec0).count(); ++dec_n;
@@ -831,6 +891,7 @@ int main(int argc, char** argv) {
     srt_cleanup();
     av_packet_free(&pkt);
     av_frame_free(&vframe);
+    av_frame_free(&hwframe);
     av_frame_free(&aframe);
     avcodec_free_context(&vdec_ctx);
     if (adec_ctx) avcodec_free_context(&adec_ctx);
