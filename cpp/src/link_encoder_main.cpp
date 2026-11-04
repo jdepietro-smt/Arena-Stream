@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
               << ",\"lanIps\":[" << (lan_ip.empty() ? "" : json_str(lan_ip)) << "]"
               << ",\"directPort\":" << args.direct_port
               << ",\"relay\":" << (args.relay.empty() ? "null" :
-                    "{\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(args.name) + "}")
+                    "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(args.name) + "}")
               << ",\"version\":\"link-1\"}";
             const int st = sdi::net::http_request(dir_url, "POST", "/v1/announce", args.key, b.str());
             if (st != 200 && fails++ % 10 == 0)

@@ -308,6 +308,11 @@ target_include_directories(codec_policy_test PRIVATE include)
 sdi_target_warnings(codec_policy_test)
 add_test(NAME codec_policy COMMAND codec_policy_test)
 
+add_executable(link_paths_test tests/link_paths_test.cpp)
+target_include_directories(link_paths_test PRIVATE include)
+sdi_target_warnings(link_paths_test)
+add_test(NAME link_paths COMMAND link_paths_test)
+
 add_executable(latency_stamp_test tests/latency_stamp_test.cpp)
 target_include_directories(latency_stamp_test PRIVATE include)
 sdi_target_warnings(latency_stamp_test)
@@ -353,6 +358,15 @@ if(WIN32)
     target_link_libraries(link_encoder PRIVATE ws2_32)
 endif()
 sdi_target_warnings(link_encoder)
+
+# link_decoder — Arena Link decoder front end (directory + path choice, supervises sdi_decoder)
+add_executable(link_decoder src/link_decoder_main.cpp)
+target_include_directories(link_decoder PRIVATE include)
+if(WIN32)
+    target_link_libraries(link_decoder PRIVATE ws2_32)
+endif()
+sdi_target_warnings(link_decoder)
+add_dependencies(link_decoder sdi_decoder)
 
 # ----------------------------------------------------------------------
 # Receiver binary — SMPTE 2022-7 protection-switch gateway.

@@ -17,7 +17,7 @@ TTL = float(os.environ.get("LINK_TTL", "4"))
 KEY = os.environ.get("LINK_KEY", "")
 PORT = int(os.environ.get("LINK_PORT", "8002"))
 MAX_BODY = 8192
-FIELDS = ("id", "name", "format", "codec", "kbps", "lanIps", "directPort", "relay", "version")
+FIELDS = ("id", "name", "format", "source", "codec", "kbps", "lanIps", "directPort", "relay", "version")
 
 _lock = threading.Lock()
 _encoders = {}   # id -> {announce fields..., pubIp, seen}

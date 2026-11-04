@@ -260,6 +260,7 @@ struct Stats {
     double  out_ms       = 0;    // mean time blocked handing a frame to the SDI output
     int64_t skipped      = 0;    // frames not output while catching up after falling behind (cumulative)
     std::string format;
+    std::string decoder;         // "d3d11va" | "dxva2" | "software"
 };
 
 static void emit_stats(const Stats& s) {
@@ -275,6 +276,7 @@ static void emit_stats(const Stats& s) {
               << ",\"decodeMs\":"    << s.decode_ms
               << ",\"outMs\":"       << s.out_ms
               << ",\"skipped\":"     << s.skipped
+              << ",\"decoder\":\""   << s.decoder << "\""
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
 }
@@ -561,6 +563,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> preview_buf;
 
     Stats stats;
+    stats.decoder = hw_name ? hw_name : "software";
     auto t_last_stats = std::chrono::steady_clock::now();
     auto t_last_fps   = std::chrono::steady_clock::now();
     int  fps_count    = 0;
