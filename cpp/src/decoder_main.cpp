@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -561,6 +562,8 @@ int main(int argc, char** argv) {
     SwsContext*   preview_sws         = nullptr;
     AVPixelFormat preview_sws_src_fmt = AV_PIX_FMT_NONE;
     std::vector<uint8_t> preview_buf;
+    int pw = 0, ph = 0;                       // preview picture size (downscaled), set with preview_sws
+    constexpr uint32_t kPreviewMaxWidth = 640;
 
     Stats stats;
     stats.decoder = hw_name ? hw_name : "software";
@@ -684,6 +687,9 @@ int main(int argc, char** argv) {
                         // flag, so the pacer thread never observes a partially
                         // written VideoMode.
                         preview_mode = out_mode;
+                        // The monitor picture runs at no more than ~30 fps (halved for 50/60).
+                        if (double(out_mode.fps_num) / out_mode.fps_den > 35.0 && out_mode.fps_num % 2 == 0)
+                            preview_mode.fps_num /= 2;
                         preview_mode_ready.store(true);
 
                         if (!args.preview_only) {
@@ -741,19 +747,24 @@ int main(int argc, char** argv) {
                         if (ffmt != preview_sws_src_fmt) {
                             if (preview_sws) sws_freeContext(preview_sws);
                             preview_sws_src_fmt = ffmt;
+                            // The monitor picture is capped at kPreviewMaxWidth: a full 1080p60
+                            // preview is ~190 MB/s through the app's pipe, which backs up and
+                            // stalls decoding. The SDI output path above is always full size.
+                            pw = int(std::min<uint32_t>(out_mode.width, kPreviewMaxWidth)) & ~1;
+                            ph = int(std::lround(double(out_mode.height) * pw / double(out_mode.width))) & ~1;
                             preview_sws = sws_getContext(
                                 vframe->width, vframe->height, preview_sws_src_fmt,
-                                int(out_mode.width), int(out_mode.height), AV_PIX_FMT_YUV420P,
+                                pw, ph, AV_PIX_FMT_YUV420P,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
-                            const size_t ySz  = size_t(out_mode.width) * out_mode.height;
-                            const size_t uvSz = (size_t(out_mode.width) / 2) * (out_mode.height / 2);
+                            const size_t ySz  = size_t(pw) * ph;
+                            const size_t uvSz = (size_t(pw) / 2) * (ph / 2);
                             preview_buf.resize(8 + ySz + 2 * uvSz);
                         }
                         if (preview_sws) {
-                            const int y_ls  = int(out_mode.width);
-                            const int uv_ls = int(out_mode.width) / 2;
-                            const size_t ySz = size_t(out_mode.width) * out_mode.height;
-                            const size_t uvSz = size_t(uv_ls) * (out_mode.height / 2);
+                            const int y_ls  = pw;
+                            const int uv_ls = pw / 2;
+                            const size_t ySz = size_t(pw) * ph;
+                            const size_t uvSz = size_t(uv_ls) * (ph / 2);
                             uint8_t* dst[4]    = {
                                 preview_buf.data() + 8,
                                 preview_buf.data() + 8 + ySz,
@@ -782,8 +793,8 @@ int main(int argc, char** argv) {
                             // on-screen preview stutter with raw decode/network
                             // jitter while the actual SDI output looked smooth.
                             PreviewFrame pf;
-                            pf.width  = out_mode.width;
-                            pf.height = out_mode.height;
+                            pf.width  = uint32_t(pw);
+                            pf.height = uint32_t(ph);
                             pf.yuv.assign(preview_buf.begin() + 8, preview_buf.end());
                             preview_queue.push(std::move(pf));
                         }

@@ -8,6 +8,7 @@
 // Control: stdin line "bitrate <kbps>" or "quit". Status: one JSON line per second on stdout.
 #include "capture_device.h"
 #include "codec_policy.h"
+#include "device_list.h"
 #include "encoder.h"
 #include "frame_queue.h"
 #include "http_post.h"
@@ -30,6 +31,7 @@ namespace {
 
 std::atomic<bool> g_stop{false};
 std::atomic<int>  g_bitrate_req{0};
+std::atomic<int>  g_dir_state{0};   // 0 = not announcing, 1 = last announce accepted, 2 = failing
 void on_signal(int) { g_stop = true; }
 
 struct Args {
@@ -54,6 +56,7 @@ struct Args {
 
 void usage() {
     std::fprintf(stderr,
+        "link_encoder --list   (cards as JSON)\n"
         "link_encoder --name NAME [--backend aja|decklink] [--device N] [--conn sdi|N] [--reference freerun|inputN]\n"
         "             [--codec gpu|cpu|ENC] [--bitrate KBPS] [--acodec libopus|none] [--abitrate KBPS] [--achannels N]\n"
         "             [--direct-port P] [--direct-latency MS]\n"
@@ -88,6 +91,9 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "-h" || k == "--help") { usage(); return false; }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); usage(); return false; }
     }
+    // Secrets can come from the environment so they stay out of process listings.
+    if (a.key.empty())          if (const char* e = std::getenv("LINK_KEY"))          a.key = e;
+    if (a.relay_secret.empty()) if (const char* e = std::getenv("LINK_RELAY_SECRET")) a.relay_secret = e;
     if (a.name.empty()) { std::fprintf(stderr, "--name is required\n"); usage(); return false; }
     return true;
 }
@@ -119,6 +125,8 @@ std::string host_name() {
 } // namespace
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i)
+        if (std::string(argv[i]) == "--list") { sdi::devlist::list_devices(); return 0; }
     Args args;
     if (!parse(argc, argv, args)) return 2;
     std::signal(SIGINT, on_signal);
@@ -236,6 +244,7 @@ int main(int argc, char** argv) {
                     "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(args.name) + "}")
               << ",\"version\":\"link-1\"}";
             const int st = sdi::net::http_request(dir_url, "POST", "/v1/announce", args.key, b.str());
+            g_dir_state = st == 200 ? 1 : 2;
             if (st != 200 && fails++ % 10 == 0)
                 std::cerr << "directory: announce failed (" << (st < 0 ? "unreachable" : "HTTP " + std::to_string(st)) << ")\n";
             if (st == 200) fails = 0;
@@ -253,11 +262,12 @@ int main(int argc, char** argv) {
         last = now;
         const uint64_t v = video_count.load(), by = fanout.bytes();
         std::printf("{\"type\":\"link_stats\",\"name\":%s,\"format\":%s,\"source\":%s,\"fps\":%.1f,\"kbps\":%.0f,"
-                    "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu}\n",
+                    "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\"}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
                     fanout.clients(), fanout.relay_up() ? "true" : "false", fanout.relay_rtt_ms(),
-                    (unsigned long long)vq.dropped());
+                    (unsigned long long)vq.dropped(),
+                    g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off");
         std::fflush(stdout);
         last_v = v; last_bytes = by;
     }

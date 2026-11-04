@@ -1,0 +1,68 @@
+{
+  "name": "arena-link",
+  "version": "0.1.0",
+  "description": "Arena Link - SDI encoder and decoder, automatic discovery, low-latency SRT",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build && electron-builder",
+    "preview": "vite preview",
+    "electron": "concurrently -k \"vite --port 5173\" \"wait-on tcp:5173 && tsc -p tsconfig.electron.json && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1",
+    "vite-plugin-electron": "^0.28.7",
+    "wait-on": "^7.2.0"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "build": {
+    "appId": "com.smt.arenalink",
+    "productName": "Arena Link",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Arena Link"
+    },
+    "extraFiles": [
+      {
+        "from": "bin/link_encoder.exe",
+        "to": "link_encoder.exe"
+      },
+      {
+        "from": "bin/link_decoder.exe",
+        "to": "link_decoder.exe"
+      },
+      {
+        "from": "bin/sdi_decoder.exe",
+        "to": "sdi_decoder.exe"
+      }
+    ],
+    "artifactName": "Arena-Link-Setup-${version}.${ext}"
+  }
+}

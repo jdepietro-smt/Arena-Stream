@@ -85,6 +85,7 @@ bool parse(int argc, char** argv, Opts& o) {
         else if (k == "--")              { for (++i; i < argc; ++i) o.engine_args.push_back(argv[i]); }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); return false; }
     }
+    if (o.key.empty()) if (const char* e = std::getenv("LINK_KEY")) o.key = e;   // keeps it out of process listings
     if (o.directory.empty()) { std::fprintf(stderr, "--directory is required\n"); return false; }
     return true;
 }
