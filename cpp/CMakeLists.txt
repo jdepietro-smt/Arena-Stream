@@ -339,6 +339,22 @@ if(WIN32)
 endif()
 
 # ----------------------------------------------------------------------
+# link_encoder — Arena Link encoder (direct SRT listener + relay publish + directory announce)
+# ----------------------------------------------------------------------
+add_executable(link_encoder src/link_encoder_main.cpp)
+target_link_libraries(link_encoder PRIVATE sdi_core)
+if(ENABLE_DECKLINK)
+    target_link_libraries(link_encoder PRIVATE sdi_decklink)
+endif()
+if(ENABLE_AJA)
+    target_link_libraries(link_encoder PRIVATE sdi_aja)
+endif()
+if(WIN32)
+    target_link_libraries(link_encoder PRIVATE ws2_32)
+endif()
+sdi_target_warnings(link_encoder)
+
+# ----------------------------------------------------------------------
 # Receiver binary — SMPTE 2022-7 protection-switch gateway.
 # No vendor SDK dependency; just sdi_core (FFmpeg + SRT).
 # ----------------------------------------------------------------------

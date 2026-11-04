@@ -2,6 +2,7 @@
 // which backends were compiled in.
 
 #include "capture_device.h"
+#include "test_device.h"
 
 #ifdef SDI_WITH_DECKLINK
 #include "decklink_device.h"
@@ -18,6 +19,7 @@
 namespace sdi {
 
 std::unique_ptr<CaptureDevice> make_capture(std::string_view kind) {
+    if (kind == "test") return std::make_unique<TestPatternDevice>();   // no hardware; for tests and demos
 #ifdef SDI_WITH_DECKLINK
     if (kind == "decklink") return std::make_unique<DeckLinkDevice>();
 #endif

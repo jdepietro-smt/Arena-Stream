@@ -202,36 +202,39 @@ public:
                       << in.pts.count() << " frame_pts_ticks=" << frame_->pts << "\n";
         }
 
-        AVFrame* out_frame = frame_;
-        if (in.mode.interlaced) {
-            // mode=0 (send_frame) yields exactly one deinterlaced frame per
-            // input frame — frame rate is unchanged, unlike send_field (which
-            // would double it). KEEP_REF leaves frame_ valid for reuse next
-            // call instead of buffersrc taking ownership of it.
-            if (av_buffersrc_add_frame_flags(filt_src_, frame_, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
-                return;
-            av_frame_unref(filt_frame_);
-            if (av_buffersink_get_frame(filt_sink_, filt_frame_) < 0)
-                return;
-            out_frame = filt_frame_;
-        }
+        // Stamp, encode and emit one frame. Wall-clock capture stamp for the decoder's
+        // glass-to-glass readout (taken at encode time, so it excludes the sub-frame
+        // wait in the queue).
+        auto submit = [&](AVFrame* f) {
+            av_frame_remove_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED);
+            if (AVFrameSideData* sd = av_frame_new_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED,
+                                                             sdi::latency::kSize))
+                sdi::latency::pack(sd->data, sdi::latency::now_utc_us());
+            if (avcodec_send_frame(ctx_, f) < 0) return;
+            while (avcodec_receive_packet(ctx_, pkt_) == 0) {
+                emit(pkt_);
+                av_packet_unref(pkt_);
+            }
+        };
 
-        // Wall-clock capture stamp for the decoder's glass-to-glass readout.
-        // (Taken at encode time, so it excludes the sub-frame wait in the queue.)
-        av_frame_remove_side_data(out_frame, AV_FRAME_DATA_SEI_UNREGISTERED);
-        if (AVFrameSideData* sd = av_frame_new_side_data(out_frame, AV_FRAME_DATA_SEI_UNREGISTERED,
-                                                         sdi::latency::kSize))
-            sdi::latency::pack(sd->data, sdi::latency::now_utc_us());
-
-        if (avcodec_send_frame(ctx_, out_frame) < 0) {
-            if (out_frame == filt_frame_) av_frame_unref(filt_frame_);
+        if (!in.mode.interlaced) {
+            submit(frame_);
             return;
         }
-        while (avcodec_receive_packet(ctx_, pkt_) == 0) {
-            emit(pkt_);
-            av_packet_unref(pkt_);
+        // yadif mode=1 turns each interlaced frame into two progressive frames (one per
+        // field), so the stream keeps the source's full motion rate. KEEP_REF leaves
+        // frame_ valid for reuse next call. The filter holds one input frame back for
+        // its temporal check, so the first output appears after the second input.
+        if (av_buffersrc_add_frame_flags(filt_src_, frame_, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
+            return;
+        const AVRational sink_tb = av_buffersink_get_time_base(filt_sink_);
+        for (;;) {
+            av_frame_unref(filt_frame_);
+            if (av_buffersink_get_frame(filt_sink_, filt_frame_) < 0) break;
+            filt_frame_->pts = av_rescale_q(filt_frame_->pts, sink_tb, ctx_->time_base);
+            submit(filt_frame_);
+            av_frame_unref(filt_frame_);
         }
-        if (out_frame == filt_frame_) av_frame_unref(filt_frame_);
     }
 
 private:
@@ -313,7 +316,9 @@ private:
         // 59.94fps, far more than any real jitter can collide on, while
         // `framerate` (used for encoder rate control) stays frame-accurate.
         ctx_->time_base      = AVRational{1, 1'000'000};
-        ctx_->framerate      = AVRational{int(mode.fps_num), int(mode.fps_den)};
+        // Interlaced sources are deinterlaced to one frame per FIELD (yadif mode=1), so the
+        // encoded stream runs at twice the capture frame rate (1080i59.94 -> 1080p59.94).
+        ctx_->framerate      = AVRational{int(mode.fps_num) * (mode.interlaced ? 2 : 1), int(mode.fps_den)};
         ctx_->bit_rate       = int64_t(cfg.bitrate_kbps) * 1000;
         ctx_->rc_max_rate    = ctx_->bit_rate;
         // One-frame VBV: constrains the encoder to no more than one frame's
@@ -325,7 +330,7 @@ private:
         // and overflowed the receiver buffer, causing breakups above 5 Mbps.
         {
             const int fps = std::max(1,
-                int(mode.fps_num) / std::max(1, int(mode.fps_den)));
+                int(mode.fps_num) * (mode.interlaced ? 2 : 1) / std::max(1, int(mode.fps_den)));
             ctx_->rc_buffer_size = ctx_->bit_rate / std::max(fps, 30);
         }
         ctx_->gop_size       = cfg.gop;
@@ -476,7 +481,7 @@ private:
         // fixed one — the old blend always treated odd rows as "wrong"
         // regardless of actual field dominance, which would smear the wrong
         // field on sources where that assumption didn't hold.
-        const char* filter_descr = "yadif=mode=0:parity=-1:deint=0";
+        const char* filter_descr = "yadif=mode=1:parity=-1:deint=0";
         int ret = avfilter_graph_parse_ptr(filt_graph_, filter_descr, &inputs, &outputs, nullptr);
         avfilter_inout_free(&inputs);
         avfilter_inout_free(&outputs);
