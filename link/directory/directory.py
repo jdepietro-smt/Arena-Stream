@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TTL = float(os.environ.get("LINK_TTL", "4"))
 KEY = os.environ.get("LINK_KEY", "")
 PORT = int(os.environ.get("LINK_PORT", "8002"))
+TRUST_PROXY = os.environ.get("LINK_TRUST_PROXY") == "1"
 MAX_BODY = 8192
 FIELDS = ("id", "name", "format", "source", "codec", "kbps", "lanIps", "directPort", "relay", "version")
 
@@ -24,8 +25,9 @@ _encoders = {}   # id -> {announce fields..., pubIp, seen}
 
 
 def _client_ip(h):
-    # Behind a proxy the first X-Forwarded-For hop is the caller.
-    fwd = h.headers.get("X-Forwarded-For")
+    # Only behind a reverse proxy (LINK_TRUST_PROXY=1) is the first X-Forwarded-For hop the
+    # caller; exposed directly, that header is client-controlled and must be ignored.
+    fwd = h.headers.get("X-Forwarded-For") if TRUST_PROXY else None
     return fwd.split(",")[0].strip() if fwd else h.client_address[0]
 
 
