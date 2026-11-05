@@ -518,6 +518,8 @@ int main(int argc, char** argv) {
         std::cerr << "sdi_decoder: software decode\n";
     }
     AVFrame* hwframe = av_frame_alloc();   // receives GPU surfaces; vframe holds the CPU copy
+    bool hw_got_frame = false;             // hardware decode has delivered at least one picture
+    int  hw_copy_fail = 0, hw_pkts = 0;    // evidence it never will
     // NVENC writes one slice per frame, so slice threading is effectively a single
     // thread. That is fine on a fast CPU, but a slow decode PC then can't hold 60 fps
     // (measured 60 ms/frame). If decoding averages over kSlowDecodeMs, the decoder is
@@ -621,12 +623,28 @@ int main(int argc, char** argv) {
                 std::cerr << "sdi_decoder: decode is slow on this PC - switched to " << vdec_ctx->thread_count
                           << " frame threads (a little more delay, keeps up at 60 fps)\n";
             }
+            // A GPU that opens but never delivers a picture (driver quirk, failed copy-back)
+            // would leave the viewer with a black window: give up on it and decode in software.
+            if (hw_name && !hw_got_frame && (hw_copy_fail >= 5 || ++hw_pkts > 150)) {
+                std::cerr << "sdi_decoder: hardware decode gave no picture (" << hw_name
+                          << ") - falling back to software decode\n";
+                avcodec_free_context(&vdec_ctx);
+                vdec_ctx = avcodec_alloc_context3(vdec);
+                avcodec_parameters_to_context(vdec_ctx, vpar);
+                vdec_ctx->thread_count = 4;
+                vdec_ctx->thread_type  = FF_THREAD_SLICE;
+                vdec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY;
+                avcodec_open2(vdec_ctx, vdec, nullptr);
+                hw_name = nullptr;
+                stats.decoder = "software";
+            }
             const auto t_dec0 = std::chrono::steady_clock::now();
             if (avcodec_send_packet(vdec_ctx, pkt) >= 0) {
                 while (avcodec_receive_frame(vdec_ctx, hwframe) == 0) {
                     av_frame_unref(vframe);
                     if (hw_name && hwframe->format == g_hw_pix_fmt) {
-                        if (av_hwframe_transfer_data(vframe, hwframe, 0) < 0) { av_frame_unref(hwframe); continue; }
+                        if (av_hwframe_transfer_data(vframe, hwframe, 0) < 0) { ++hw_copy_fail; av_frame_unref(hwframe); continue; }
+                        hw_got_frame = true;
                         av_frame_copy_props(vframe, hwframe);
                         av_frame_unref(hwframe);
                     } else {

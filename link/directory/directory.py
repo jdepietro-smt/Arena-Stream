@@ -16,7 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TTL = float(os.environ.get("LINK_TTL", "4"))
 KEY = os.environ.get("LINK_KEY", "")
 PORT = int(os.environ.get("LINK_PORT", "8002"))
-TRUST_PROXY = os.environ.get("LINK_TRUST_PROXY") == "1"
+RELAY_SECRET = os.environ.get("LINK_RELAY_SECRET", "")
+TRUST_PROXY =os.environ.get("LINK_TRUST_PROXY") == "1"
 MAX_BODY = 8192
 FIELDS = ("id", "name", "format", "source", "codec", "kbps", "lanIps", "directPort", "relay", "version")
 
@@ -80,6 +81,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, {"ok": True, "yourIp": entry["pubIp"]})
 
     def do_GET(self):
+        if self.path == "/v1/config":
+            # Same access key as everything else; lets encoders pick up the relay passphrase
+            # without it being baked into the installer.
+            if not self._authed():
+                return
+            return self._send(200, {"relaySecret": RELAY_SECRET})
         if self.path != "/v1/encoders":
             return self._send(404, {"error": "not found"})
         if not self._authed():

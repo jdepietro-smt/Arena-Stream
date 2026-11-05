@@ -24,6 +24,13 @@ if [ ! -f /etc/arena-link.env ]; then
 fi
 KEY="$(grep -m1 '^LINK_KEY=' /etc/arena-link.env | cut -d= -f2-)"
 
+# Relay passphrase: copied from the low-latency relay's own config so it is never typed or pasted.
+if ! grep -q '^LINK_RELAY_SECRET=' /etc/arena-link.env && [ -f /etc/arena-lowlat.env ]; then
+  RS="$(grep -m1 '^LL_PUBLISH_SECRET=' /etc/arena-lowlat.env | cut -d= -f2-)"
+  [ -n "$RS" ] && printf 'LINK_RELAY_SECRET=%s\n' "$RS" >> /etc/arena-link.env
+fi
+grep -q '^LINK_RELAY_SECRET=' /etc/arena-link.env || echo "WARNING: no relay passphrase found - remote (internet) decoders will not work"
+
 cat > /etc/systemd/system/arena-link-directory.service <<'UNIT'
 [Unit]
 Description=Arena Link directory (encoders on air)
