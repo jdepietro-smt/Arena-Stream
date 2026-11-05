@@ -174,8 +174,24 @@ int main(int argc, char** argv) {
         std::jthread pw([&] {
             sdi::PreviewJpeg preview;
             auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+            auto last_levels = std::chrono::steady_clock::now();
             while (auto f = vq.pop()) {
                 const auto now = std::chrono::steady_clock::now();
+                // LINK_DIAG_LEVELS=1: print the captured luma range once a second (8-bit UYVY only),
+                // to check that SDI levels (black 16, white 235) arrive unchanged.
+                if (std::getenv("LINK_DIAG_LEVELS") && f->mode.format == sdi::PixelFormat::UYVY422_8 &&
+                    now - last_levels >= std::chrono::seconds(1)) {
+                    last_levels = now;
+                    unsigned hist[256] = {};
+                    size_t n = 0;
+                    for (uint32_t y = 0; y < f->mode.height; ++y) {
+                        const uint8_t* row = f->data.data() + y * f->stride;
+                        for (uint32_t x = 1; x < f->mode.width * 2; x += 2) { ++hist[row[x]]; ++n; }
+                    }
+                    auto pct = [&](double p) { size_t acc = 0, want = size_t(double(n) * p); for (int v = 0; v < 256; ++v) { acc += hist[v]; if (acc >= want) return v; } return 255; };
+                    int lo = 0, hi = 255; while (lo < 255 && !hist[lo]) ++lo; while (hi > 0 && !hist[hi]) --hi;
+                    std::fprintf(stderr, "levels: capture Y min=%d p0.1=%d p99.9=%d max=%d\n", lo, pct(0.001), pct(0.999), hi);
+                }
                 if (now - last_preview < std::chrono::milliseconds(100)) continue;
                 last_preview = now;
                 const std::string jpg = preview.make(*f);

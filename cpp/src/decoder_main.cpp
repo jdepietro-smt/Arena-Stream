@@ -738,6 +738,29 @@ int main(int argc, char** argv) {
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
                     }
 
+                    // LINK_DIAG_LEVELS=1: luma range of the decoded picture and of what the SDI output
+                    // conversion produces from it, once a second at full resolution. Works without
+                    // output hardware (--preview-only) by converting into a scratch buffer.
+                    static auto diag_last = std::chrono::steady_clock::now();
+                    static const bool diag_levels = std::getenv("LINK_DIAG_LEVELS") != nullptr;
+                    if (diag_levels && sws && have_out_mode && std::chrono::steady_clock::now() - diag_last >= std::chrono::seconds(1)) {
+                        diag_last = std::chrono::steady_clock::now();
+                        std::vector<uint8_t> scratch(size_t(out_mode.width) * out_mode.height * 2);
+                        uint8_t* sd[4] = { scratch.data(), nullptr, nullptr, nullptr };
+                        int sl[4] = { int(out_mode.width) * 2, 0, 0, 0 };
+                        sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height, sd, sl);
+                        auto levels = [](const uint8_t* base, int stride, int w, int h, int step, int off) {
+                            unsigned hist[256] = {}; size_t n = 0;
+                            for (int y = 0; y < h; ++y) for (int x = off; x < w * step; x += step) { ++hist[base[size_t(y) * stride + x]]; ++n; }
+                            int lo = 0, hi = 255; while (lo < 255 && !hist[lo]) ++lo; while (hi > 0 && !hist[hi]) --hi;
+                            size_t acc = 0; int p999 = 255; for (int v = 0; v < 256; ++v) { acc += hist[v]; if (acc >= size_t(double(n) * 0.999)) { p999 = v; break; } }
+                            char b[64]; std::snprintf(b, sizeof b, "min=%d p99.9=%d max=%d", lo, p999, hi); return std::string(b);
+                        };
+                        std::cerr << "levels: decoded(" << av_get_pix_fmt_name(AVPixelFormat(vframe->format)) << ", range="
+                                  << av_color_range_name(vframe->color_range) << ") Y " << levels(vframe->data[0], vframe->linesize[0], vframe->width, vframe->height, 1, 0)
+                                  << " | sdi-out Y " << levels(scratch.data(), sl[0], int(out_mode.width), int(out_mode.height), 2, 1) << "\n";
+                    }
+
                     if (frame_behind) ++skipped;
                     if (sws && playout_started && !frame_behind) {
                         uint8_t* dst[4]     = { uyvy_buf.data(), nullptr, nullptr, nullptr };
