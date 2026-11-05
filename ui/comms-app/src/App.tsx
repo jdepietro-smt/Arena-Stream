@@ -5,6 +5,7 @@ import './App.css'
 
 /** LCD display colours: [css colour, "r, g, b" for glows]. */
 const LCD_COLORS = {
+  cyan: ['#5ef2ff', '94, 242, 255'],
   amber: ['#ffb938', '255, 185, 56'],
   green: ['#7dff9a', '125, 255, 154'],
   white: ['#e8f1ff', '232, 241, 255'],
@@ -38,6 +39,7 @@ interface Prefs {
   spatial: boolean; spread: number; pans: Record<string, number>
   speakAlerts: boolean; alertTones: boolean; micRelease: boolean
   musicSrcBy: Record<string, string>; musicLinkBy: Record<string, string>
+  themeV2?: boolean // the display colour moved to cyan once; after that it is the user's choice
   hidden: string[]; order: string[] // my own panel: channels I took off it, and the order of the rest
 }
 
@@ -56,10 +58,15 @@ function loadPrefs(): Prefs {
       : 'ws://localhost:8900',
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
-    levels: {}, density: 'compact', lcdColor: 'amber', lcdBright: 1, night: false,
+    levels: {}, density: 'compact', lcdColor: 'cyan', lcdBright: 1, night: false,
     spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {}, hidden: [], order: [],
   }
-  try { return { ...d, ...JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}') } } catch { return d }
+  try {
+    const saved = JSON.parse(localStorage.getItem('arena-comms-prefs') ?? '{}')
+    const out = { ...d, ...saved }
+    if (!saved.themeV2) { if (out.lcdColor === 'amber') out.lcdColor = 'cyan'; out.themeV2 = true }
+    return out
+  } catch { return d }
 }
 
 const SESSION_KEY = 'arena-comms-session'
