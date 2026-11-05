@@ -13,6 +13,7 @@
 // Rules:
 //   "gpu" (or empty)  -> H.264 only, vendor-specific first, then the
 //                        vendor-neutral Media Foundation path, then libx264.
+//   "hevc" / "h265"   -> H.265 on the GPU (vendor chain), then libx264 so a stream always goes out.
 //   "cpu"             -> libx264.
 //   anything else     -> an explicit encoder name: tried on its own, then
 //                        libx264. It never walks the GPU chain — an explicit
@@ -66,7 +67,7 @@ inline DestKind dest_kind(const std::string& primary, const std::string& seconda
 }
 
 inline bool is_auto(const std::string& request) {
-    return request.empty() || request == "gpu" || request == "cpu";
+    return request.empty() || request == "gpu" || request == "cpu" || request == "hevc" || request == "h265";
 }
 
 // True when this request can't be carried by the destination as asked and
@@ -75,9 +76,15 @@ inline bool refused(const std::string& request, DestKind kind) {
     return kind == DestKind::MpegTs && is_av1(request);
 }
 
+// "hevc" / "h265": H.265 on whichever GPU works. If none opens, the stream still goes out as
+// H.264 rather than not at all; the decoder identifies the codec from the stream itself.
+inline bool is_hevc_auto(const std::string& request) { return request == "hevc" || request == "h265"; }
+
 inline std::vector<std::string> candidate_chain(const std::string& request, DestKind kind) {
     if (request.empty() || request == "gpu")
         return { "h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", kSoftware };
+    if (is_hevc_auto(request))
+        return { "hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_mf", kSoftware };
     if (request == "cpu" || request == kSoftware)
         return { kSoftware };
 
