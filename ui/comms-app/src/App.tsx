@@ -469,7 +469,6 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
       <div className="lcd legend">
         {engine.spatial.on && <span className="pantick" title={`Stereo position ${Math.round(engine.channelPan(ch.id) * 100)}`}><i style={{ left: `${(engine.channelPan(ch.id) + 1) * 50}%` }} /></span>}
         <div className="lg-top">
-          <span className="lg-num">{index < 9 ? index + 1 : ''}</span>
           <span className="lg-name">{ch.name}</span>
           {ch.ifb && <span className="lg-tag" title="Interrupt foldback: ducks the program feed for listeners">IFB</span>}
         </div>
