@@ -456,6 +456,9 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
   const carriesMusic = !!ch.withMusic && engine.media === 'sfu' // music needs the SFU
   return (
     <div className={`keymod ${talking ? 'talking' : ''} ${calling ? 'calling' : ''} ${alert && !calling ? `alert-${alert.level}` : ''} ${canTalk ? '' : 'rx-only'}`} style={{ ['--ch' as string]: ch.color }}>
+      <button className={`cap listenkey ${listening && canListen ? 'on' : ''}`} disabled={!canListen} onClick={() => engine.setListen(ch.id, !listening)}>
+        <i className={`led green ${listening && canListen ? 'on' : ''}`} />{!canListen ? 'NO RX' : 'LISTEN'}
+      </button>
       <div className="lcd legend">
         {engine.spatial.on && <span className="pantick" title={`Stereo position ${Math.round(engine.channelPan(ch.id) * 100)}`}><i style={{ left: `${(engine.channelPan(ch.id) + 1) * 50}%` }} /></span>}
         <div className="lg-top">
@@ -486,9 +489,6 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
             onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
       </div>
       <div className="subkeys">
-        <button className="cap sm" disabled={!canListen} onClick={() => engine.setListen(ch.id, !listening)}>
-          <i className={`led green ${listening && canListen ? 'on' : ''}`} />{!canListen ? 'NO RX' : 'LISTEN'}
-        </button>
         <button className="cap sm" disabled={!canTalk} onClick={() => engine.toggleLatch(ch.id)}>
           <i className={`led amber ${latched ? 'on' : ''}`} />LATCH
         </button>
@@ -507,6 +507,9 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
   const state = st === 'live' ? 'LIVE' : st === 'connecting' ? 'CONNECTING' : st === 'error' ? 'OFFLINE' : 'OFF'
   return (
     <div className={`keymod program ${engine.ducked ? 'ducked' : ''}`} style={{ ['--ch' as string]: '#a78bfa' }}>
+      <button className="cap listenkey" onClick={() => engine.toggleProgramMute()}>
+        <i className={`led green ${engine.programMuted ? '' : 'on'}`} />{engine.programMuted ? 'MUTED' : 'LISTEN'}
+      </button>
       <div className="lcd legend">
         <div className="lg-top">
           <span className="lg-num">▶</span>
@@ -521,11 +524,6 @@ function ProgramKey({ engine }: { engine: CommsEngine }) {
       <div className="pgm-mid">
         <LedMeter engine={engine} source="program" />
         <Fader label="LEVEL" value={engine.programVolume} min={0} max={1} onChange={v => engine.setProgramVolume(v)} readout={`${Math.round(engine.programVolume * 100)}`} />
-      </div>
-      <div className="subkeys one">
-        <button className="cap sm" onClick={() => engine.toggleProgramMute()}>
-          <i className={`led green ${engine.programMuted ? '' : 'on'}`} />{engine.programMuted ? 'MUTED' : 'LISTEN'}
-        </button>
       </div>
     </div>
   )
@@ -598,6 +596,9 @@ function MusicKey({ ch, engine }: { ch: Channel; engine: CommsEngine }) {
   const listening = engine.listen.has(ch.id)
   return (
     <div className={`keymod music ${engine.ducked && !ch.noDuck ? 'ducked' : ''}`} style={{ ['--ch' as string]: ch.color }}>
+      <button className="cap listenkey" disabled={!ch.canListen} onClick={() => engine.setListen(ch.id, !listening)}>
+        <i className={`led green ${listening ? 'on' : ''}`} />{listening ? 'LISTEN' : 'MUTED'}
+      </button>
       <div className="lcd legend">
         <div className="lg-top">
           <span className="lg-num">♪</span>
@@ -607,11 +608,6 @@ function MusicKey({ ch, engine }: { ch: Channel; engine: CommsEngine }) {
       <div className="pgm-mid">
         <Fader label="LEVEL" value={engine.channelLevel(ch.id)} min={0} max={1}
           onChange={v => engine.setChannelLevel(ch.id, v)} readout={`${Math.round(engine.channelLevel(ch.id) * 100)}`} />
-      </div>
-      <div className="subkeys one">
-        <button className="cap sm" disabled={!ch.canListen} onClick={() => engine.setListen(ch.id, !listening)}>
-          <i className={`led green ${listening ? 'on' : ''}`} />{listening ? 'LISTEN' : 'MUTED'}
-        </button>
       </div>
     </div>
   )
