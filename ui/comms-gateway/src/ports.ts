@@ -70,6 +70,10 @@ export interface GatewayConfig {
   server: string; username: string; password: string; autoConnect: boolean
   /** Send and receive audio over TCP instead of UDP (for a network that drops UDP packets). Applies after a restart. */
   forceTcp?: boolean
+  /** Switch to TCP by itself (with a restart) when the line keeps losing audio. On unless set to false. */
+  autoTcp?: boolean
+  /** When the gateway last switched itself to TCP, so the page can say so. */
+  tcpAutoAt?: number
   /** Backup internet line: switch to a second network adapter when the main one loses audio. Needs administrator rights. */
   backup?: { enabled: boolean; primary: string; secondary: string }
   device: DeviceCfg

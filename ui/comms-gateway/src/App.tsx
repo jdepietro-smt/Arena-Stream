@@ -79,6 +79,21 @@ export default function App() {
 
   const bk = cfg?.backup
   useEffect(() => { if (cfg) failover.configure(bk) }, [!!cfg, bk?.enabled, bk?.primary, bk?.secondary]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Automatic TCP: when UDP keeps losing audio, restart in TCP mode (TCP resends what the line drops). Waits for the backup line first.
+  const lossy = useRef(0)
+  useEffect(() => {
+    if (!cfg) return
+    const t = setInterval(() => {
+      const l = engine.linkNow
+      const bad = engine.status === 'connected' && l.ok && l.tx > 8
+      lossy.current = bad ? lossy.current + 1 : 0
+      if (lossy.current >= 12 && cfg.autoTcp !== false && !cfg.forceTcp && !cfg.backup?.enabled && window.gw) {
+        lossy.current = -1000 // once
+        void saveConfig({ ...cfg, forceTcp: true, tcpAutoAt: Date.now() }).then(() => window.gw?.relaunch())
+      }
+    }, 2000)
+    return () => clearInterval(t)
+  }, [cfg, engine])
   const [net, setNet] = useState<{ admin: boolean; adapters: NetAdapter[] } | null>(null)
   const refreshNet = () => { void window.gw?.netInfo().then(setNet).catch(() => setNet(null)) }
   useEffect(() => { if (page === 'settings') refreshNet() }, [page])
@@ -314,6 +329,8 @@ export default function App() {
                 <label className="check" title="TCP resends what the network drops, at the cost of a little extra delay."><input type="checkbox" checked={!!cfg.forceTcp} onChange={e => patch({ forceTcp: e.target.checked })} />Send audio over TCP</label>
                 {!!cfg.forceTcp !== tcpAtStart.current && <button className="btn sm" onClick={() => void saveConfig(cfg).then(() => window.gw?.relaunch())}>Restart to apply</button>}
               </div>
+              <label className="check" title="If the line keeps losing audio, the gateway restarts itself in TCP mode."><input type="checkbox" checked={cfg.autoTcp !== false} onChange={e => patch({ autoTcp: e.target.checked })} />Switch to TCP automatically if the line keeps losing audio</label>
+              {cfg.forceTcp && cfg.tcpAutoAt && <p className="hint">Switched to TCP by itself at {new Date(cfg.tcpAutoAt).toLocaleString()} because the line was losing audio. Untick "Send audio over TCP" and restart to go back to UDP.</p>}
               <p className="hint">Only turn this on if Home shows packet loss that won't go away. Leave it off otherwise: it adds delay.</p>
             </section>
             <section className="card">
