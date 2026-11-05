@@ -745,6 +745,9 @@ int main(int argc, char** argv) {
                             }
                             playout_started = true;
                             uyvy_buf.resize(size_t(out_mode.width) * out_mode.height * 2);
+                            std::cerr << "sdi_decoder: SDI output levels: "
+                                      << (args.out_soft_range ? "full range, soft highlights" : args.out_full_range ? "full range, hard" : "standard 16-235")
+                                      << " (" << args.backend << " " << args.device_id << ")\n";
                         }
                     }
 
