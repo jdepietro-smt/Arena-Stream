@@ -1,5 +1,5 @@
-// Small JPEG snapshots of the captured picture for the app's encoder monitor.
-// Cheap on purpose: downscaled to <= 320 px wide, ~10 snapshots a second, and made on the
+// JPEG snapshots of the captured picture for the app's encoder monitor.
+// Kept cheap: downscaled to <= 960 px wide, ~10 snapshots a second, and made on the
 // video worker thread after the frame has been handed to the real encoder, so it cannot
 // delay the stream.
 #pragma once
@@ -23,7 +23,7 @@ public:
     ~PreviewJpeg() { release(); }
 
     // Returns the JPEG as base64 text, or "" if this frame can't be previewed.
-    std::string make(const VideoFrame& f, int max_width = 320) {
+    std::string make(const VideoFrame& f, int max_width = 960) {
         AVPixelFormat src = AV_PIX_FMT_NONE;
         if (f.mode.format == PixelFormat::UYVY422_8) src = AV_PIX_FMT_UYVY422;
 #if defined(AV_PIX_FMT_V210)
@@ -72,9 +72,9 @@ private:
         ctx_->pix_fmt = AV_PIX_FMT_YUVJ420P;
         ctx_->time_base = AVRational{1, 25};
         ctx_->flags |= AV_CODEC_FLAG_QSCALE;
-        ctx_->global_quality = FF_QP2LAMBDA * 6;      // ~quality 85: fine for a monitor
+        ctx_->global_quality = FF_QP2LAMBDA * 5;     // high quality: this is what the operator judges the picture by
         if (avcodec_open2(ctx_, c, nullptr) < 0) { release(); return false; }
-        sws_ = sws_getContext(sw, sh, src, w_, h_, AV_PIX_FMT_YUVJ420P, SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        sws_ = sws_getContext(sw, sh, src, w_, h_, AV_PIX_FMT_YUVJ420P, SWS_BICUBIC, nullptr, nullptr, nullptr);
         frame_ = av_frame_alloc();
         frame_->format = AV_PIX_FMT_YUVJ420P; frame_->width = w_; frame_->height = h_;
         pkt_ = av_packet_alloc();
