@@ -79,6 +79,8 @@ struct Args {
     bool        force_progressive = false; // diagnostic: report the source as progressive to the
                                             // playout device regardless of its real interlace flag
     std::string reference = "freerun";     // AJA only: "freerun" or "input1".."input8"
+    bool        out_full_range = false;    // send the SDI picture as full range (0-255) instead of 16-235,
+                                            // for TVs that treat SDI as full range and so look washed out
 };
 
 static bool parse_args(int argc, char** argv, Args& a) {
@@ -94,6 +96,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (arg=="--preview-only")      a.preview_only = true;
         else if (arg=="--force-progressive") a.force_progressive = true;
         else if (arg=="--reference")         a.reference  = nxt();
+        else if (arg=="--out-range")         a.out_full_range = std::string_view(nxt()) == "full";
         else if (arg=="-h"||arg=="--help") {
             std::cerr << "sdi_decoder --src srt://HOST:PORT --backend decklink|aja "
                          "--device N --conn N [--latency MS] [--preview-only] [--force-progressive] "
@@ -736,6 +739,12 @@ int main(int argc, char** argv) {
                             vframe->width, vframe->height, sws_src_fmt,
                             int(out_mode.width), int(out_mode.height), AV_PIX_FMT_UYVY422,
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
+                        // Stretch 16-235 to 0-255 on the way out (the stream itself is untouched).
+                        if (sws && args.out_full_range) {
+                            const int* co = sws_getCoefficients(SWS_CS_ITU709);
+                            sws_setColorspaceDetails(sws, co, vframe->color_range == AVCOL_RANGE_JPEG ? 1 : 0,
+                                                     co, 1, 0, 1 << 16, 1 << 16);
+                        }
                     }
 
                     // LINK_DIAG_LEVELS=1: luma range of the decoded picture and of what the SDI output
