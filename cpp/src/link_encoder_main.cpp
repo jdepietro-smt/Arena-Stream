@@ -12,6 +12,7 @@
 #include "encoder.h"
 #include "frame_queue.h"
 #include "http_post.h"
+#include "preview_jpeg.h"
 #include "ts_fanout.h"
 #include "ts_muxer.h"
 
@@ -52,6 +53,7 @@ struct Args {
     int         relay_latency_ms = 100;
     std::string directory;                    // "http://host:port"; empty = no announce
     std::string key;
+    bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
 };
 
 void usage() {
@@ -88,6 +90,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--relay-latency")    a.relay_latency_ms = std::atoi(next());
         else if (k == "--directory")        a.directory = next();
         else if (k == "--key")              a.key = next();
+        else if (k == "--preview")          a.preview = true;
         else if (k == "-h" || k == "--help") { usage(); return false; }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); usage(); return false; }
     }
@@ -190,9 +193,21 @@ int main(int argc, char** argv) {
 
     // ---- Workers: queue -> encode -> mux. Fanout never blocks, so no extra network queue. ----
     std::jthread vworker([&] {
+        sdi::PreviewJpeg preview;
+        auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
         while (auto f = vq.pop()) {
             if (const int want = g_bitrate_req.exchange(0)) enc.set_bitrate(want);
             enc.encode(*f, [&](AVPacket* pkt) { mux.write_video(pkt); });
+            // Monitor picture for the app: after the real encode, ~10 per second.
+            const auto now = std::chrono::steady_clock::now();
+            if (args.preview && now - last_preview >= std::chrono::milliseconds(100)) {
+                last_preview = now;
+                const std::string jpg = preview.make(*f);
+                if (!jpg.empty()) {
+                    std::printf("{\"type\":\"preview\",\"w\":%d,\"h\":%d,\"jpg\":\"%s\"}\n", preview.width(), preview.height(), jpg.c_str());
+                    std::fflush(stdout);
+                }
+            }
         }
     });
     std::jthread aworker([&] {
