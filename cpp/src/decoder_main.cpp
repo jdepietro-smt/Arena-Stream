@@ -81,7 +81,25 @@ struct Args {
     std::string reference = "freerun";     // AJA only: "freerun" or "input1".."input8"
     bool        out_full_range = false;    // send the SDI picture as full range (0-255) instead of 16-235,
                                             // for TVs that treat SDI as full range and so look washed out
+    bool        out_soft_range = false;    // same stretch, but 100% white lands at ~96% and super-whites
+                                            // are squeezed into the rest instead of clipping flat
 };
+
+// Full-range output with highlight protection, applied in place to a UYVY buffer.
+// Luma: 16..235 -> 0..245 (linear), 235..255 -> 245..255. Chroma: 16..240 -> 0..255 about 128.
+static void apply_soft_range(uint8_t* p, size_t n) {
+    static uint8_t ly[256], lc[256];
+    static bool init = false;
+    if (!init) {
+        for (int v = 0; v < 256; ++v) {
+            const double y = v <= 235 ? (v - 16) * 245.0 / 219.0 : 245.0 + (v - 235) * 10.0 / 20.0;
+            ly[v] = uint8_t(std::clamp(int(y + 0.5), 0, 255));
+            lc[v] = uint8_t(std::clamp(int((v - 128) * 255.0 / 224.0 + 128.5), 0, 255));
+        }
+        init = true;
+    }
+    for (size_t i = 0; i + 1 < n; i += 2) { p[i] = lc[p[i]]; p[i + 1] = ly[p[i + 1]]; }   // U/V then Y
+}
 
 static bool parse_args(int argc, char** argv, Args& a) {
     for (int i = 1; i < argc; ++i) {
@@ -96,7 +114,7 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (arg=="--preview-only")      a.preview_only = true;
         else if (arg=="--force-progressive") a.force_progressive = true;
         else if (arg=="--reference")         a.reference  = nxt();
-        else if (arg=="--out-range")         a.out_full_range = std::string_view(nxt()) == "full";
+        else if (arg=="--out-range")         { const std::string_view v = nxt(); a.out_full_range = v == "full"; a.out_soft_range = v == "soft"; }
         else if (arg=="-h"||arg=="--help") {
             std::cerr << "sdi_decoder --src srt://HOST:PORT --backend decklink|aja "
                          "--device N --conn N [--latency MS] [--preview-only] [--force-progressive] "
@@ -758,12 +776,14 @@ int main(int argc, char** argv) {
                         uint8_t* sd[4] = { scratch.data(), nullptr, nullptr, nullptr };
                         int sl[4] = { int(out_mode.width) * 2, 0, 0, 0 };
                         sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height, sd, sl);
+                        if (args.out_soft_range) apply_soft_range(scratch.data(), scratch.size());
                         auto levels = [](const uint8_t* base, int stride, int w, int h, int step, int off) {
                             unsigned hist[256] = {}; size_t n = 0;
                             for (int y = 0; y < h; ++y) for (int x = off; x < w * step; x += step) { ++hist[base[size_t(y) * stride + x]]; ++n; }
                             int lo = 0, hi = 255; while (lo < 255 && !hist[lo]) ++lo; while (hi > 0 && !hist[hi]) --hi;
                             size_t acc = 0; int p999 = 255; for (int v = 0; v < 256; ++v) { acc += hist[v]; if (acc >= size_t(double(n) * 0.999)) { p999 = v; break; } }
-                            char b[64]; std::snprintf(b, sizeof b, "min=%d p99.9=%d max=%d", lo, p999, hi); return std::string(b);
+                            size_t top = 0; for (int v = 250; v < 256; ++v) top += hist[v];
+                            char b[96]; std::snprintf(b, sizeof b, "min=%d p99.9=%d max=%d >=250:%.2f%%", lo, p999, hi, 100.0 * double(top) / double(n)); return std::string(b);
                         };
                         std::cerr << "levels: decoded(" << av_get_pix_fmt_name(AVPixelFormat(vframe->format)) << ", range="
                                   << av_color_range_name(vframe->color_range) << ") Y " << levels(vframe->data[0], vframe->linesize[0], vframe->width, vframe->height, 1, 0)
@@ -776,6 +796,7 @@ int main(int argc, char** argv) {
                         int      dst_ls[4]  = { int(out_mode.width) * 2, 0, 0, 0 };
                         sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height,
                                   dst, dst_ls);
+                        if (args.out_soft_range) apply_soft_range(uyvy_buf.data(), uyvy_buf.size());
 
                         sdi::VideoFrame vf;
                         vf.data.assign(uyvy_buf.begin(), uyvy_buf.end());
