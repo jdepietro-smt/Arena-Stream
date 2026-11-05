@@ -54,6 +54,7 @@ struct Args {
     std::string directory;                    // "http://host:port"; empty = no announce
     std::string key;
     bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
+    bool        monitor = false;              // capture + preview only: no encode, no network
 };
 
 void usage() {
@@ -91,6 +92,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--directory")        a.directory = next();
         else if (k == "--key")              a.key = next();
         else if (k == "--preview")          a.preview = true;
+        else if (k == "--monitor")          a.monitor = true;
         else if (k == "-h" || k == "--help") { usage(); return false; }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); usage(); return false; }
     }
@@ -159,6 +161,36 @@ int main(int argc, char** argv) {
         [&](sdi::AudioFrame&& f) { aq.push(std::move(f)); });
     if (!cap_ok) { std::cerr << "error: capture start failed\n"; return 1; }
     const sdi::VideoMode mode = capture->current_mode();
+
+    // ---- Monitor only: show the input in the app before going live. ----
+    // Captures and sends small preview pictures; nothing is encoded, sent or announced.
+    // The app stops this process (releasing the card) before it starts the real encoder.
+    if (args.monitor) {
+        std::thread([&] {
+            std::string line;
+            while (std::getline(std::cin, line)) if (line == "quit") break;
+            g_stop = true;
+        }).detach();
+        std::jthread pw([&] {
+            sdi::PreviewJpeg preview;
+            auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+            while (auto f = vq.pop()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - last_preview < std::chrono::milliseconds(100)) continue;
+                last_preview = now;
+                const std::string jpg = preview.make(*f);
+                if (jpg.empty()) continue;
+                std::printf("{\"type\":\"preview\",\"w\":%d,\"h\":%d,\"jpg\":\"%s\"}\n", preview.width(), preview.height(), jpg.c_str());
+                std::fflush(stdout);
+            }
+        });
+        std::jthread aw([&] { while (aq.pop()) {} });   // keep the audio queue from backing up
+        while (!g_stop) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        capture->stop();
+        vq.close();
+        aq.close();
+        return 0;
+    }
 
     // ---- Encode ----
     sdi::EncoderConfig enc_cfg;
