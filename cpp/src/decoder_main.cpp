@@ -371,6 +371,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--list") { list_devices(); return 0; }
     }
+    sdi::latency::start_clock_sync();   // measure delay against real time even if this PC's clock is off
 
     Args args;
     if (!parse_args(argc, argv, args)) return 2;

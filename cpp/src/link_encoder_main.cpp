@@ -127,6 +127,7 @@ std::string host_name() {
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--list") { sdi::devlist::list_devices(); return 0; }
+    sdi::latency::start_clock_sync();   // stamp frames with real time even if this PC's clock is off
     Args args;
     if (!parse(argc, argv, args)) return 2;
     std::signal(SIGINT, on_signal);
