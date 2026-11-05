@@ -81,24 +81,28 @@ struct Args {
     std::string reference = "freerun";     // AJA only: "freerun" or "input1".."input8"
     bool        out_full_range = false;    // send the SDI picture as full range (0-255) instead of 16-235,
                                             // for TVs that treat SDI as full range and so look washed out
-    bool        out_soft_range = false;    // same stretch, but 100% white lands at ~96% and super-whites
-                                            // are squeezed into the rest instead of clipping flat
+    int         white_pct = 100;           // peak white as a % of the range: below 100 rolls the highlights
+                                            // down (for a TV that renders whites too hot)
 };
 
-// Full-range output with highlight protection, applied in place to a UYVY buffer.
-// Luma: 16..235 -> 0..245 (linear), 235..255 -> 245..255. Chroma: 16..240 -> 0..255 about 128.
-static void apply_soft_range(uint8_t* p, size_t n) {
-    static uint8_t ly[256], lc[256];
-    static bool init = false;
-    if (!init) {
+// Highlight roll-down on the luma of a UYVY buffer, in place. Below the knee (65% of the range)
+// the picture is untouched; from there up, the range is compressed so that 100% white lands at
+// white_pct and anything brighter (super-whites) is squeezed along with it. Chroma is left alone.
+static void apply_white_rolloff(uint8_t* p, size_t n, bool full_range, int white_pct) {
+    static uint8_t lut[256];
+    static int built_for = -1;
+    const int key = white_pct * 2 + (full_range ? 1 : 0);
+    if (built_for != key) {
+        const double knee = 0.65, w = white_pct / 100.0, slope = (w - knee) / (1.0 - knee);
         for (int v = 0; v < 256; ++v) {
-            const double y = v <= 235 ? (v - 16) * 245.0 / 219.0 : 245.0 + (v - 235) * 10.0 / 20.0;
-            ly[v] = uint8_t(std::clamp(int(y + 0.5), 0, 255));
-            lc[v] = uint8_t(std::clamp(int((v - 128) * 255.0 / 224.0 + 128.5), 0, 255));
+            double t = full_range ? v / 255.0 : (v - 16) / 219.0;
+            if (t > knee) t = knee + (t - knee) * slope;
+            const double y = full_range ? t * 255.0 : 16.0 + t * 219.0;
+            lut[v] = uint8_t(std::clamp(int(y + 0.5), full_range ? 0 : 1, 254));
         }
-        init = true;
+        built_for = key;
     }
-    for (size_t i = 0; i + 1 < n; i += 2) { p[i] = lc[p[i]]; p[i + 1] = ly[p[i + 1]]; }   // U/V then Y
+    for (size_t i = 1; i < n; i += 2) p[i] = lut[p[i]];   // UYVY: luma is every second byte
 }
 
 static bool parse_args(int argc, char** argv, Args& a) {
@@ -114,7 +118,8 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (arg=="--preview-only")      a.preview_only = true;
         else if (arg=="--force-progressive") a.force_progressive = true;
         else if (arg=="--reference")         a.reference  = nxt();
-        else if (arg=="--out-range")         { const std::string_view v = nxt(); a.out_full_range = v == "full"; a.out_soft_range = v == "soft"; }
+        else if (arg=="--out-range")         { const std::string_view v = nxt(); a.out_full_range = v == "full" || v == "soft"; }
+        else if (arg=="--white-level")       a.white_pct  = std::clamp(std::atoi(nxt()), 60, 100);
         else if (arg=="-h"||arg=="--help") {
             std::cerr << "sdi_decoder --src srt://HOST:PORT --backend decklink|aja "
                          "--device N --conn N [--latency MS] [--preview-only] [--force-progressive] "
@@ -746,7 +751,8 @@ int main(int argc, char** argv) {
                             playout_started = true;
                             uyvy_buf.resize(size_t(out_mode.width) * out_mode.height * 2);
                             std::cerr << "sdi_decoder: SDI output levels: "
-                                      << (args.out_soft_range ? "full range, soft highlights" : args.out_full_range ? "full range, hard" : "standard 16-235")
+                                      << (args.out_full_range ? "full range 0-255" : "standard 16-235")
+                                      << ", white level " << args.white_pct << "%"
                                       << " (" << args.backend << " " << args.device_id << ")\n";
                         }
                     }
@@ -779,7 +785,7 @@ int main(int argc, char** argv) {
                         uint8_t* sd[4] = { scratch.data(), nullptr, nullptr, nullptr };
                         int sl[4] = { int(out_mode.width) * 2, 0, 0, 0 };
                         sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height, sd, sl);
-                        if (args.out_soft_range) apply_soft_range(scratch.data(), scratch.size());
+                        if (args.white_pct < 100) apply_white_rolloff(scratch.data(), scratch.size(), args.out_full_range, args.white_pct);
                         auto levels = [](const uint8_t* base, int stride, int w, int h, int step, int off) {
                             unsigned hist[256] = {}; size_t n = 0;
                             for (int y = 0; y < h; ++y) for (int x = off; x < w * step; x += step) { ++hist[base[size_t(y) * stride + x]]; ++n; }
@@ -799,7 +805,7 @@ int main(int argc, char** argv) {
                         int      dst_ls[4]  = { int(out_mode.width) * 2, 0, 0, 0 };
                         sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height,
                                   dst, dst_ls);
-                        if (args.out_soft_range) apply_soft_range(uyvy_buf.data(), uyvy_buf.size());
+                        if (args.white_pct < 100) apply_white_rolloff(uyvy_buf.data(), uyvy_buf.size(), args.out_full_range, args.white_pct);
 
                         sdi::VideoFrame vf;
                         vf.data.assign(uyvy_buf.begin(), uyvy_buf.end());
