@@ -25,6 +25,7 @@
 #ifdef SDI_WITH_AJA
 
 #include "aja_playout.h"
+#include "audio_drift.h"
 
 #include "ntv2card.h"
 #include "ntv2devicefeatures.h"
@@ -230,6 +231,7 @@ void AJAPlayoutDevice::playout_loop(std::stop_token st, const PlayoutConfig& cfg
     // in a lump (avoids the squeak).
     std::vector<int32_t> audio_carry;
     std::vector<int32_t> audio_padded;   // audio_carry expanded to card_channels width
+    AudioDriftTrim audio_trim(int(std::max<uint32_t>(1, impl_->our_channels)));
     const uint32_t fps_num = cfg.mode.fps_num ? cfg.mode.fps_num : 30000;
     const uint32_t fps_den = cfg.mode.fps_den ? cfg.mode.fps_den : 1001;
     // 48000/fps is essentially never an integer (e.g. 29.97fps → 1601.6
@@ -275,10 +277,14 @@ void AJAPlayoutDevice::playout_loop(std::stop_token st, const PlayoutConfig& cfg
         // Pull in whatever's newly arrived, then feed at most one frame
         // period's worth this cycle — the rest stays in audio_carry for
         // subsequent transfers instead of going out all at once.
-        while (auto audio = audio_queue_.try_pop()) {
-            audio_carry.insert(audio_carry.end(), audio->samples.begin(), audio->samples.end());
-        }
         const size_t our_ch = std::max<uint32_t>(1, impl_->our_channels);
+        // Source and card clocks differ by a few ppm: trim each chunk so audio_carry holds its
+        // settled depth instead of growing (audio drifting late) or running dry (clicks).
+        while (auto audio = audio_queue_.try_pop()) {
+            const std::vector<int32_t> adj = audio_trim.process(audio->samples.data(), audio->frame_count(),
+                                                                int64_t(audio_carry.size() / our_ch));
+            audio_carry.insert(audio_carry.end(), adj.begin(), adj.end());
+        }
         sample_frame_accum += samples_per_frame_exact;
         const size_t target_frames  = size_t(sample_frame_accum);
         sample_frame_accum -= double(target_frames);

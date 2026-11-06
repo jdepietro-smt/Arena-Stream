@@ -22,6 +22,7 @@
 #ifdef SDI_WITH_DECKLINK
 
 #include "decklink_playout.h"
+#include "audio_drift.h"
 
 #ifdef _WIN32
 #  include <objbase.h>
@@ -85,6 +86,12 @@ struct DeckLinkPlayoutDevice::Impl {
     IDeckLinkMutableVideoFrame* last_frame = nullptr;   // re-scheduled on underrun
 
     class OutputCallback* callback = nullptr;
+
+    // Audio clock-drift trim: the card plays audio at its own clock, the stream arrives at the
+    // source's. Keeps the card's audio buffer at its settled depth (see audio_drift.h).
+    std::unique_ptr<AudioDriftTrim> trim;
+    uint64_t short_writes = 0;
+    std::chrono::steady_clock::time_point last_trim_log = std::chrono::steady_clock::now();
 };
 
 // ---------------------------------------------------------------------------
@@ -290,10 +297,23 @@ void DeckLinkPlayoutDevice::write_audio(AudioFrame&& frame) {
     // Continuous audio stream mode: schedule samples ahead of time, the
     // card consumes them at its own hardware clock rate independently of
     // when we happen to call this — no explicit timestamp needed here.
+    if (!impl_->trim) impl_->trim = std::make_unique<AudioDriftTrim>(int(frame.channels ? frame.channels : 2));
+    uint32_t buffered = 0;
+    impl_->output->GetBufferedAudioSampleFrameCount(&buffered);
+    std::vector<int32_t> adj = impl_->trim->process(frame.samples.data(), frame.frame_count(), int64_t(buffered));
+    if (adj.empty()) return;            // backlog after a stall: dropped on purpose
+    const uint32_t want = uint32_t(adj.size() / (frame.channels ? frame.channels : 2));
     uint32_t written = 0;
-    impl_->output->ScheduleAudioSamples(
-        frame.samples.data(), uint32_t(frame.frame_count()),
-        0, 0, &written);
+    impl_->output->ScheduleAudioSamples(adj.data(), want, 0, 0, &written);
+    if (written < want) ++impl_->short_writes;   // card buffer full: the tail was refused
+    const auto now = std::chrono::steady_clock::now();
+    if (now - impl_->last_trim_log >= std::chrono::seconds(30)) {
+        impl_->last_trim_log = now;
+        if (impl_->trim->calibrated())
+            std::cerr << "decklink playout: audio buffer " << buffered << " frames (target "
+                      << int(impl_->trim->target_frames()) << "), trim " << (impl_->trim->ratio() - 1.0) * 100.0
+                      << "%, dropped " << impl_->trim->dropped_frames() << ", refused writes " << impl_->short_writes << "\n";
+    }
 }
 
 void DeckLinkPlayoutDevice::stop() {

@@ -96,6 +96,25 @@ public:
         if (relay_sock_ != SRT_INVALID_SOCK) apply_pace(relay_sock_);
     }
 
+    // Sender-side SRT counters for one set of connections (cumulative since each connected).
+    struct PathHealth {
+        int     conns = 0;
+        double  rtt_ms = -1;
+        int64_t sent = 0, retrans = 0, drops = 0;   // packets sent / re-sent / dropped as too late
+    };
+    PathHealth relay_health() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        PathHealth h;
+        if (relay_sock_ != SRT_INVALID_SOCK) add_health(h, relay_sock_);
+        return h;
+    }
+    PathHealth viewer_health() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        PathHealth h;
+        for (SRTSOCKET c : clients_) add_health(h, c);
+        return h;
+    }
+
     int      clients()  const { std::lock_guard<std::mutex> lk(mtx_); return int(clients_.size()); }
     bool     relay_up() const { std::lock_guard<std::mutex> lk(mtx_); return relay_sock_ != SRT_INVALID_SOCK; }
     uint64_t bytes()    const { return bytes_.load(); }
@@ -113,6 +132,16 @@ private:
     static bool push(SRTSOCKET s, const uint8_t* d, int len) {
         if (srt_sendmsg(s, reinterpret_cast<const char*>(d), len, -1, 0) != SRT_ERROR) return true;
         return srt_getlasterror(nullptr) == SRT_EASYNCSND;
+    }
+
+    static void add_health(PathHealth& h, SRTSOCKET s) {
+        SRT_TRACEBSTATS st{};
+        if (srt_bistats(s, &st, 0, 1) != 0) return;
+        ++h.conns;
+        h.rtt_ms   = std::max(h.rtt_ms, double(st.msRTT));
+        h.sent    += st.pktSentTotal;
+        h.retrans += st.pktRetransTotal;
+        h.drops   += st.pktSndDropTotal;
     }
 
     void apply_pace(SRTSOCKET s) const {

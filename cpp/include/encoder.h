@@ -581,12 +581,22 @@ public:
                                                   : AV_SAMPLE_FMT_FLTP;
         ctx_->time_base      = AVRational{1, sample_rate};
 
+        // Opus: 10 ms frames (the default 20 ms holds 10 ms more audio before it can be sent) and
+        // the low-delay application mode (drops the ~6.5 ms look-ahead). Costs a little efficiency
+        // at low bitrates, nothing audible at 128 kbps stereo. Other codecs ignore these names.
+        if (cfg.codec_name == "libopus") {
+            av_opt_set(ctx_->priv_data, "application",    "lowdelay", 0);
+            av_opt_set(ctx_->priv_data, "frame_duration", "10",       0);
+        }
+
         if (avcodec_open2(ctx_, codec, nullptr) < 0)
             throw std::runtime_error("avcodec_open2 (audio) failed");
 
         // Use the codec's required frame size; fall back to 1024 for
         // variable-frame-size codecs (PCM encoders return 0).
         frame_size_ = ctx_->frame_size > 0 ? ctx_->frame_size : 1024;
+        std::cerr << "audio encoder: " << cfg.codec_name << " " << frame_size_ << " samples/frame ("
+                  << (1000.0 * frame_size_ / sample_rate) << " ms)\n";
 
         // Resampler: S32 interleaved (capture native) → codec sample format.
         // FFmpeg 6.0+ uses AVChannelLayout API; old channels/channel_layout

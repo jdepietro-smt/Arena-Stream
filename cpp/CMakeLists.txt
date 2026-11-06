@@ -318,6 +318,16 @@ target_include_directories(latency_stamp_test PRIVATE include)
 sdi_target_warnings(latency_stamp_test)
 add_test(NAME latency_stamp COMMAND latency_stamp_test)
 
+add_executable(audio_drift_test tests/audio_drift_test.cpp)
+target_include_directories(audio_drift_test PRIVATE include)
+sdi_target_warnings(audio_drift_test)
+add_test(NAME audio_drift COMMAND audio_drift_test)
+
+add_executable(rate_adapter_test tests/rate_adapter_test.cpp)
+target_include_directories(rate_adapter_test PRIVATE include)
+sdi_target_warnings(rate_adapter_test)
+add_test(NAME rate_adapter COMMAND rate_adapter_test)
+
 # Needs a working libx264; confirms the stamp survives the real encoder.
 add_executable(latency_encode_check tests/latency_encode_check.cpp)
 target_include_directories(latency_encode_check PRIVATE include)

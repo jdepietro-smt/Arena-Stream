@@ -14,6 +14,7 @@
 #include "http_post.h"
 #include "preview_jpeg.h"
 #include "quality_test.h"
+#include "rate_adapter.h"
 #include "ts_fanout.h"
 #include "ts_muxer.h"
 
@@ -33,6 +34,7 @@ namespace {
 
 std::atomic<bool> g_stop{false};
 std::atomic<int>  g_bitrate_req{0};
+std::atomic<int>  g_user_kbps{0};   // bitrate the user asked for (the adapter's new target)
 std::atomic<int>  g_dir_state{0};   // 0 = not announcing, 1 = last announce accepted, 2 = failing
 void on_signal(int) { g_stop = true; }
 
@@ -56,6 +58,7 @@ struct Args {
     std::string key;
     bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
     bool        monitor = false;              // capture + preview only: no encode, no network
+    bool        adapt = true;                 // lower the bitrate when the network drops packets
     std::string quality = "low";              // low | balanced | max — see encoder.h QualityProfile
     bool        qtest = false;                // measure quality/latency of each profile on a live clip, then exit
     std::string qtest_rates;                  // comma-separated kbps list (default: --bitrate)
@@ -99,6 +102,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--preview")          a.preview = true;
         else if (k == "--monitor")          a.monitor = true;
         else if (k == "--quality")          a.quality = next();
+        else if (k == "--no-adapt")         a.adapt = false;
         else if (k == "--qtest")            a.qtest = true;
         else if (k == "--qtest-rates")      a.qtest_rates = next();
         else if (k == "--qtest-secs")       a.qtest_secs = std::max(1, std::min(6, std::atoi(next())));
@@ -335,7 +339,7 @@ int main(int argc, char** argv) {
             std::istringstream ss(line);
             std::string cmd; int v = 0;
             ss >> cmd >> v;
-            if (cmd == "bitrate" && v >= 500 && v <= 100000) g_bitrate_req = v;
+            if (cmd == "bitrate" && v >= 500 && v <= 100000) { g_bitrate_req = v; g_user_kbps = v; }
             else if (cmd == "quit") break;
         }
         g_stop = true;
@@ -384,19 +388,48 @@ int main(int argc, char** argv) {
     // ---- Status ----
     uint64_t last_v = 0, last_bytes = 0;
     auto last = std::chrono::steady_clock::now();
+    sdi::RateAdapter adapter(enc.current_bitrate_kbps(), args.adapt && enc.supports_live_bitrate());
+    std::string last_warn;
     while (!g_stop) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const auto now = std::chrono::steady_clock::now();
         const double dt = std::chrono::duration<double>(now - last).count();
         last = now;
         const uint64_t v = video_count.load(), by = fanout.bytes();
+
+        // Network feedback: SRT's own counters decide whether the link can carry the bitrate.
+        if (const int u = g_user_kbps.exchange(0)) adapter.set_target(u);
+        const auto rh = fanout.relay_health(), vh = fanout.viewer_health();
+        if (const int nb = adapter.tick(rh.sent + vh.sent, rh.retrans + vh.retrans, rh.drops + vh.drops)) {
+            g_bitrate_req = nb;   // the video worker applies it (and the pacing) on its next frame
+            std::cerr << "adapt: " << (adapter.loss_pct() > 2.0 || adapter.drops_recent() ? "network is dropping packets" : "network recovering")
+                      << " (" << adapter.loss_pct() << "% re-sent) - bitrate now " << nb << " kbps (requested "
+                      << adapter.target() << ")\n";
+        }
+        std::string warn;
+        if (rh.conns && rh.rtt_ms > 0 && adapter.loss_avg() > 0.5 && args.relay_latency_ms < 4 * rh.rtt_ms)
+            warn = "Internet buffer " + std::to_string(args.relay_latency_ms) + " ms is short for a " +
+                   std::to_string(int(rh.rtt_ms)) + " ms round trip while packets are being lost. Raise it to " +
+                   std::to_string(int(std::ceil(4 * rh.rtt_ms / 20.0)) * 20) + " ms or more.";
+        else if (adapter.drops_recent())
+            warn = "The network could not deliver packets in time and some were dropped. Raise the buffer or lower the bitrate.";
+        else if (adapter.reduced())
+            warn = std::string(adapter.loss_avg() > 0.5 ? "Network is dropping packets: bitrate lowered to "
+                                                        : "Recovering after packet loss: bitrate back up to ") + std::to_string(adapter.current() / 1000) + "." +
+                   std::to_string(adapter.current() / 100 % 10) + " Mbps (requested " +
+                   std::to_string(adapter.target() / 1000) + "." + std::to_string(adapter.target() / 100 % 10) + ").";
+        else if (!adapter.enabled() && args.adapt && !enc.supports_live_bitrate() && adapter.loss_avg() > 2.0)
+            warn = "Packets are being lost and this encoder cannot change bitrate live. Lower the bitrate.";
+        if (warn != last_warn) { if (!warn.empty()) std::cerr << "warning: " << warn << "\n"; last_warn = warn; }
         std::printf("{\"type\":\"link_stats\",\"name\":%s,\"format\":%s,\"source\":%s,\"fps\":%.1f,\"kbps\":%.0f,"
-                    "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\"}\n",
+                    "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\","
+                    "\"lossPct\":%.1f,\"targetKbps\":%d,\"adapt\":%s,\"warn\":%s}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
                     fanout.clients(), fanout.relay_up() ? "true" : "false", fanout.relay_rtt_ms(),
                     (unsigned long long)vq.dropped(),
-                    g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off");
+                    g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
+                    adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str());
         std::fflush(stdout);
         last_v = v; last_bytes = by;
     }
