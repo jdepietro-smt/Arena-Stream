@@ -126,11 +126,33 @@ if [ -n "${COMMS_DOMAIN:-}" ]; then
   TLS_KEY="/etc/letsencrypt/live/$COMMS_DOMAIN/privkey.pem"
   SERVER_NAME="$COMMS_DOMAIN"
 else
-  step "TLS certificate (self-signed for $IP)"
-  if [ ! -f "$ETC/tls/cert.pem" ]; then
-    openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout "$ETC/tls/key.pem" -out "$ETC/tls/cert.pem" \
-      -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" 2>/dev/null
-    chmod 600 "$ETC/tls/key.pem"
+  # No domain: Let's Encrypt can issue a certificate for the public IP itself (six-day, renewed automatically).
+  # Needs certbot 5.3+ (newer than Ubuntu's package) and port 80 open. Falls back to self-signed if that fails.
+  step "TLS certificate (Let's Encrypt for $IP)"
+  CB=/opt/certbot/bin/certbot
+  if [ ! -x "$CB" ]; then
+    apt-get install -y -qq python3-venv >/dev/null || true
+    python3 -m venv /opt/certbot && /opt/certbot/bin/pip install -q --upgrade pip certbot || true
+  fi
+  LE="/etc/letsencrypt/live/$IP"
+  if [ -x "$CB" ] && [ ! -f "$LE/fullchain.pem" ]; then
+    "$CB" certonly --standalone --ip-address "$IP" --preferred-profile shortlived --non-interactive --agree-tos \
+      --register-unsafely-without-email --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx" \
+      || echo "Could not get a certificate for $IP (is port 80 open?); using a self-signed one"
+  fi
+  if [ -f "$LE/fullchain.pem" ]; then
+    TLS_CERT="$LE/fullchain.pem"
+    TLS_KEY="$LE/privkey.pem"
+    IP_CERT=1
+    # Six-day certificates: check twice a day (certbot only renews when due).
+    echo "17 */12 * * * root $CB renew -q" > /etc/cron.d/arena-certbot
+  else
+    step "TLS certificate (self-signed for $IP)"
+    if [ ! -f "$ETC/tls/cert.pem" ]; then
+      openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout "$ETC/tls/key.pem" -out "$ETC/tls/cert.pem" \
+        -subj "/CN=$IP" -addext "subjectAltName=IP:$IP" 2>/dev/null
+      chmod 600 "$ETC/tls/key.pem"
+    fi
   fi
 fi
 
@@ -271,5 +293,5 @@ echo "Comms admin:                 https://$HOST/comms/admin"
 if [ "$FIRST_RUN" = 1 ]; then
   echo "Admin login:                 admin / $COMMS_ADMIN_PASSWORD   (change it in the admin page)"
 fi
-[ -z "${COMMS_DOMAIN:-}" ] && echo "Your browser warns once about the self-signed certificate; accept it."
+[ -z "${COMMS_DOMAIN:-}" ] && [ -z "${IP_CERT:-}" ] && echo "Your browser warns once about the self-signed certificate; accept it."
 echo "=============================================="
