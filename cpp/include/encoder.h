@@ -37,8 +37,31 @@ namespace sdi {
 // VideoEncoder
 // ---------------------------------------------------------------------------
 
+// Quality profile: how much latency the encoder may spend on picture quality.
+//   low       — the original tuning: one-frame VBV, fastest presets. Lowest delay.
+//   balanced  — 3-frame VBV, slower preset, adaptive quantisation. A few ms more.
+//   max       — 4-frame VBV, slowest real-time preset, full multipass. ~10 ms more.
+// The VBV size matters most: it is how far one frame may exceed the average, so a
+// one-frame buffer starves pans and crowd shots exactly when detail is needed.
+struct QualityProfile {
+    int         vbv_frames;     // rate-control buffer, in frames
+    const char* nv_preset;      // NVENC p1..p7
+    const char* nv_multipass;   // NVENC disabled | qres | fullres
+    bool        aq;             // NVENC spatial + temporal adaptive quantisation
+    const char* sw_preset;      // libx264 / libx265
+    const char* qsv_preset;
+    int         amf_quality;    // 0 speed, 1 balanced, 2 quality
+};
+
+inline QualityProfile quality_profile(const std::string& q) {
+    if (q == "max")      return { 4, "p6", "fullres", true,  "faster",   "medium",   2 };
+    if (q == "balanced") return { 3, "p5", "qres",    true,  "veryfast", "faster",   1 };
+    return                      { 1, "p3", "disabled", false, "veryfast", "veryfast", 0 };
+}
+
 struct EncoderConfig {
     std::string codec_name   = "h264_nvenc";  // or "libx264", "hevc_nvenc"
+    std::string quality      = "low";         // low | balanced | max (see QualityProfile)
     int         bitrate_kbps = 8000;
     int         gop          = 15;            // IDR every 0.25s at 60fps — fast recovery
     bool        zerolatency  = true;
@@ -123,6 +146,10 @@ public:
     // The encoder that actually opened — may differ from what was requested.
     const std::string& name() const { return encoder_name_; }
     int current_bitrate_kbps() const { return int(ctx_->bit_rate / 1000); }
+    // The profile actually in effect (falls back to "low" if the encoder rejected the requested one).
+    const std::string& quality() const { return quality_used_; }
+    // Called with every frame just before it is encoded (the exact picture the encoder sees).
+    void set_tap(std::function<void(const AVFrame*)> t) { tap_ = std::move(t); }
 
     // Change the encoder's target bitrate mid-stream, for adaptive bitrate
     // under changing network conditions. No encoder recreation needed:
@@ -143,7 +170,7 @@ public:
         ctx_->rc_max_rate = ctx_->bit_rate;
         const int fps = std::max(1,
             int(ctx_->framerate.num) / std::max(1, int(ctx_->framerate.den)));
-        ctx_->rc_buffer_size = int(ctx_->bit_rate / std::max(fps, 30));
+        ctx_->rc_buffer_size = int(ctx_->bit_rate * vbv_frames_ / std::max(fps, 30));
     }
 
     // Submit black frames (NV12 or YUV420P, whichever ctx_->pix_fmt is) with negative PTS to warm up the GPU encoder
@@ -210,6 +237,7 @@ public:
             if (AVFrameSideData* sd = av_frame_new_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED,
                                                              sdi::latency::kSize))
                 sdi::latency::pack(sd->data, sdi::latency::now_utc_us());
+            if (tap_) tap_(f);
             if (avcodec_send_frame(ctx_, f) < 0) return;
             while (avcodec_receive_packet(ctx_, pkt_) == 0) {
                 emit(pkt_);
@@ -264,7 +292,16 @@ private:
         for (size_t i = 0; i < chain.size(); ++i) {
             const std::string& name = chain[i];
             const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-            if (codec && try_open(mode, cfg, codec, name)) {
+            bool opened = codec && try_open(mode, cfg, codec, name);
+            if (codec && !opened && cfg.quality != "low") {
+                // A tuning option this encoder/GPU rejects must not push the stream down the
+                // chain (to the CPU encoder): retry the same encoder with the original tuning.
+                std::cerr << "encoder: " << name << " rejected quality '" << cfg.quality << "', retrying as 'low'\n";
+                EncoderConfig low = cfg;
+                low.quality = "low";
+                opened = try_open(mode, low, codec, name);
+            }
+            if (opened) {
                 effective_name = name;
                 if (i > 0)
                     std::cerr << "encoder: using " << name << " (first choice "
@@ -288,6 +325,7 @@ private:
         ctx_ = avcodec_alloc_context3(codec);
         if (!ctx_) throw std::runtime_error("avcodec_alloc_context3 failed");
 
+        const QualityProfile qp = quality_profile(cfg.quality);
         ctx_->width          = int(mode.width);
         ctx_->height         = int(mode.height);
         // Progressive sources go straight from sws_scale to the encoder,
@@ -331,7 +369,9 @@ private:
         {
             const int fps = std::max(1,
                 int(mode.fps_num) * (mode.interlaced ? 2 : 1) / std::max(1, int(mode.fps_den)));
-            ctx_->rc_buffer_size = ctx_->bit_rate / std::max(fps, 30);
+            vbv_frames_ = qp.vbv_frames;
+            quality_used_ = cfg.quality;
+            ctx_->rc_buffer_size = int(ctx_->bit_rate * vbv_frames_ / std::max(fps, 30));
         }
         ctx_->gop_size       = cfg.gop;
         ctx_->max_b_frames   = 0;               // required for low latency
@@ -362,8 +402,14 @@ private:
         // wrong option value would surface as avcodec_open2 failing below,
         // which is already handled by the fallback in open_with_fallback.
         if (name == "h264_nvenc" || name == "hevc_nvenc" || name == "av1_nvenc") {
-            av_opt_set(ctx_->priv_data, "preset",         "p3",  0);
+            av_opt_set(ctx_->priv_data, "preset",         qp.nv_preset, 0);
             av_opt_set(ctx_->priv_data, "tune",           "ll",  0);
+            if (qp.aq) {
+                av_opt_set(ctx_->priv_data, "spatial-aq",  "1", 0);
+                av_opt_set(ctx_->priv_data, "temporal-aq", "1", 0);
+                av_opt_set(ctx_->priv_data, "aq-strength", "8", 0);
+            }
+            av_opt_set(ctx_->priv_data, "multipass",      qp.nv_multipass, 0);
             av_opt_set(ctx_->priv_data, "rc",             "cbr", 0);
             av_opt_set(ctx_->priv_data, "zerolatency",    "1",   0);
             av_opt_set(ctx_->priv_data, "udu_sei",        "1",   0);   // carries the latency stamp
@@ -384,18 +430,18 @@ private:
                 av_opt_set_int(ctx_->priv_data, "slices", n_slices, 0);
             }
         } else if (name == "h264_qsv" || name == "hevc_qsv" || name == "av1_qsv") {
-            av_opt_set(ctx_->priv_data, "preset",      "veryfast", 0);
+            av_opt_set(ctx_->priv_data, "preset",      qp.qsv_preset, 0);
             av_opt_set(ctx_->priv_data, "low_delay_brc", "1",      0);
             av_opt_set_int(ctx_->priv_data, "look_ahead", 0,       0);
         } else if (name == "h264_amf" || name == "hevc_amf" || name == "av1_amf") {
             av_opt_set(ctx_->priv_data, "usage",       "ultralowlatency", 0);
             av_opt_set(ctx_->priv_data, "rc",          "cbr",             0);
-            av_opt_set_int(ctx_->priv_data, "quality", 0 /* speed */,     0);
+            av_opt_set_int(ctx_->priv_data, "quality", qp.amf_quality,    0);
         } else if (name == "h264_mf" || name == "hevc_mf") {
             av_opt_set_int(ctx_->priv_data, "rate_control", 1 /* CBR */, 0);
             av_opt_set_int(ctx_->priv_data, "low_latency",  1,           0);
         } else if (name == "libx264") {
-            av_opt_set(ctx_->priv_data, "preset",    "veryfast",    0);
+            av_opt_set(ctx_->priv_data, "preset",    qp.sw_preset,  0);
             av_opt_set(ctx_->priv_data, "tune",      "zerolatency", 0);
             av_opt_set(ctx_->priv_data, "udu_sei",   "1",           0);   // carries the latency stamp
             // repeat-headers=1 — SPS/PPS before every IDR so mediamtx and other
@@ -409,7 +455,7 @@ private:
                        "nal-hrd=cbr:force-cfr=1:sync-lookahead=0"
                        ":repeat-headers=1", 0);
         } else if (name == "libx265") {
-            av_opt_set(ctx_->priv_data, "preset", "veryfast", 0);
+            av_opt_set(ctx_->priv_data, "preset", qp.sw_preset, 0);
             av_opt_set(ctx_->priv_data, "x265-params",
                        "repeat-headers=1:no-info=1", 0);
         }
@@ -495,6 +541,9 @@ private:
     }
 
     std::string      encoder_name_;
+    std::string      quality_used_ = "low";
+    int              vbv_frames_   = 1;
+    std::function<void(const AVFrame*)> tap_;
     AVCodecContext*  ctx_        = nullptr;
     AVFrame*         frame_      = nullptr;
     AVPacket*        pkt_        = nullptr;

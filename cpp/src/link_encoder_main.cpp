@@ -13,6 +13,7 @@
 #include "frame_queue.h"
 #include "http_post.h"
 #include "preview_jpeg.h"
+#include "quality_test.h"
 #include "ts_fanout.h"
 #include "ts_muxer.h"
 
@@ -55,6 +56,10 @@ struct Args {
     std::string key;
     bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
     bool        monitor = false;              // capture + preview only: no encode, no network
+    std::string quality = "low";              // low | balanced | max — see encoder.h QualityProfile
+    bool        qtest = false;                // measure quality/latency of each profile on a live clip, then exit
+    std::string qtest_rates;                  // comma-separated kbps list (default: --bitrate)
+    int         qtest_secs = 2;               // length of the test clip
 };
 
 void usage() {
@@ -93,12 +98,18 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--key")              a.key = next();
         else if (k == "--preview")          a.preview = true;
         else if (k == "--monitor")          a.monitor = true;
+        else if (k == "--quality")          a.quality = next();
+        else if (k == "--qtest")            a.qtest = true;
+        else if (k == "--qtest-rates")      a.qtest_rates = next();
+        else if (k == "--qtest-secs")       a.qtest_secs = std::max(1, std::min(6, std::atoi(next())));
         else if (k == "-h" || k == "--help") { usage(); return false; }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); usage(); return false; }
     }
     // Secrets can come from the environment so they stay out of process listings.
     if (a.key.empty())          if (const char* e = std::getenv("LINK_KEY"))          a.key = e;
     if (a.relay_secret.empty()) if (const char* e = std::getenv("LINK_RELAY_SECRET")) a.relay_secret = e;
+    if (a.quality != "low" && a.quality != "balanced" && a.quality != "max") a.quality = "low";
+    if (a.name.empty() && a.qtest) a.name = "qtest";
     if (a.name.empty()) { std::fprintf(stderr, "--name is required\n"); usage(); return false; }
     return true;
 }
@@ -208,8 +219,53 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // ---- Quality test: encode a live clip with every profile x bitrate, report the scores. ----
+    if (args.qtest) {
+        std::thread([&] {
+            std::string line;
+            while (std::getline(std::cin, line)) if (line == "quit") break;
+            g_stop = true;
+        }).detach();
+        std::jthread aw([&] { while (aq.pop()) {} });
+        const double fps = double(mode.fps_num) / double(std::max<uint32_t>(1, mode.fps_den));
+        const size_t want = size_t(fps * args.qtest_secs + 0.5);
+        std::vector<sdi::VideoFrame> clip;
+        const auto t_end = std::chrono::steady_clock::now() + std::chrono::seconds(args.qtest_secs + 8);
+        while (clip.size() < want && !g_stop && std::chrono::steady_clock::now() < t_end) {
+            auto f = vq.pop();
+            if (!f) break;
+            clip.push_back(std::move(*f));
+        }
+        capture->stop();
+        vq.close();
+        aq.close();
+        if (clip.size() < 10) { std::fprintf(stderr, "error: only %zu frames captured\n", clip.size()); return 1; }
+        std::vector<int> rates;
+        { std::stringstream ss(args.qtest_rates); std::string t; while (std::getline(ss, t, ',')) if (const int v = std::atoi(t.c_str()); v >= 500) rates.push_back(v); }
+        if (rates.empty()) rates.push_back(args.bitrate_kbps);
+        const auto chain = sdi::codec_policy::candidate_chain(args.codec, sdi::codec_policy::dest_kind("srt://x"));
+        const char* profiles[] = {"low", "balanced", "max"};
+        const int total = int(rates.size()) * 3;
+        int done = 0;
+        std::printf("{\"type\":\"qtest-start\",\"w\":%u,\"h\":%u,\"fps\":%s,\"interlaced\":%s,\"clip_frames\":%zu,\"runs\":%d}\n",
+                    mode.width, mode.height, fmt_fps(fps).c_str(), mode.interlaced ? "true" : "false", clip.size(), total);
+        std::fflush(stdout);
+        for (int kbps : rates) for (const char* q : profiles) {
+            if (g_stop) break;
+            sdi::qtest::Result r;
+            if (sdi::qtest::run_one(clip, mode, chain, q, kbps, r)) sdi::qtest::print_json(r);
+            else { std::printf("{\"type\":\"qtest-fail\",\"quality\":\"%s\",\"target_kbps\":%d}\n", q, kbps); std::fflush(stdout); }
+            std::printf("{\"type\":\"qtest-progress\",\"done\":%d,\"of\":%d}\n", ++done, total);
+            std::fflush(stdout);
+        }
+        std::printf("{\"type\":\"qtest-done\"}\n");
+        std::fflush(stdout);
+        return 0;
+    }
+
     // ---- Encode ----
     sdi::EncoderConfig enc_cfg;
+    enc_cfg.quality      = args.quality;
     enc_cfg.codec_name   = args.codec;
     enc_cfg.bitrate_kbps = args.bitrate_kbps;
     enc_cfg.chain        = sdi::codec_policy::candidate_chain(args.codec, sdi::codec_policy::dest_kind("srt://x"));
@@ -290,7 +346,7 @@ int main(int argc, char** argv) {
     if (!args.directory.empty() && !announce) std::cerr << "warning: bad --directory, not announcing\n";
 
     std::cerr << "link_encoder: " << args.name << " | source " << source << " | sending " << format << " | "
-              << enc.name() << " " << enc.current_bitrate_kbps() << " kbps"
+              << enc.name() << " " << enc.current_bitrate_kbps() << " kbps (" << enc.quality() << " quality)"
               << " | direct " << (args.direct_port ? "udp/" + std::to_string(args.direct_port) : "off")
               << " | relay " << (args.relay.empty() ? "off" : args.relay) << "\n";
 
