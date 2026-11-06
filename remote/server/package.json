@@ -1,0 +1,15 @@
+{
+  "name": "arena-remote-server",
+  "version": "0.1.0",
+  "description": "SMT Arena Remote — account, host registry and WebRTC signaling server",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": { "node": ">=18" }
+}

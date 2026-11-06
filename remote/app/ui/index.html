@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src http: https: ws: wss:">
+<title>Arena Remote</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="login" class="card narrow">
+  <h1>Arena Remote</h1>
+  <p class="muted">Sign in with your Arena Remote account.</p>
+  <label>Server<input id="server" value="http://localhost:8950" spellcheck="false"></label>
+  <label>Username<input id="user" autocomplete="username"></label>
+  <label>Password<input id="pass" type="password" autocomplete="current-password"></label>
+  <button id="signin" class="primary">Sign in</button>
+  <p id="loginErr" class="err"></p>
+</main>
+
+<div id="app" hidden>
+  <header>
+    <strong>Arena Remote</strong>
+    <nav><button id="tabViewer" class="tab on">Connect to a computer</button><button id="tabHost" class="tab">Share this computer</button></nav>
+    <span class="muted" id="who"></span>
+  </header>
+
+  <section id="viewerPane">
+    <h2>Your computers</h2>
+    <div id="hosts" class="grid"></div>
+    <p id="viewerMsg" class="muted"></p>
+  </section>
+
+  <section id="hostPane" hidden>
+    <h2>Share this computer</h2>
+    <div id="enroll" class="card" hidden>
+      <p>This computer isn't registered to your account yet. Registering gives it a private key that proves its identity to viewers.</p>
+      <label>Computer name<input id="hostName" value="My PC"></label>
+      <button id="enrollBtn" class="primary">Register this computer</button>
+    </div>
+    <div id="hostSetup" hidden>
+      <p class="muted">Computer ID — read this to the person connecting so they can verify it: <code id="hostReadable"></code></p>
+      <h3>Screen to share</h3>
+      <div id="sources" class="grid"></div>
+      <h3>Access</h3>
+      <label class="row"><input type="checkbox" id="unattended"> Allow unattended access with a passcode (no one needs to be here to approve)</label>
+      <label id="passRow" hidden>Passcode (8+ characters, asked of the viewer)<input id="passcode" type="password"></label>
+      <button id="startHost" class="primary">Start sharing</button>
+      <p class="muted">Emergency stop on this computer: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>End</kbd></p>
+    </div>
+    <div id="hostLive" class="card" hidden>
+      <p><span class="dot"></span> <span id="hostStatus">Waiting for a connection</span></p>
+      <div id="hostSession" hidden>
+        <p id="hostWho"></p>
+        <button id="toggleControl">Allow control</button> <button id="endSession" class="danger">End session</button>
+      </div>
+      <button id="stopHost">Stop sharing</button>
+    </div>
+  </section>
+</div>
+
+<div id="stage" hidden>
+  <video id="video" autoplay playsinline></video>
+  <div id="bar">
+    <span id="stageName"></span>
+    <select id="quality" title="Maximum bitrate">
+      <option value="8">8 Mbps</option><option value="15">15 Mbps</option><option value="25" selected>25 Mbps</option><option value="40">40 Mbps</option><option value="60">60 Mbps</option>
+    </select>
+    <button id="btnLock" title="Lock the mouse into the session (games). Esc to release.">Capture mouse</button>
+    <button id="btnStats">Stats</button>
+    <button id="btnFull">Fullscreen</button>
+    <button id="btnLeave" class="danger">Disconnect</button>
+  </div>
+  <pre id="stats" hidden></pre>
+  <div id="stageMsg"></div>
+</div>
+
+<div id="modal" hidden><div class="card"><p id="modalText"></p><input id="modalInput" type="password" hidden><div id="modalBtns"></div></div></div>
+<script src="app.js"></script>
+</body>
+</html>

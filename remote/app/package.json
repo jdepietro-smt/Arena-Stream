@@ -1,0 +1,80 @@
+{
+  "name": "arena-remote",
+  "version": "0.1.0",
+  "description": "SMT Arena Remote — secure, low-latency 60fps remote desktop",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "service": "dotnet publish ../service/ArenaRemoteService.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o build/service",
+    "dist": "npm run service && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "author": "SMT",
+  "build": {
+    "appId": "com.smt.arenaremote",
+    "productName": "Arena Remote",
+    "executableName": "Arena Remote",
+    "directories": {
+      "output": "dist-installer",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "identity.js",
+      "input.js",
+      "secure.js",
+      "ui/**",
+      "package.json",
+      "!node_modules/koffi/src/**",
+      "!node_modules/koffi/doc/**",
+      "!node_modules/koffi/build/koffi/darwin_arm64/**",
+      "!node_modules/koffi/build/koffi/darwin_x64/**",
+      "!node_modules/koffi/build/koffi/freebsd_arm64/**",
+      "!node_modules/koffi/build/koffi/freebsd_ia32/**",
+      "!node_modules/koffi/build/koffi/freebsd_x64/**",
+      "!node_modules/koffi/build/koffi/linux_arm64/**",
+      "!node_modules/koffi/build/koffi/linux_armhf/**",
+      "!node_modules/koffi/build/koffi/linux_ia32/**",
+      "!node_modules/koffi/build/koffi/linux_loong64/**",
+      "!node_modules/koffi/build/koffi/linux_riscv64d/**",
+      "!node_modules/koffi/build/koffi/linux_x64/**",
+      "!node_modules/koffi/build/koffi/musl_arm64/**",
+      "!node_modules/koffi/build/koffi/musl_x64/**",
+      "!node_modules/koffi/build/koffi/openbsd_ia32/**",
+      "!node_modules/koffi/build/koffi/openbsd_x64/**",
+      "!node_modules/koffi/build/koffi/win32_arm64/**",
+      "!node_modules/koffi/build/koffi/win32_ia32/**"
+    ],
+    "asarUnpack": [
+      "node_modules/koffi/**"
+    ],
+    "extraResources": [
+      {
+        "from": "build/service",
+        "to": "service",
+        "filter": [
+          "ArenaRemoteService.exe"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": false,
+      "include": "build/installer.nsh"
+    }
+  }
+}

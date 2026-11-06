@@ -1,0 +1,7 @@
+node_modules/
+server/data/
+service/bin/
+service/obj/
+app/release/
+app/dist-installer/
+app/build/service/
