@@ -23,6 +23,7 @@ struct EncoderInfo {
     std::string relay_host;           // empty = use the directory's host
     int         relay_port  = 0;      // 0 = encoder isn't publishing to a relay
     std::string relay_name;
+    bool        local = false;        // heard on this network by mDNS: its LAN address is reachable
 };
 
 struct Path {
@@ -65,7 +66,7 @@ inline bool parse_encoders(const std::string& body, std::vector<EncoderInfo>& ou
 
 inline std::vector<Path> choose_paths(const EncoderInfo& e, const std::string& your_ip, const PathPolicy& p) {
     std::vector<Path> out;
-    const bool same_net = !your_ip.empty() && e.pub_ip == your_ip && !e.lan_ips.empty() && e.direct_port > 0;
+    const bool same_net = (e.local || (!your_ip.empty() && e.pub_ip == your_ip)) && !e.lan_ips.empty() && e.direct_port > 0;
     if (same_net)
         out.push_back({"lan", "srt://" + e.lan_ips.front() + ":" + std::to_string(e.direct_port), p.lan_latency_ms});
     if (e.relay_port > 0 && !e.relay_name.empty()) {

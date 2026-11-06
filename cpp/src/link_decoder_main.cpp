@@ -19,6 +19,8 @@ int main() { std::fputs("link_decoder: Windows only for now\n", stderr); return 
 
 #include "http_post.h"
 #include "link_paths.h"
+#include "mdns.h"
+#include "relay_latency.h"
 
 #include <windows.h>
 
@@ -56,16 +58,20 @@ std::string jstr(const std::string& s) {
     return o + "\"";
 }
 
-void state(const std::string& st, const std::string& enc = "", const std::string& path = "", const std::string& note = "") {
-    std::fprintf(stderr, "{\"type\":\"link_state\",\"state\":%s,\"encoder\":%s,\"path\":%s,\"note\":%s}\n",
-                 jstr(st).c_str(), jstr(enc).c_str(), jstr(path).c_str(), jstr(note).c_str());
+// latency_ms: the SRT buffer in use on this path; probe_ms: for an auto-sized relay leg, the RTT it
+// was sized from (-1 = not measured).
+void state(const std::string& st, const std::string& enc = "", const std::string& path = "", const std::string& note = "",
+           int latency_ms = 0, double probe_ms = -1) {
+    std::fprintf(stderr, "{\"type\":\"link_state\",\"state\":%s,\"encoder\":%s,\"path\":%s,\"note\":%s,\"latencyMs\":%d,\"probeMs\":%.0f}\n",
+                 jstr(st).c_str(), jstr(enc).c_str(), jstr(path).c_str(), jstr(note).c_str(), latency_ms, probe_ms);
     std::fflush(stderr);
 }
 
 struct Opts {
     std::string directory, key, select;
     bool        list = false;
-    int         lan_latency = 40, relay_latency = 100;
+    bool        no_mdns = false, mdns_watch = false;
+    int         lan_latency = 40, relay_latency = 100;   // relay 0 = size from the measured RTT (relay_latency.h)
     std::vector<std::string> engine_args;
 };
 
@@ -80,13 +86,15 @@ bool parse(int argc, char** argv, Opts& o) {
         else if (k == "--key")           o.key = next();
         else if (k == "--select")        o.select = next();
         else if (k == "--list")          o.list = true;
+        else if (k == "--no-mdns")       o.no_mdns = true;
+        else if (k == "--mdns-watch")    o.mdns_watch = true;
         else if (k == "--lan-latency")   o.lan_latency = std::atoi(next().c_str());
         else if (k == "--relay-latency") o.relay_latency = std::atoi(next().c_str());
         else if (k == "--")              { for (++i; i < argc; ++i) o.engine_args.push_back(argv[i]); }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); return false; }
     }
     if (o.key.empty()) if (const char* e = std::getenv("LINK_KEY")) o.key = e;   // keeps it out of process listings
-    if (o.directory.empty()) { std::fprintf(stderr, "--directory is required\n"); return false; }
+    if (o.directory.empty() && !o.mdns_watch) { std::fprintf(stderr, "--directory is required\n"); return false; }
     return true;
 }
 
@@ -167,6 +175,42 @@ bool fetch(const sdi::net::Url& url, const std::string& key, std::vector<Encoder
     return sdi::link::parse_encoders(body, out, my_ip);
 }
 
+// Folds the encoders heard by mDNS into the directory's list. An encoder seen both ways keeps the
+// directory's record (it knows the public address) and is marked local, so its LAN path is used even
+// when the two sides reach the internet from different addresses. One only mDNS knows (offline
+// network, or the directory is down) is added from what it advertised, relay details included.
+void merge_mdns(std::vector<EncoderInfo>& list, const std::vector<sdi::mdns::Service>& heard) {
+    for (const auto& m : heard) {
+        auto it = std::find_if(list.begin(), list.end(), [&](const EncoderInfo& e) { return e.id == m.id; });
+        EncoderInfo* e;
+        if (it != list.end()) e = &*it;
+        else { list.emplace_back(); e = &list.back(); e->id = m.id; }
+        if (e->name.empty())   e->name = m.name;
+        if (e->format.empty()) e->format = m.format;
+        if (e->source.empty()) e->source = m.source;
+        if (e->codec.empty())  e->codec = m.codec;
+        if (e->kbps == 0)      e->kbps = m.kbps;
+        e->local       = true;
+        e->lan_ips     = m.ips;       // first = the address it announced from on our own network
+        e->direct_port = m.port;
+        if (e->relay_port == 0 && m.relay_port > 0) { e->relay_host = m.relay_host; e->relay_port = m.relay_port; e->relay_name = m.relay_name; }
+    }
+}
+
+std::string mdns_json(const std::vector<sdi::mdns::Service>& v) {
+    std::string o = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        const auto& s = v[i];
+        o += std::string(i ? "," : "") + "{\"id\":" + jstr(s.id) + ",\"name\":" + jstr(s.name) + ",\"format\":" + jstr(s.format) +
+             ",\"source\":" + jstr(s.source) + ",\"codec\":" + jstr(s.codec) + ",\"kbps\":" + std::to_string(s.kbps) +
+             ",\"directPort\":" + std::to_string(s.port) + ",\"lanIps\":[";
+        for (size_t k = 0; k < s.ips.size(); ++k) o += std::string(k ? "," : "") + jstr(s.ips[k]);
+        o += "],\"relay\":" + (s.relay_port > 0 ? "{\"host\":" + jstr(s.relay_host) + ",\"port\":" + std::to_string(s.relay_port) +
+                                                  ",\"name\":" + jstr(s.relay_name) + "}" : std::string("null")) + "}";
+    }
+    return o + "]";
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -174,6 +218,31 @@ int main(int argc, char** argv) {
     if (!parse(argc, argv, o)) return 2;
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+
+    // Encoders on this network announce themselves by mDNS: found with no directory and no internet.
+    sdi::mdns::Browser browser;
+    const bool have_mdns = !o.no_mdns && browser.start();
+
+    if (o.mdns_watch) {   // long-running: print the LAN encoder list whenever it changes (the app reads this)
+        std::thread([&] {
+            std::string line;
+            while (std::getline(std::cin, line)) if (line == "quit") break;
+            g_stop = true;
+        }).detach();
+        std::string last;
+        auto next_beat = std::chrono::steady_clock::now();
+        while (!g_stop) {
+            std::this_thread::sleep_for(400ms);
+            const std::string j = mdns_json(browser.snapshot());
+            const auto now = std::chrono::steady_clock::now();
+            if (j != last || now >= next_beat) {
+                std::printf("{\"type\":\"mdns\",\"encoders\":%s}\n", j.c_str());
+                std::fflush(stdout);
+                last = j; next_beat = now + 5s;
+            }
+        }
+        return 0;
+    }
 
     sdi::net::Url dir;
     if (!sdi::net::parse_url(o.directory, dir)) { std::fprintf(stderr, "bad --directory\n"); return 2; }
@@ -184,7 +253,9 @@ int main(int argc, char** argv) {
 
     if (o.list) {   // one-shot: what is out there and how we would reach it
         std::vector<EncoderInfo> list; std::string me;
-        if (!fetch(dir, o.key, list, me)) { std::fprintf(stderr, "directory unreachable or rejected the key\n"); return 1; }
+        const bool dir_ok = fetch(dir, o.key, list, me);
+        if (have_mdns) { std::this_thread::sleep_for(1200ms); merge_mdns(list, browser.snapshot()); }
+        if (!dir_ok && list.empty()) { std::fprintf(stderr, "directory unreachable or rejected the key\n"); return 1; }
         std::printf("{\"yourIp\":%s,\"encoders\":[", jstr(me).c_str());
         for (size_t i = 0; i < list.size(); ++i) {
             const auto& e = list[i];
@@ -227,7 +298,9 @@ int main(int argc, char** argv) {
         { std::lock_guard<std::mutex> lk(g_sel_mtx); sel = g_select; }
 
         std::vector<EncoderInfo> list; std::string me;
-        if (!fetch(dir, o.key, list, me)) {
+        const bool dir_ok = fetch(dir, o.key, list, me);
+        if (have_mdns) merge_mdns(list, browser.snapshot());
+        if (!dir_ok && list.empty()) {
             if (last_waiting != "dir") state("waiting", "", "", "directory unreachable");
             last_waiting = "dir";
             std::this_thread::sleep_for(1s);
@@ -251,13 +324,22 @@ int main(int argc, char** argv) {
         }
 
         bool live_once = false;
-        for (const Path& p : paths) {
+        for (const Path& p_in : paths) {
             if (g_stop || g_select_changed) break;
-            state("connecting", enc->name, p.kind, p.url);
+            Path p = p_in;
+            double probe_ms = -1;
+            // This leg (relay -> decoder) is sized from this PC's own RTT to the relay, which lives on the
+            // directory's host unless the encoder said otherwise.
+            if (p.kind == "relay" && o.relay_latency <= 0) {
+                const bool relay_is_dir = p.url.find("srt://" + dir.host + ":") == 0;
+                if (relay_is_dir) probe_ms = sdi::net::tcp_rtt_ms(dir.host, dir.port);
+                p.latency_ms = sdi::link::auto_relay_latency_ms(probe_ms);
+            }
+            state("connecting", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
             std::vector<std::string> args{"--src", p.url, "--latency", std::to_string(p.latency_ms)};
             args.insert(args.end(), o.engine_args.begin(), o.engine_args.end());
             const auto t0 = std::chrono::steady_clock::now();
-            const EngineResult r = run_engine(engine, args, job, [&] { state("live", enc->name, p.kind, p.url); });
+            const EngineResult r = run_engine(engine, args, job, [&] { state("live", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms); });
             if (r.killed) break;
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             state(r.went_live ? "ended" : "failed", enc->name, p.kind,

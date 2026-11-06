@@ -328,6 +328,19 @@ target_include_directories(rate_adapter_test PRIVATE include)
 sdi_target_warnings(rate_adapter_test)
 add_test(NAME rate_adapter COMMAND rate_adapter_test)
 
+add_executable(mdns_test tests/mdns_test.cpp)
+target_include_directories(mdns_test PRIVATE include)
+if(WIN32)
+  target_link_libraries(mdns_test PRIVATE ws2_32)
+endif()
+sdi_target_warnings(mdns_test)
+add_test(NAME mdns COMMAND mdns_test)
+
+add_executable(relay_latency_test tests/relay_latency_test.cpp)
+target_include_directories(relay_latency_test PRIVATE include)
+sdi_target_warnings(relay_latency_test)
+add_test(NAME relay_latency COMMAND relay_latency_test)
+
 # Needs a working libx264; confirms the stamp survives the real encoder.
 add_executable(latency_encode_check tests/latency_encode_check.cpp)
 target_include_directories(latency_encode_check PRIVATE include)

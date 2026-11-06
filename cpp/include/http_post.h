@@ -3,9 +3,12 @@
 // Minimal blocking HTTP/1.0 POST/GET over plain TCP, for the encoder's directory
 // announcements (one tiny JSON request per second). No TLS, no redirects.
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -14,6 +17,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <unistd.h>
 #endif
@@ -82,6 +87,40 @@ inline int http_request(const Url& url, const char* method, const std::string& p
     if (in.size() > 12 && in.compare(0, 5, "HTTP/") == 0) status = std::atoi(in.c_str() + 9);
     if (resp) { const auto p = in.find("\r\n\r\n"); *resp = p == std::string::npos ? "" : in.substr(p + 4); }
     return status;
+}
+
+// Round-trip time to host:port in ms, from the time a TCP connect takes (one SYN/SYN-ACK = one
+// round trip). Median of `tries`; -1 if none connected. Used to size the SRT latency of one leg
+// from that leg's own network path, before the SRT connection exists.
+inline double tcp_rtt_ms(const std::string& host, int port, int tries = 4, int timeout_ms = 800) {
+    net_init();
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) return -1;
+    std::vector<double> ok;
+    for (int i = 0; i < tries; ++i) {
+        sock_t s = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (s == kBadSock) continue;
+#ifdef _WIN32
+        u_long nb = 1; ioctlsocket(s, FIONBIO, &nb);
+#else
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+#endif
+        const auto t0 = std::chrono::steady_clock::now();
+        ::connect(s, res->ai_addr, int(res->ai_addrlen));
+        fd_set wf, ef; FD_ZERO(&wf); FD_ZERO(&ef); FD_SET(s, &wf); FD_SET(s, &ef);
+        timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+        const int r = ::select(int(s) + 1, nullptr, &wf, &ef, &tv);
+        int err = 1; socklen_t el = sizeof(err);
+        if (r > 0 && FD_ISSET(s, &wf)) getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &el);
+        if (r > 0 && err == 0)
+            ok.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        close_sock(s);
+    }
+    freeaddrinfo(res);
+    if (ok.empty()) return -1;
+    std::sort(ok.begin(), ok.end());
+    return ok[ok.size() / 2];
 }
 
 // The address this machine would use to reach the internet (no packet is sent).

@@ -14,7 +14,9 @@
 #include "http_post.h"
 #include "preview_jpeg.h"
 #include "quality_test.h"
+#include "mdns.h"
 #include "rate_adapter.h"
+#include "relay_latency.h"
 #include "ts_fanout.h"
 #include "ts_muxer.h"
 
@@ -53,7 +55,8 @@ struct Args {
     int         direct_latency_ms = 40;
     std::string relay;                        // "IPv4[:port]" (default port 8895); empty = LAN only
     std::string relay_secret;
-    int         relay_latency_ms = 100;
+    int         relay_latency_ms = 100;       // 0 = size it from the measured RTT to the server (see relay_latency.h)
+    bool        mdns = true;                  // advertise on the local network (_arenalink._udp)
     std::string directory;                    // "http://host:port"; empty = no announce
     std::string key;
     bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
@@ -103,6 +106,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--monitor")          a.monitor = true;
         else if (k == "--quality")          a.quality = next();
         else if (k == "--no-adapt")         a.adapt = false;
+        else if (k == "--no-mdns")          a.mdns = false;
         else if (k == "--qtest")            a.qtest = true;
         else if (k == "--qtest-rates")      a.qtest_rates = next();
         else if (k == "--qtest-secs")       a.qtest_secs = std::max(1, std::min(6, std::atoi(next())));
@@ -288,6 +292,9 @@ int main(int argc, char** argv) {
     fc.listen_port       = args.direct_port;
     fc.listen_latency_ms = args.direct_latency_ms;
     int relay_port = 8895;
+    int relay_latency = args.relay_latency_ms;
+    bool relay_auto = false;
+    double relay_probe_ms = -1;
     if (!args.relay.empty()) {
         const auto c = args.relay.rfind(':');
         fc.relay_host = args.relay.substr(0, c);
@@ -295,7 +302,18 @@ int main(int argc, char** argv) {
         fc.relay_port       = relay_port;
         fc.relay_name       = args.name;
         fc.relay_secret     = args.relay_secret;
-        fc.relay_latency_ms = args.relay_latency_ms;
+        // This leg (encoder -> relay) is sized from this PC's own RTT to the server.
+        relay_latency = args.relay_latency_ms;
+        if (relay_latency <= 0) {
+            relay_auto = true;
+            sdi::net::Url pu;
+            if (!args.directory.empty() && sdi::net::parse_url(args.directory, pu))
+                relay_probe_ms = sdi::net::tcp_rtt_ms(pu.host, pu.port);
+            relay_latency = sdi::link::auto_relay_latency_ms(relay_probe_ms);
+            std::cerr << "relay: encoder->relay leg " << relay_latency << " ms (auto, "
+                      << (relay_probe_ms > 0 ? std::to_string(int(relay_probe_ms)) + " ms RTT to the server" : std::string("RTT not measurable, default")) << ")\n";
+        }
+        fc.relay_latency_ms = relay_latency;
     }
     // SRT pacing: video + audio + TS/SRT overhead, times headroom for bursts and retransmits.
     // A wider rate-control buffer (balanced/max) lets one frame be several times the average, so
@@ -363,6 +381,19 @@ int main(int argc, char** argv) {
               << " | direct " << (args.direct_port ? "udp/" + std::to_string(args.direct_port) : "off")
               << " | relay " << (args.relay.empty() ? "off" : args.relay) << "\n";
 
+    // LAN discovery with no directory: decoders on this network find us by mDNS (_arenalink._udp).
+    std::unique_ptr<sdi::mdns::Responder> mdns;
+    if (args.mdns && args.direct_port > 0) {
+        mdns = std::make_unique<sdi::mdns::Responder>(host_name(), [&] {
+            sdi::mdns::Service m;
+            m.id = id; m.name = args.name; m.format = format; m.source = source; m.codec = enc.name();
+            m.kbps = enc.current_bitrate_kbps(); m.port = args.direct_port;
+            if (!args.relay.empty()) { m.relay_host = fc.relay_host; m.relay_port = relay_port; m.relay_name = args.name; }
+            return m;
+        });
+        if (mdns->start()) std::cerr << "mdns: advertising " << args.name << " on the local network\n";
+    }
+
     std::jthread announcer;
     if (announce) announcer = std::jthread([&] {
         int fails = 0;
@@ -407,10 +438,12 @@ int main(int argc, char** argv) {
                       << adapter.target() << ")\n";
         }
         std::string warn;
-        if (rh.conns && rh.rtt_ms > 0 && adapter.loss_avg() > 0.5 && args.relay_latency_ms < 4 * rh.rtt_ms)
-            warn = "Internet buffer " + std::to_string(args.relay_latency_ms) + " ms is short for a " +
+        // A lost packet needs a full round trip to be re-sent, so while packets are being lost the
+        // leg needs ~2 RTT + jitter; the auto size (1.25 RTT) is for a mostly clean path.
+        if (rh.conns && rh.rtt_ms > 0 && adapter.loss_avg() > 0.5 && relay_latency < 2 * rh.rtt_ms + 40)
+            warn = "Internet buffer " + std::to_string(relay_latency) + " ms is short for a " +
                    std::to_string(int(rh.rtt_ms)) + " ms round trip while packets are being lost. Raise it to " +
-                   std::to_string(int(std::ceil(4 * rh.rtt_ms / 20.0)) * 20) + " ms or more.";
+                   std::to_string(int(std::ceil((2 * rh.rtt_ms + 40) / 20.0)) * 20) + " ms (adds that much delay).";
         else if (adapter.drops_recent())
             warn = "The network could not deliver packets in time and some were dropped. Raise the buffer or lower the bitrate.";
         else if (adapter.reduced())
@@ -423,13 +456,15 @@ int main(int argc, char** argv) {
         if (warn != last_warn) { if (!warn.empty()) std::cerr << "warning: " << warn << "\n"; last_warn = warn; }
         std::printf("{\"type\":\"link_stats\",\"name\":%s,\"format\":%s,\"source\":%s,\"fps\":%.1f,\"kbps\":%.0f,"
                     "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\","
-                    "\"lossPct\":%.1f,\"targetKbps\":%d,\"adapt\":%s,\"warn\":%s}\n",
+                    "\"lossPct\":%.1f,\"targetKbps\":%d,\"adapt\":%s,\"warn\":%s,"
+                    "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
                     fanout.clients(), fanout.relay_up() ? "true" : "false", fanout.relay_rtt_ms(),
                     (unsigned long long)vq.dropped(),
                     g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
-                    adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str());
+                    adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str(),
+                    args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms);
         std::fflush(stdout);
         last_v = v; last_bytes = by;
     }
