@@ -36,7 +36,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    FrameQueue<VideoFrame> video_queue_{8};
+    FrameQueue<VideoFrame> video_queue_{3};   // each queued frame is a frame of delay; overflow drops the oldest
     FrameQueue<AudioFrame> audio_queue_{32};
 
     // AJA has no SDK-side output callback (same as its capture side) — we

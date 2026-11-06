@@ -153,8 +153,9 @@ int main(int argc, char** argv) {
     auto capture = sdi::make_capture(args.backend);
     if (!capture) { std::cerr << "error: backend '" << args.backend << "' not compiled in\n"; return 1; }
 
-    // 8 video frames of slack absorb brief encoder stalls; more would only add delay.
-    sdi::FrameQueue<sdi::VideoFrame> vq{8};
+    // 3 frames of slack absorb a brief encoder stall. Every queued frame is a frame of delay, and a
+    // full queue drops the oldest, so a deeper queue only ever hides latency (8 frames = 133 ms at 60 fps).
+    sdi::FrameQueue<sdi::VideoFrame> vq{3};
     sdi::FrameQueue<sdi::AudioFrame> aq{64};
 
     sdi::CaptureConfig cfg{
@@ -292,6 +293,14 @@ int main(int argc, char** argv) {
         fc.relay_secret     = args.relay_secret;
         fc.relay_latency_ms = args.relay_latency_ms;
     }
+    // SRT pacing: video + audio + TS/SRT overhead, times headroom for bursts and retransmits.
+    // A wider rate-control buffer (balanced/max) lets one frame be several times the average, so
+    // those profiles get more headroom; a tighter cap would just move the burst into the SRT delay.
+    const double pace_headroom = enc.quality() == "max" ? 2.5 : enc.quality() == "balanced" ? 2.0 : 1.25;
+    auto pace_for = [&](int video_kbps) {
+        return int64_t((video_kbps + (audio_on ? args.audio_kbps : 0)) * 1000.0 / 8.0 * 1.12 * pace_headroom);
+    };
+    fc.pace_bytes_per_sec = pace_for(enc.current_bitrate_kbps());
     sdi::TsFanout fanout(fc);
     sdi::TsMuxer  mux(fanout, enc.video_ctx(), aenc ? aenc->audio_ctx() : nullptr);
 
@@ -300,7 +309,7 @@ int main(int argc, char** argv) {
         sdi::PreviewJpeg preview;
         auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
         while (auto f = vq.pop()) {
-            if (const int want = g_bitrate_req.exchange(0)) enc.set_bitrate(want);
+            if (const int want = g_bitrate_req.exchange(0)) { enc.set_bitrate(want); fanout.set_pacing(pace_for(want)); }
             enc.encode(*f, [&](AVPacket* pkt) { mux.write_video(pkt); });
             // Monitor picture for the app: after the real encode, ~10 per second.
             const auto now = std::chrono::steady_clock::now();

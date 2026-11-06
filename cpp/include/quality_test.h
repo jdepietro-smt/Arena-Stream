@@ -24,6 +24,7 @@ extern "C" {
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -92,6 +93,7 @@ struct Result {
     int    target_kbps = 0, frames = 0;
     double psnr = 0, ssim = 0, ssim_min = 1, psnr_c = 0;
     double kbps = 0, max_kb = 0, enc_ms = 0, enc_ms_p95 = 0, dec_ms = 0;
+    int    dec_lag = 0;   // most packets the decoder held before returning a picture (0 = none held back)
     bool   ok = false;
 };
 
@@ -117,7 +119,10 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
     const AVCodec* dcodec = avcodec_find_decoder(enc->video_ctx()->codec_id);
     if (!dcodec) return false;
     AVCodecContext* dctx = avcodec_alloc_context3(dcodec);
-    dctx->thread_count = 1;     // no frame threading: no extra decode delay, honest per-frame time
+    // Same flags the real decoder uses. LINK_QTEST_DEC_THREADS=N repeats the test with N decode threads.
+    dctx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    dctx->thread_count = 1;
+    if (const char* t = std::getenv("LINK_QTEST_DEC_THREADS")) dctx->thread_count = std::max(1, std::atoi(t));
     if (avcodec_open2(dctx, dcodec, nullptr) < 0) { avcodec_free_context(&dctx); return false; }
     AVFrame*  df  = av_frame_alloc();
     AVPacket* dpk = av_packet_alloc();
@@ -126,13 +131,14 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
     enc->set_tap([&](const AVFrame* f) { Planes p; if (grab(f, p)) refs.emplace(f->pts, std::move(p)); });
 
     double dec_acc = 0, psnr_sum = 0, ssim_sum = 0, psnrc_sum = 0, dec_total = 0;
-    int    scored = 0, packets_counted = 0;
+    int    scored = 0, packets_counted = 0, sent = 0, got = 0, max_lag = 0;
     size_t bytes = 0, max_bytes = 0;
     std::vector<double> enc_times;
     r.ssim_min = 1.0;
 
     auto drain = [&] {
         while (avcodec_receive_frame(dctx, df) == 0) {
+            ++got;
             const int64_t pts = df->pts != AV_NOPTS_VALUE ? df->pts : df->best_effort_timestamp;
             auto it = refs.find(pts);
             if (it != refs.end()) {
@@ -159,7 +165,7 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
             const auto d0 = clk::now();
             if (pkt->pts >= 0) { bytes += size_t(pkt->size); max_bytes = std::max(max_bytes, size_t(pkt->size)); ++packets_counted; }
             av_packet_ref(dpk, pkt);
-            if (avcodec_send_packet(dctx, dpk) >= 0) drain();
+            if (avcodec_send_packet(dctx, dpk) >= 0) { ++sent; drain(); max_lag = std::max(max_lag, sent - got); }
             av_packet_unref(dpk);
             const double d = ms(clk::now() - d0);
             dec_acc += d; dec_total += d;
@@ -173,6 +179,7 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
     if (scored == 0) return false;
 
     const double fps = double(mode.fps_num) / double(std::max<uint32_t>(1, mode.fps_den)) * (mode.interlaced ? 2 : 1);
+    r.dec_lag  = max_lag;
     r.frames   = scored;
     r.psnr     = psnr_sum / scored;
     r.psnr_c   = psnrc_sum / scored;
@@ -193,9 +200,9 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
 inline void print_json(const Result& r) {
     std::printf("{\"type\":\"qtest\",\"quality\":\"%s\",\"encoder\":\"%s\",\"target_kbps\":%d,\"frames\":%d,"
                 "\"psnr\":%.2f,\"psnr_c\":%.2f,\"ssim\":%.4f,\"ssim_min\":%.4f,\"kbps\":%.0f,\"max_kb\":%.1f,"
-                "\"enc_ms\":%.1f,\"enc_ms_p95\":%.1f,\"dec_ms\":%.1f}\n",
+                "\"enc_ms\":%.1f,\"enc_ms_p95\":%.1f,\"dec_ms\":%.1f,\"dec_lag\":%d}\n",
                 r.quality.c_str(), r.encoder.c_str(), r.target_kbps, r.frames, r.psnr, r.psnr_c, r.ssim, r.ssim_min,
-                r.kbps, r.max_kb, r.enc_ms, r.enc_ms_p95, r.dec_ms);
+                r.kbps, r.max_kb, r.enc_ms, r.enc_ms_p95, r.dec_ms, r.dec_lag);
     std::fflush(stdout);
 }
 

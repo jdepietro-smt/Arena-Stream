@@ -36,7 +36,7 @@ private:
     // ScheduledFrameCompleted (driver callback thread) pulls from this
     // queue non-blocking. Capacity of a few frames absorbs normal decoder
     // jitter without ever blocking either side.
-    FrameQueue<VideoFrame> video_queue_{8};
+    FrameQueue<VideoFrame> video_queue_{3};   // each queued frame is a frame of delay; overflow drops the oldest
     FrameQueue<AudioFrame> audio_queue_{32};
 };
 

@@ -39,6 +39,7 @@ struct FanoutConfig {
     std::string relay_name;
     std::string relay_secret;
     int         relay_latency_ms   = 100;
+    int64_t     pace_bytes_per_sec = 0;      // SRT send-rate cap (SRTO_MAXBW); 0 = SRT default (unpaced)
 };
 
 class TsFanout {
@@ -84,6 +85,17 @@ public:
         bytes_ += uint64_t(n);
     }
 
+    // Cap how fast SRT may send (bytes/s, retransmits included). Without a cap a large keyframe
+    // leaves as one line-rate burst, which is what overruns receive buffers and causes loss.
+    // Applies to the listener (new viewers inherit it), current viewers and the relay publisher.
+    void set_pacing(int64_t bytes_per_sec) {
+        std::lock_guard<std::mutex> lk(mtx_);
+        cfg_.pace_bytes_per_sec = bytes_per_sec;
+        if (listen_sock_ != SRT_INVALID_SOCK) apply_pace(listen_sock_);
+        for (SRTSOCKET c : clients_) apply_pace(c);
+        if (relay_sock_ != SRT_INVALID_SOCK) apply_pace(relay_sock_);
+    }
+
     int      clients()  const { std::lock_guard<std::mutex> lk(mtx_); return int(clients_.size()); }
     bool     relay_up() const { std::lock_guard<std::mutex> lk(mtx_); return relay_sock_ != SRT_INVALID_SOCK; }
     uint64_t bytes()    const { return bytes_.load(); }
@@ -103,13 +115,20 @@ private:
         return srt_getlasterror(nullptr) == SRT_EASYNCSND;
     }
 
-    static void common_opts(SRTSOCKET s, int latency_ms) {
+    void apply_pace(SRTSOCKET s) const {
+        if (cfg_.pace_bytes_per_sec <= 0) return;
+        const int64_t bw = cfg_.pace_bytes_per_sec;
+        srt_setsockflag(s, SRTO_MAXBW, &bw, sizeof(bw));
+    }
+
+    void common_opts(SRTSOCKET s, int latency_ms) {
         const int yes = 1, no = 0, payload = kMsg;
         srt_setsockflag(s, SRTO_LATENCY,     &latency_ms, sizeof(latency_ms));
         srt_setsockflag(s, SRTO_PAYLOADSIZE, &payload, sizeof(payload));
         srt_setsockflag(s, SRTO_TSBPDMODE,   &yes, sizeof(yes));
         srt_setsockflag(s, SRTO_TLPKTDROP,   &yes, sizeof(yes));
         srt_setsockflag(s, SRTO_SNDSYN,      &no,  sizeof(no));
+        apply_pace(s);
     }
 
     void listen_loop() {
