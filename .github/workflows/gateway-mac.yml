@@ -1,0 +1,34 @@
+name: Gateway installer (macOS)
+
+# Builds the Arena Comms Gateway .dmg on GitHub's Mac machines (a .dmg cannot be built on Windows).
+# Run it from the Actions tab ("Run workflow"); the installers appear under "Artifacts" on the finished run.
+on:
+  workflow_dispatch:
+
+jobs:
+  dmg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple silicon (M1/M2/M3...)
+            arch: arm64
+          - runner: macos-13   # Intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: ui/comms-gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build -- --mac dmg --${{ matrix.arch }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Arena-Comms-Gateway-mac-${{ matrix.arch }}
+          path: ui/comms-gateway/release/*.dmg

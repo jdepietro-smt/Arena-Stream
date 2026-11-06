@@ -51,6 +51,14 @@ async function prefer(alias: string | null): Promise<NetResult> {
 
 let changed = false
 export function registerNetFail() {
+  if (process.platform !== 'win32') {
+    // Switching lines by interface metric is Windows-only for now; on a Mac the page sees no adapters to choose from.
+    const no = { ok: false as const, error: 'Switching internet lines is only available on Windows.' }
+    ipcMain.handle('net:info', async () => ({ admin: false, adapters: [] }))
+    ipcMain.handle('net:prefer', async () => no)
+    ipcMain.handle('app:relaunchAdmin', async () => no)
+    return
+  }
   ipcMain.handle('net:info', async () => ({ admin: await isAdmin(), adapters: await adapters() }))
   ipcMain.handle('net:prefer', async (_e, alias: string | null) => {
     const r = await prefer(alias)

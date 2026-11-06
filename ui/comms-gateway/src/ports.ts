@@ -100,15 +100,28 @@ export const defaultConfig = (): GatewayConfig => ({
 })
 
 /** Settings that need the audio graph rebuilt when they change (the rest apply live). */
-export function structuralKey(cfg: GatewayConfig): string {
+/** What the audio devices need: only a change here closes and reopens an interface. Routing changes do not. */
+export function deviceKey(cfg: GatewayConfig): string {
+  const active = cfg.ports.filter(p => p.enabled)
   return JSON.stringify({
     d: cfg.device,
     a: (cfg.asio ?? []).map(a => ({ i: a.id, d: a.driver || a.deviceId, f: a.frames })),
-    p: cfg.ports.map(p => ({
-      id: p.id, e: p.enabled, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, di: p.inDev ?? '', do: p.outDev ?? '', st: !!p.stereo, ii: p.inputId ?? '', oi: p.outputId ?? '',
-      r: p.source === 'rtp' ? p.rtp : null,
-    })),
+    ids: [...new Set(active.filter(p => p.source === 'device').flatMap(p => [p.inputId || cfg.device.inputId, p.outputId || cfg.device.outputId]))].sort(),
+    // An interface streams its first MAX_NODE_CH inputs and outputs whatever is routed; a port beyond that widens the stream.
+    wide: active.filter(p => p.source === 'asio' && (p.inCh >= MAX_NODE_CH || p.outCh > MAX_NODE_CH)).map(p => [p.inDev ?? '', p.inCh, p.outDev ?? '', p.outCh]),
   })
+}
+
+/** Everything about one port that needs its audio path rewired when it changes (gains and VOX do not). */
+export function portKey(p: PortCfg): string {
+  return JSON.stringify({
+    id: p.id, c: p.channel, s: p.source, i: p.inCh, o: p.outCh, di: p.inDev ?? '', do: p.outDev ?? '', st: !!p.stereo, ii: p.inputId ?? '', oi: p.outputId ?? '',
+    r: p.source === 'rtp' ? p.rtp : null,
+  })
+}
+
+export function structuralKey(cfg: GatewayConfig): string {
+  return JSON.stringify({ d: deviceKey(cfg), p: cfg.ports.filter(p => p.enabled).map(portKey) })
 }
 
 declare global {
@@ -158,6 +171,10 @@ class Port implements PortRuntime {
   lastAbove = 0
   lastOut = 0
   nodes: AudioNode[] = []
+  /** portKey() when wired, and how to take this port's connections out again. */
+  key = ''
+  undo: (() => void)[] = []
+  osc: OscillatorNode | null = null
   rxNode: AudioWorkletNode | null = null
   inAn!: AnalyserNode
   outAn!: AnalyserNode
@@ -190,6 +207,12 @@ export class GatewayRuntime {
   private streams: MediaStream[] = []
   private sinks: HTMLAudioElement[] = []
   private builtKey = ''
+  private devKey = ''
+  private pending: GatewayConfig | null = null
+  private devNodes: AudioNode[] = []
+  /** The open audio devices, kept across routing changes. */
+  private dev: { ins: Map<string, { splitter: ChannelSplitterNode; chans: number }>; asio: Map<string, AsioGraph> } = { ins: new Map(), asio: new Map() }
+  private outsMap = new Map<string, { merger: ChannelMergerNode; outs: number }>()
   private building = false
   private rtpBound = false
   /** What each interface opened as (by AsioCfg.id), and its driver's channel counts. */
@@ -231,232 +254,270 @@ export class GatewayRuntime {
     }
   }
 
-  /** Create the audio graph for every enabled port. Needs the engine connected (its context exists). */
+  /** Bring the audio graph in line with the config. A device change reopens the interfaces; a routing change only rewires
+   *  the ports that changed, so the other channels keep playing. Needs the engine connected (its context exists). */
   async build(cfg: GatewayConfig): Promise<void> {
-    if (this.building) return
+    if (this.building) { this.pending = cfg; return }
     this.building = true
     try {
-      this.teardown()
       this.builtKey = structuralKey(cfg)
       const ctx = this.engine.audioContext
       if (!ctx) throw new Error('Audio context not ready')
-      const active = cfg.ports.filter(p => p.enabled)
-      this.engine.setGatewayTx(active.filter(p => p.channel).map(p => p.channel)) // publish only what is routed, not every channel the account may talk on
-      this.deviceError = ''
-
-      // ── audio devices: the shared one plus any a port picks for itself, each opened once ──
-      type DevIn = { splitter: ChannelSplitterNode; chans: number }
-      type DevOut = { merger: ChannelMergerNode; outs: number }
-      const ins = new Map<string, DevIn>()
-      const outs = new Map<string, DevOut>()
-      const inErr = new Map<string, string>()
-      const outErr = new Map<string, string>()
-      const getIn = async (id: string): Promise<DevIn | undefined> => {
-        if (ins.has(id) || inErr.has(id)) return ins.get(id)
-        try {
-          const shared = id === cfg.device.inputId
-          const want = shared ? cfg.device.inputChannels : 2
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              deviceId: id ? { exact: id } : undefined,
-              channelCount: { ideal: want },
-              echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-            },
-          })
-          this.streams.push(stream)
-          const chans = stream.getAudioTracks()[0].getSettings().channelCount ?? 1
-          const src = ctx.createMediaStreamSource(stream)
-          const splitter = ctx.createChannelSplitter(Math.max(chans, want))
-          src.connect(splitter)
-          ins.set(id, { splitter, chans })
-        } catch (e) { inErr.set(id, `Input device: ${(e as Error).message}`) }
-        return ins.get(id)
+      const dk = deviceKey(cfg)
+      if (dk !== this.devKey) {
+        this.teardownPorts()
+        this.teardownDevices()
+        this.devKey = dk
+        await this.buildDevices(cfg, ctx)
       }
-      const getOut = async (id: string): Promise<DevOut | undefined> => {
-        if (outs.has(id) || outErr.has(id)) return outs.get(id)
-        try {
-          if (id === cfg.device.outputId) {
-            // The shared output is the audio context's own output, which can carry many channels.
-            const setSink = (ctx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId
-            if (id && setSink) await setSink.call(ctx, id)
-            const n = Math.max(1, Math.min(ctx.destination.maxChannelCount || 2, cfg.device.outputChannels))
-            ctx.destination.channelCount = n
-            ctx.destination.channelInterpretation = 'discrete'
-            const merger = ctx.createChannelMerger(n)
-            merger.connect(ctx.destination)
-            outs.set(id, { merger, outs: n })
-          } else {
-            // Any other output device gets a stereo path through its own audio element.
-            const dest = ctx.createMediaStreamDestination()
-            dest.channelCount = 2
-            dest.channelCountMode = 'explicit'
-            dest.channelInterpretation = 'discrete'
-            const merger = ctx.createChannelMerger(2)
-            merger.connect(dest)
-            const el = new Audio() as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
-            el.srcObject = dest.stream
-            if (id && el.setSinkId) await el.setSinkId(id)
-            await el.play().catch(() => { /* started by the first audio */ })
-            this.sinks.push(el)
-            outs.set(id, { merger, outs: 2 })
-          }
-        } catch (e) { outErr.set(id, `Output device: ${(e as Error).message}`) }
-        return outs.get(id)
-      }
-
-      // ── ASIO: every channel of every interface, each bridged by the desktop app ──
-      const asio = new Map<string, AsioGraph>()
-      const wanted = (cfg.asio ?? []).filter(a => a.driver || a.deviceId >= 0)
-      if (wanted.length && !window.gw?.asioOpen) {
-        if (active.some(p => p.source === 'asio')) this.deviceError ||= 'ASIO needs the desktop app'
-      } else if (wanted.length) {
-        const listed = (await window.gw!.asioList()).devices ?? []
-        const handlers = new Map<string, (buf: Float32Array, pk?: Float32Array) => void>()
-        window.gw!.onAsioRx((slot, buf, pk) => handlers.get(slot)?.(buf, pk))
-        let moduleLoaded = false
-        for (const a of wanted) try {
-          // The driver is found by name (its number can change between boots), then by the number saved with it.
-          const dev = listed.find(d => d.name === a.driver) ?? listed.find(d => d.id === a.deviceId)
-          const using = active.some(p => p.source === 'asio' && (p.inDev || cfg.asio[0].id) === a.id || p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id)
-          if (!dev) { if (using) this.deviceError ||= `ASIO driver "${a.driver || a.deviceId}" is not available. Is the interface plugged in and switched on?`; continue }
-          // The whole interface is opened even with nothing routed yet, so the grid's meters show activity.
-          // Outputs cost CPU even when silent, so only as many are opened as the ports use (inputs stay whole for the meters).
-          const needOut = active.reduce((m, p) => p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id ? Math.max(m, p.outCh) : m, 0)
-          // Inputs: every channel is measured for the meters, but only the routed ones (and a stereo port's right side) are streamed.
-          const use = new Set<number>()
-          for (const p of active) {
-            if (p.source !== 'asio' || (p.inDev || cfg.asio[0].id) !== a.id || p.inCh < 1) continue
-            use.add(p.inCh - 1)
-            if (this.isStereo(p) || this.engine.channels.find(x => x.id === p.channel)?.withMusic) use.add(p.inCh)
-          }
-          const res = await window.gw!.asioOpen(a.id, { deviceId: dev.id, inputs: 64, outputs: needOut, frames: a.frames, use: [...use] })
-          this.asioInfo.set(a.id, res)
-          if (!res.ok) { this.deviceError ||= `ASIO ${dev.name}: ${res.error}`; continue }
-          if (!moduleLoaded) { await ctx.audioWorklet.addModule('asio-worklet.js'); moduleLoaded = true }
-          const g: AsioGraph = { splitters: [], useIdx: new Map(), chans: res.openedIn ?? 0, mergers: [], outs: res.openedOut ?? 0, devIn: res.inputChannels ?? 0, devOut: res.outputChannels ?? 0 }
-          const peaks = { in: new Float32Array(res.openedIn ?? 0), out: new Float32Array(res.openedOut ?? 0) }
-          this.asioPeaks.set(a.id, peaks)
-          // Web Audio nodes carry at most 32 channels, so a wide interface (Dante: 64) is split into groups of 32.
-          const nIn = res.openedIn ?? 0
-          const nOut = res.openedOut ?? 0
-          const sent = [...use].filter(c => c >= 0 && c < nIn).sort((x, y) => x - y)
-          sent.forEach((c, k) => g.useIdx.set(c, k))
-          const frames = (len: number, ch: number) => Math.floor(len / ch)
-          const inChunks: { first: number; count: number; node: AudioWorkletNode; dry?: number; trims?: number }[] = []
-          for (let first = 0; first < sent.length; first += MAX_NODE_CH) {
-            const count = Math.min(MAX_NODE_CH, sent.length - first)
-            const node = new AudioWorkletNode(ctx, 'asio-in', {
-              numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 1536 }, // a ~32 ms cushion: a late block from the helper must not cut the audio
-            })
-            node.port.onmessage = e => {
-              const d = e.data as { stat?: boolean; dry: number; trims: number }
-              if (!d?.stat) return
-              const h = this.asioHealth.get(a.id) ?? { dry: 0, trims: 0 }
-              this.asioHealth.set(a.id, { dry: h.dry - (inChunks.find(x => x.node === node)?.dry ?? 0) + d.dry, trims: h.trims - (inChunks.find(x => x.node === node)?.trims ?? 0) + d.trims })
-              const me = inChunks.find(x => x.node === node)
-              if (me) { me.dry = d.dry; me.trims = d.trims }
-            }
-            const splitter = ctx.createChannelSplitter(count)
-            node.connect(splitter)
-            g.splitters.push(splitter)
-            inChunks.push({ first, count, node })
-            this.asioNodes.push(node, splitter)
-          }
-          {
-            handlers.set(a.id, (buf, pk) => {
-              if (pk) for (let c = 0; c < peaks.in.length; c++) peaks.in[c] = Math.max(pk[c] ?? 0, peaks.in[c] * 0.7)
-              const fr = frames(buf.length, sent.length)
-              if (!fr) return
-              for (const ch of inChunks) {
-                const part = buf.slice(ch.first * fr, (ch.first + ch.count) * fr) // channel-major, so a group is contiguous
-                ch.node.port.postMessage(part, [part.buffer])
-              }
-            })
-          }
-          for (let first = 0; first < nOut; first += MAX_NODE_CH) {
-            const count = Math.min(MAX_NODE_CH, nOut - first)
-            const outNode = new AudioWorkletNode(ctx, 'asio-out', {
-              numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: count,
-              channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: count },
-            })
-            outNode.port.onmessage = e => {
-              const blk = e.data as Float32Array
-              this.trackPeaks(peaks.out, blk, count, first)
-              window.gw?.asioTx(a.id, blk, first)
-            }
-            const merger = ctx.createChannelMerger(count)
-            merger.connect(outNode)
-            const sink = ctx.createGain()
-            sink.gain.value = 0 // keeps the node pulled by the graph without making any sound
-            outNode.connect(sink).connect(ctx.destination)
-            g.mergers.push(merger)
-            this.asioNodes.push(outNode, sink, merger)
-          }
-          asio.set(a.id, g)
-        } catch (e) { this.deviceError ||= `ASIO ${a.driver}: ${(e as Error).message}` }
-      }
-
-      // ── System audio: whatever this PC is playing (a browser tab, a media player), captured as a stereo loopback ──
-      this.systemError = ''
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { mandatory: { chromeMediaSource: 'desktop' } },
-          video: { mandatory: { chromeMediaSource: 'desktop' } },
-        } as unknown as MediaStreamConstraints)
-        stream.getVideoTracks().forEach(t => t.stop()) // only the sound is wanted
-        if (!stream.getAudioTracks().length) throw new Error('no system audio available')
-        this.streams.push(stream)
-        const src = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()))
-        const splitter = ctx.createChannelSplitter(2)
-        src.connect(splitter)
-        const mix = ctx.createGain()
-        mix.gain.value = 0.5
-        splitter.connect(mix, 0)
-        splitter.connect(mix, 1)
-        const mk = () => { const a = ctx.createAnalyser(); a.fftSize = 1024; return a }
-        const analysers = [mk(), mk(), mk()]
-        mix.connect(analysers[0])
-        splitter.connect(analysers[1], 0)
-        splitter.connect(analysers[2], 1)
-        this.system = { splitter, mix, analysers }
-      } catch (e) { this.systemError = `System audio: ${(e as Error).message}` }
-
-      const needRtp = active.some(p => p.source === 'rtp')
-      if (needRtp) {
-        if (!window.gw) this.deviceError ||= 'Network audio (RTP) needs the desktop app'
-        else {
-          await ctx.audioWorklet.addModule('rtp-worklet.js')
-          this.bindRtpEvents()
-        }
-      }
-
-      for (const cfgPort of active) {
-        const p = new Port(cfgPort)
-        this.ports.push(p)
-        try {
-          let inDev: DevIn | undefined
-          let outDev: DevOut | undefined
-          if (cfgPort.source === 'device') {
-            inDev = await getIn(cfgPort.inputId || cfg.device.inputId)
-            outDev = await getOut(cfgPort.outputId || cfg.device.outputId)
-          }
-          await this.wirePort(ctx, p, inDev, outDev, asio, cfg.asio?.[0]?.id ?? '')
-        } catch (e) { p.error = (e as Error).message }
-      }
-      this.deviceError = [...new Set([...inErr.values(), ...outErr.values()])].join('. ')
-
-      // Stereo ports send their mix as music on the channel (needs the server to let this gateway start music there).
-      for (const p of this.ports) {
-        if (!this.isStereo(p.cfg) || !p.stereoNode) continue
-        const ch = this.engine.channels.find(x => x.id === p.cfg.channel)
-        if (!(ch?.music || ch?.withMusic)) p.error = p.error || 'Stereo needs a music channel (a channel with music switched on)'
-        else if (!ch.canMusic) p.error = p.error || 'This gateway may not start music on that channel (update the server)'
-        else void this.engine.startMusic(p.cfg.channel, { kind: 'node', node: p.stereoNode })
-      }
-      this.timer = setInterval(() => this.voxTick(), 20)
+      await this.buildPorts(cfg, ctx)
+      if (!this.timer) this.timer = setInterval(() => this.voxTick(), 20)
     } finally {
       this.building = false
       this.onChange()
+      const next = this.pending
+      this.pending = null
+      if (next && this.isStale(next)) void this.build(next)
+    }
+  }
+
+  /** Open the audio devices: the shared and per-port ones, every ASIO interface, and the PC's own audio. */
+  private async buildDevices(cfg: GatewayConfig, ctx: AudioContext): Promise<void> {
+    const active = cfg.ports.filter(p => p.enabled)
+    this.deviceError = ''
+    // ── audio devices: the shared one plus any a port picks for itself, each opened once ──
+    type DevIn = { splitter: ChannelSplitterNode; chans: number }
+    type DevOut = { merger: ChannelMergerNode; outs: number }
+    const ins = new Map<string, DevIn>()
+    const outs = new Map<string, DevOut>()
+    const inErr = new Map<string, string>()
+    const outErr = new Map<string, string>()
+    const getIn = async (id: string): Promise<DevIn | undefined> => {
+      if (ins.has(id) || inErr.has(id)) return ins.get(id)
+      try {
+        const shared = id === cfg.device.inputId
+        const want = shared ? cfg.device.inputChannels : 2
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: id ? { exact: id } : undefined,
+            channelCount: { ideal: want },
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          },
+        })
+        this.streams.push(stream)
+        const chans = stream.getAudioTracks()[0].getSettings().channelCount ?? 1
+        const src = ctx.createMediaStreamSource(stream)
+        const splitter = ctx.createChannelSplitter(Math.max(chans, want))
+        src.connect(splitter)
+        ins.set(id, { splitter, chans })
+      } catch (e) { inErr.set(id, `Input device: ${(e as Error).message}`) }
+      return ins.get(id)
+    }
+    const getOut = async (id: string): Promise<DevOut | undefined> => {
+      if (outs.has(id) || outErr.has(id)) return outs.get(id)
+      try {
+        if (id === cfg.device.outputId) {
+          // The shared output is the audio context's own output, which can carry many channels.
+          const setSink = (ctx as unknown as { setSinkId?: (id: string) => Promise<void> }).setSinkId
+          if (id && setSink) await setSink.call(ctx, id)
+          const n = Math.max(1, Math.min(ctx.destination.maxChannelCount || 2, cfg.device.outputChannels))
+          ctx.destination.channelCount = n
+          ctx.destination.channelInterpretation = 'discrete'
+          const merger = ctx.createChannelMerger(n)
+          merger.connect(ctx.destination)
+          this.devNodes.push(merger)
+          outs.set(id, { merger, outs: n })
+        } else {
+          // Any other output device gets a stereo path through its own audio element.
+          const dest = ctx.createMediaStreamDestination()
+          dest.channelCount = 2
+          dest.channelCountMode = 'explicit'
+          dest.channelInterpretation = 'discrete'
+          const merger = ctx.createChannelMerger(2)
+          merger.connect(dest)
+          const el = new Audio() as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }
+          el.srcObject = dest.stream
+          if (id && el.setSinkId) await el.setSinkId(id)
+          await el.play().catch(() => { /* started by the first audio */ })
+          this.sinks.push(el)
+          outs.set(id, { merger, outs: 2 })
+        }
+      } catch (e) { outErr.set(id, `Output device: ${(e as Error).message}`) }
+      return outs.get(id)
+    }
+
+    // ── ASIO: every channel of every interface, each bridged by the desktop app ──
+    const asio = new Map<string, AsioGraph>()
+    const wanted = (cfg.asio ?? []).filter(a => a.driver || a.deviceId >= 0)
+    if (wanted.length && !window.gw?.asioOpen) {
+      if (active.some(p => p.source === 'asio')) this.deviceError ||= 'ASIO needs the desktop app'
+    } else if (wanted.length) {
+      const listed = (await window.gw!.asioList()).devices ?? []
+      const handlers = new Map<string, (buf: Float32Array, pk?: Float32Array) => void>()
+      window.gw!.onAsioRx((slot, buf, pk) => handlers.get(slot)?.(buf, pk))
+      let moduleLoaded = false
+      for (const a of wanted) try {
+        // The driver is found by name (its number can change between boots), then by the number saved with it.
+        const dev = listed.find(d => d.name === a.driver) ?? listed.find(d => d.id === a.deviceId)
+        const using = active.some(p => p.source === 'asio' && (p.inDev || cfg.asio[0].id) === a.id || p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id)
+        if (!dev) { if (using) this.deviceError ||= `ASIO driver "${a.driver || a.deviceId}" is not available. Is the interface plugged in and switched on?`; continue }
+        // The whole interface is opened even with nothing routed yet, so the grid's meters show activity.
+        // Outputs cost CPU even when silent, so only as many are opened as the ports use (inputs stay whole for the meters).
+        const needOut = active.reduce((m, p) => p.source === 'asio' && (p.outDev || cfg.asio[0].id) === a.id ? Math.max(m, p.outCh) : m, Math.min(dev.outputChannels, MAX_NODE_CH))
+        // Inputs: every channel is measured for the meters, but only the routed ones (and a stereo port's right side) are streamed.
+        const use = new Set<number>()
+        for (let c = 0; c < Math.min(dev.inputChannels, MAX_NODE_CH); c++) use.add(c) // always streamed, so routing changes need no reopen
+        for (const p of active) {
+          if (p.source !== 'asio' || (p.inDev || cfg.asio[0].id) !== a.id || p.inCh < 1) continue
+          use.add(p.inCh - 1)
+          if (this.isStereo(p) || this.engine.channels.find(x => x.id === p.channel)?.withMusic) use.add(p.inCh)
+        }
+        const res = await window.gw!.asioOpen(a.id, { deviceId: dev.id, inputs: 64, outputs: needOut, frames: a.frames, use: [...use] })
+        this.asioInfo.set(a.id, res)
+        if (!res.ok) { this.deviceError ||= `ASIO ${dev.name}: ${res.error}`; continue }
+        if (!moduleLoaded) { await ctx.audioWorklet.addModule('asio-worklet.js'); moduleLoaded = true }
+        const g: AsioGraph = { splitters: [], useIdx: new Map(), chans: res.openedIn ?? 0, mergers: [], outs: res.openedOut ?? 0, devIn: res.inputChannels ?? 0, devOut: res.outputChannels ?? 0 }
+        const peaks = { in: new Float32Array(res.openedIn ?? 0), out: new Float32Array(res.openedOut ?? 0) }
+        this.asioPeaks.set(a.id, peaks)
+        // Web Audio nodes carry at most 32 channels, so a wide interface (Dante: 64) is split into groups of 32.
+        const nIn = res.openedIn ?? 0
+        const nOut = res.openedOut ?? 0
+        const sent = [...use].filter(c => c >= 0 && c < nIn).sort((x, y) => x - y)
+        sent.forEach((c, k) => g.useIdx.set(c, k))
+        const frames = (len: number, ch: number) => Math.floor(len / ch)
+        const inChunks: { first: number; count: number; node: AudioWorkletNode; dry?: number; trims?: number }[] = []
+        for (let first = 0; first < sent.length; first += MAX_NODE_CH) {
+          const count = Math.min(MAX_NODE_CH, sent.length - first)
+          const node = new AudioWorkletNode(ctx, 'asio-in', {
+            numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [count], processorOptions: { targetSamples: 1536 }, // a ~32 ms cushion: a late block from the helper must not cut the audio
+          })
+          node.port.onmessage = e => {
+            const d = e.data as { stat?: boolean; dry: number; trims: number }
+            if (!d?.stat) return
+            const h = this.asioHealth.get(a.id) ?? { dry: 0, trims: 0 }
+            this.asioHealth.set(a.id, { dry: h.dry - (inChunks.find(x => x.node === node)?.dry ?? 0) + d.dry, trims: h.trims - (inChunks.find(x => x.node === node)?.trims ?? 0) + d.trims })
+            const me = inChunks.find(x => x.node === node)
+            if (me) { me.dry = d.dry; me.trims = d.trims }
+          }
+          const splitter = ctx.createChannelSplitter(count)
+          node.connect(splitter)
+          g.splitters.push(splitter)
+          inChunks.push({ first, count, node })
+          this.asioNodes.push(node, splitter)
+        }
+        {
+          handlers.set(a.id, (buf, pk) => {
+            if (pk) for (let c = 0; c < peaks.in.length; c++) peaks.in[c] = Math.max(pk[c] ?? 0, peaks.in[c] * 0.7)
+            const fr = frames(buf.length, sent.length)
+            if (!fr) return
+            for (const ch of inChunks) {
+              const part = buf.slice(ch.first * fr, (ch.first + ch.count) * fr) // channel-major, so a group is contiguous
+              ch.node.port.postMessage(part, [part.buffer])
+            }
+          })
+        }
+        for (let first = 0; first < nOut; first += MAX_NODE_CH) {
+          const count = Math.min(MAX_NODE_CH, nOut - first)
+          const outNode = new AudioWorkletNode(ctx, 'asio-out', {
+            numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], channelCount: count,
+            channelCountMode: 'explicit', channelInterpretation: 'discrete', processorOptions: { channels: count },
+          })
+          outNode.port.onmessage = e => {
+            const blk = e.data as Float32Array
+            this.trackPeaks(peaks.out, blk, count, first)
+            window.gw?.asioTx(a.id, blk, first)
+          }
+          const merger = ctx.createChannelMerger(count)
+          merger.connect(outNode)
+          const sink = ctx.createGain()
+          sink.gain.value = 0 // keeps the node pulled by the graph without making any sound
+          outNode.connect(sink).connect(ctx.destination)
+          g.mergers.push(merger)
+          this.asioNodes.push(outNode, sink, merger)
+        }
+        asio.set(a.id, g)
+      } catch (e) { this.deviceError ||= `ASIO ${a.driver}: ${(e as Error).message}` }
+    }
+
+    // ── System audio: whatever this PC is playing (a browser tab, a media player), captured as a stereo loopback ──
+    this.systemError = ''
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { mandatory: { chromeMediaSource: 'desktop' } },
+        video: { mandatory: { chromeMediaSource: 'desktop' } },
+      } as unknown as MediaStreamConstraints)
+      stream.getVideoTracks().forEach(t => t.stop()) // only the sound is wanted
+      if (!stream.getAudioTracks().length) throw new Error('no system audio available')
+      this.streams.push(stream)
+      const src = ctx.createMediaStreamSource(new MediaStream(stream.getAudioTracks()))
+      const splitter = ctx.createChannelSplitter(2)
+      src.connect(splitter)
+      const mix = ctx.createGain()
+      mix.gain.value = 0.5
+      splitter.connect(mix, 0)
+      splitter.connect(mix, 1)
+      const mk = () => { const a = ctx.createAnalyser(); a.fftSize = 1024; return a }
+      const analysers = [mk(), mk(), mk()]
+      mix.connect(analysers[0])
+      splitter.connect(analysers[1], 0)
+      splitter.connect(analysers[2], 1)
+      this.system = { splitter, mix, analysers }
+    } catch (e) { this.systemError = `System audio: ${(e as Error).message}` }
+    for (const cp of active) {
+      if (cp.source !== 'device') continue
+      await getIn(cp.inputId || cfg.device.inputId)
+      await getOut(cp.outputId || cfg.device.outputId)
+    }
+    this.dev = { ins, asio }
+    this.outsMap = outs
+    this.deviceError = [...new Set([this.deviceError, ...inErr.values(), ...outErr.values()].filter(Boolean))].join('. ')
+  }
+
+  /** Wire (or unwire) ports to match the config; a port whose routing did not change is left running. */
+  private async buildPorts(cfg: GatewayConfig, ctx: AudioContext): Promise<void> {
+    const active = cfg.ports.filter(p => p.enabled)
+    this.engine.setGatewayTx(active.filter(p => p.channel).map(p => p.channel)) // publish only what is routed, not every channel the account may talk on
+    const keep = new Map<string, Port>()
+    for (const p of this.ports) {
+      const next = active.find(x => x.id === p.cfg.id)
+      if (next && portKey(next) === p.key) keep.set(p.cfg.id, p)
+      else this.teardownPort(p)
+    }
+    this.ports = []
+    if (active.some(p => p.source === 'rtp')) {
+      if (!window.gw) this.deviceError ||= 'Network audio (RTP) needs the desktop app'
+      else {
+        await ctx.audioWorklet.addModule('rtp-worklet.js')
+        this.bindRtpEvents()
+      }
+    }
+    const added: Port[] = []
+    for (const cfgPort of active) {
+      const have = keep.get(cfgPort.id)
+      if (have) { have.cfg = cfgPort; this.ports.push(have); continue }
+      const p = new Port(cfgPort)
+      p.key = portKey(cfgPort)
+      this.ports.push(p)
+      added.push(p)
+      try {
+        let inDev: { splitter: ChannelSplitterNode; chans: number } | undefined
+        let outDev: { merger: ChannelMergerNode; outs: number } | undefined
+        if (cfgPort.source === 'device') {
+          inDev = this.dev.ins.get(cfgPort.inputId || cfg.device.inputId)
+          outDev = this.outsMap.get(cfgPort.outputId || cfg.device.outputId)
+        }
+        await this.wirePort(ctx, p, inDev, outDev, this.dev.asio, cfg.asio?.[0]?.id ?? '')
+      } catch (e) { p.error = (e as Error).message }
+    }
+    this.updateParams(cfg)
+
+    // Stereo ports send their mix as music on the channel (needs the server to let this gateway start music there).
+    for (const p of added) {
+      if (!this.isStereo(p.cfg) || !p.stereoNode) continue
+      const ch = this.engine.channels.find(x => x.id === p.cfg.channel)
+      if (!(ch?.music || ch?.withMusic)) p.error = p.error || 'Stereo needs a music channel (a channel with music switched on)'
+      else if (!ch.canMusic) p.error = p.error || 'This gateway may not start music on that channel (update the server)'
+      else void this.engine.startMusic(p.cfg.channel, { kind: 'node', node: p.stereoNode })
     }
   }
 
@@ -466,6 +527,11 @@ export class GatewayRuntime {
   private async wirePort(ctx: AudioContext, p: Port, inDev?: { splitter: ChannelSplitterNode; chans: number }, outDev?: { merger: ChannelMergerNode; outs: number }, asio?: Map<string, AsioGraph>, firstAsio = '') {
     const system = this.system
     const c = p.cfg
+    // Every connection made from outside this port's own nodes is recorded so teardownPort() can take it out again.
+    const link = (a: AudioNode, b: AudioNode, o?: number, i?: number) => {
+      if (o === undefined) a.connect(b); else if (i === undefined) a.connect(b, o); else a.connect(b, o, i)
+      p.undo.push(() => { try { if (o === undefined) a.disconnect(b); else if (i === undefined) a.disconnect(b, o); else a.disconnect(b, o, i) } catch { /* already gone */ } })
+    }
     if (!c.channel) { p.error = 'Pick an Arena channel'; return }
 
     // Common input chain: source -> inGain -> analyser, and -> look-ahead delay -> channel transmit bus.
@@ -475,25 +541,25 @@ export class GatewayRuntime {
     p.inGain.connect(p.inAn)
     p.inGain.connect(delay)
     const stereo = this.isStereo(c)
-    if (!stereo) delay.connect(this.engine.channelTx(c.channel))
+    if (!stereo) link(delay, this.engine.channelTx(c.channel))
     // Built-in test tone (1 kHz) for commissioning, injected ahead of the gain stage.
     const osc = ctx.createOscillator(); osc.frequency.value = 1000
     p.toneGain = ctx.createGain(); p.toneGain.gain.value = 0
-    osc.connect(p.toneGain).connect(p.inGain); osc.start()
+    osc.connect(p.toneGain).connect(p.inGain); osc.start(); p.osc = osc
 
     // Common output chain: channel receive bus -> outGain -> analyser (and sink).
     p.outGain = ctx.createGain(); p.outGain.gain.value = dbToGain(c.outGainDb)
     p.outAn = ctx.createAnalyser(); p.outAn.fftSize = 1024; p.outAn.smoothingTimeConstant = 0
-    this.engine.channelRx(c.channel).connect(p.outGain)
+    link(this.engine.channelRx(c.channel), p.outGain)
     p.outGain.connect(p.outAn)
 
     if (c.source === 'device') {
       if (!inDev) p.error = 'Input device not available'
       else if (c.inCh < 1 || c.inCh > inDev.chans) p.error = `Input channel ${c.inCh} not available (this device gives ${inDev.chans})`
-      else inDev.splitter.connect(p.inGain, c.inCh - 1)
+      else link(inDev.splitter, p.inGain, c.inCh - 1)
       if (!outDev) p.error = p.error || 'Output device not available'
       else if (c.outCh < 1 || c.outCh > outDev.outs) p.error = p.error || `Output channel ${c.outCh} not available (this device has ${outDev.outs} outputs)`
-      else p.outGain.connect(outDev.merger, 0, c.outCh - 1)
+      else link(p.outGain, outDev.merger, 0, c.outCh - 1)
     } else if (c.source === 'asio') {
       const fromSystem = c.inDev === SYSTEM_DEV
       const gi = fromSystem ? undefined : asio?.get(c.inDev || firstAsio)
@@ -502,11 +568,11 @@ export class GatewayRuntime {
         // Stereo: this input is left and the next is right (for the PC's own audio, its left and right as they are).
         const st = ctx.createChannelMerger(2)
         const tap = (ch: number, side: number) => {
-          if (fromSystem) { if (system) system.splitter.connect(st, side, side); return !!system }
+          if (fromSystem) { if (system) link(system.splitter, st, side, side); return !!system }
           if (!gi || ch < 1 || ch > gi.chans) return false
           const k = gi.useIdx.get(ch - 1)
           if (k == null) return false
-          gi.splitters[Math.floor(k / MAX_NODE_CH)].connect(st, k % MAX_NODE_CH, side)
+          link(gi.splitters[Math.floor(k / MAX_NODE_CH)], st, k % MAX_NODE_CH, side)
           return true
         }
         if (c.inCh < 1) { /* no input routed */ } else if (!tap(c.inCh, 0) || !tap(c.inCh + 1, 1)) p.error = fromSystem ? this.systemError || 'System audio is not available' : `Stereo needs inputs ${c.inCh} and ${c.inCh + 1} on this interface`
@@ -518,18 +584,18 @@ export class GatewayRuntime {
         }
       } else if (c.inCh < 1) { /* no input routed */ } else if (fromSystem) {
         if (!system) p.error = this.systemError || 'System audio is not available'
-        else if (c.inCh === 1) system.mix.connect(p.inGain)
-        else system.splitter.connect(p.inGain, c.inCh - 2)
+        else if (c.inCh === 1) link(system.mix, p.inGain)
+        else link(system.splitter, p.inGain, c.inCh - 2)
       } else if (!gi) p.error = 'ASIO interface not available'
       else if (c.inCh > gi.chans) p.error = `ASIO input ${c.inCh} not available (this driver has ${gi.devIn})`
       else {
         const k = gi.useIdx.get(c.inCh - 1)
         if (k == null) p.error = `ASIO input ${c.inCh} is not being sent`
-        else gi.splitters[Math.floor(k / MAX_NODE_CH)].connect(p.inGain, k % MAX_NODE_CH)
+        else link(gi.splitters[Math.floor(k / MAX_NODE_CH)], p.inGain, k % MAX_NODE_CH)
       }
       if (c.outCh < 1) { /* no output routed */ } else if (!go) p.error = p.error || 'ASIO interface not available'
       else if (c.outCh > go.outs) p.error = p.error || `ASIO output ${c.outCh} not available (this driver has ${go.devOut})`
-      else p.outGain.connect(go.mergers[Math.floor((c.outCh - 1) / MAX_NODE_CH)], 0, (c.outCh - 1) % MAX_NODE_CH)
+      else link(p.outGain, go.mergers[Math.floor((c.outCh - 1) / MAX_NODE_CH)], 0, (c.outCh - 1) % MAX_NODE_CH)
     } else if (c.source === 'rtp') {
       const r = c.rtp
       const res = await window.gw!.rtpOpen(c.id, r)
@@ -543,7 +609,7 @@ export class GatewayRuntime {
       tx.port.onmessage = e => window.gw!.rtpTx(c.id, e.data as Float32Array)
       p.outGain.connect(tx)
       const sink = ctx.createGain(); sink.gain.value = 0 // keeps the tap pulled by the graph without making sound
-      tx.connect(sink).connect(ctx.destination)
+      tx.connect(sink); link(sink, ctx.destination)
     }
     // 'tone' sources have no external audio: test tone in, meters out.
   }
@@ -602,20 +668,30 @@ export class GatewayRuntime {
     if (changed) this.onChange()
   }
 
-  teardown() {
-    if (this.timer) clearInterval(this.timer)
-    this.timer = null
-    for (const p of this.ports) {
-      if (p.open) this.engine.release(p.cfg.channel)
-      if (this.isStereo(p.cfg)) this.engine.stopMusic(p.cfg.channel)
-      if (p.cfg.source === 'rtp') void window.gw?.rtpClose(p.cfg.id)
-      p.rxNode?.disconnect()
-    }
+  /** Take one port out of the graph, releasing its channel. The devices stay open. */
+  private teardownPort(p: Port) {
+    if (p.open) this.engine.release(p.cfg.channel)
+    p.open = false
+    if (this.isStereo(p.cfg)) this.engine.stopMusic(p.cfg.channel)
+    if (p.cfg.source === 'rtp') void window.gw?.rtpClose(p.cfg.id)
+    p.rxNode?.disconnect()
+    try { p.osc?.stop() } catch { /* not started */ }
+    for (const u of p.undo) u()
+    p.undo = []
+  }
+
+  private teardownPorts() {
+    for (const p of this.ports) this.teardownPort(p)
     this.ports = []
+  }
+
+  private teardownDevices() {
     for (const st of this.streams) st.getTracks().forEach(t => t.stop())
     this.streams = []
     for (const el of this.sinks) { el.pause(); el.srcObject = null }
     this.sinks = []
+    for (const n of this.devNodes) { try { n.disconnect() } catch { /* already gone */ } }
+    this.devNodes = []
     if (this.asioNodes.length || this.asioInfo.size) {
       window.gw?.onAsioRx(null)
       void window.gw?.asioClose()
@@ -625,7 +701,18 @@ export class GatewayRuntime {
       this.asioHealth.clear()
       this.asioPeaks.clear()
     }
+    this.dev = { ins: new Map(), asio: new Map() }
+    this.outsMap = new Map()
     this.system = null
+    this.devKey = ''
+  }
+
+  teardown() {
+    if (this.timer) clearInterval(this.timer)
+    this.timer = null
+    this.pending = null
+    this.teardownPorts()
+    this.teardownDevices()
     this.builtKey = ''
   }
 }

@@ -23,7 +23,7 @@ let lastList: { ok: boolean; devices?: AsioDevice[]; error?: string } | null = n
 
 /** The Node binary for the helper: the one shipped beside the app, else the Node on this machine (development). */
 function nodeBinary(): string | undefined {
-  const shipped = path.join(process.resourcesPath ?? '', 'node', 'node.exe')
+  const shipped = path.join(process.resourcesPath ?? '', 'node', process.platform === 'win32' ? 'node.exe' : 'node')
   return fs.existsSync(shipped) ? shipped : undefined
 }
 

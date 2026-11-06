@@ -14,6 +14,8 @@ import { SampleRing, deinterleave, interleaveFromRings } from './asio-core'
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const audify: any = require('audify')
 const RATE = 48000
+// Windows reaches multichannel interfaces through ASIO; macOS through Core Audio, which already offers every channel.
+const API = process.platform === 'darwin' ? audify.RtAudioApi.MACOSX_CORE : audify.RtAudioApi.WINDOWS_ASIO
 
 interface AsioDevice { id: number; name: string; inputChannels: number; outputChannels: number; sampleRates: number[] }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,7 +27,7 @@ const reply = (id: number, result: unknown) => process.send?.({ id, result })
 
 function list() {
   try {
-    const devices = new audify.RtAudio(audify.RtAudioApi.WINDOWS_ASIO).getDevices().map((d: AsioDevice) => ({
+    const devices = new audify.RtAudio(API).getDevices().map((d: AsioDevice) => ({
       id: d.id, name: d.name, inputChannels: d.inputChannels, outputChannels: d.outputChannels, sampleRates: d.sampleRates,
     }))
     return { ok: true, devices }
@@ -45,7 +47,7 @@ function close() {
 function open(cfg: { deviceId: number; inputs: number; outputs: number; frames?: number; use?: number[] }) {
   close()
   try {
-    const api = new audify.RtAudio(audify.RtAudioApi.WINDOWS_ASIO)
+    const api = new audify.RtAudio(API)
     const dev: AsioDevice | undefined = api.getDevices().find((d: AsioDevice) => d.id === cfg.deviceId)
     if (!dev) return { ok: false, error: 'That ASIO driver is not available. Is the interface plugged in and switched on?' }
     const nIn = Math.max(0, Math.min(cfg.inputs, dev.inputChannels))

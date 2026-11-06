@@ -48,7 +48,29 @@
           ]
         }
       ],
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "extraResources": [
+        {
+          "from": "build/node.exe",
+          "to": "node/node.exe"
+        }
+      ]
+    },
+    "mac": {
+      "extraResources": [
+        {
+          "from": "build/node",
+          "to": "node/node"
+        }
+      ],
+      "target": "dmg",
+      "category": "public.app-category.video",
+      "icon": "build/icon.png",
+      "identity": null,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Arena Comms Gateway needs your audio interface inputs to send comms audio."
+      },
+      "artifactName": "Arena-Comms-Gateway-${version}-${arch}.${ext}"
     },
     "artifactName": "Arena-Comms-Gateway-Setup-${version}.${ext}",
     "nsis": {
@@ -60,13 +82,7 @@
       "shortcutName": "Arena Comms Gateway"
     },
     "npmRebuild": false,
-    "asar": false,
-    "extraResources": [
-      {
-        "from": "build/node.exe",
-        "to": "node/node.exe"
-      }
-    ]
+    "asar": false
   },
   "allowScripts": {
     "audify@1.10.1": true
