@@ -1030,7 +1030,8 @@ export class CommsEngine {
         this.sfuGains.set(name, gain)
         this.publishCount++
         this.sfuPubs.set(name, await room.localParticipant.publishTrack(dest.stream.getAudioTracks()[0], {
-          name, source: Track.Source.Unknown, dtx: true, red: true, // RED repeats the previous frame in each packet, so a single lost packet costs nothing audible
+          // A gateway carries continuous feeds (program, music, tones), which silence suppression (DTX) mistakes for noise and makes drift in level.
+        name, source: Track.Source.Unknown, dtx: !this.opts?.gateway, red: true, // RED repeats the previous frame in each packet, so a single lost packet costs nothing audible
           audioPreset: { maxBitrate: 32_000 },
         }))
       }
