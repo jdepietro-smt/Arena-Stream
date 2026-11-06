@@ -104,6 +104,15 @@ $('signin').onclick = async () => {
     initHostPane()
   } catch (e) { $('loginErr').textContent = e.message }
 }
+$('directMode').onclick = async () => {
+  base = ''; token = ''
+  show($('login'), false); show($('app'), true)
+  $('who').textContent = 'Direct mode (no server)'
+  show($('acctViewer'), false); show($('startHost'), false); show($('enroll'), false); show($('hostSetup'), true)
+  hostInfo = await arena.identity.info()
+  $('hostReadable').textContent = hostInfo.readable
+  loadSources()
+}
 for (const id of ['user', 'pass', 'server']) $(id).onkeydown = e => { if (e.key === 'Enter') $('signin').click() }
 
 $('tabViewer').onclick = () => tab('viewer')
@@ -139,35 +148,103 @@ function renderHosts(hosts) {
 
 let view = null // active viewer session
 
-async function connectTo(h) {
+async function connectTo(h, direct) {
   if (view) return
+  const cancel = () => direct?.ws.close()
   const pin = await arena.pin.status(h.id, h.pubKey)
-  if (pin.status === 'invalid') return ask('The server returned a key that does not match this computer. Not connecting.', [['OK', 1]])
+  if (pin.status === 'invalid') { cancel(); return ask('The server returned a key that does not match this computer. Not connecting.', [['OK', 1]]) }
   if (pin.status === 'changed') {
-    const go = await ask(`WARNING: the identity of "${h.name}" has CHANGED since you last connected. This could mean someone is impersonating it. Do not continue unless the owner re-registered it.`, [['Cancel', false], ['Trust new identity', true, 'danger']])
-    if (!go) return
+    const go = await ask(`WARNING: the identity of "${h.name}" has CHANGED since you last connected. This could mean the computer was reinstalled, or someone is impersonating it.`, [['Cancel', false], ['Trust new identity', true, 'danger']])
+    if (!go) return cancel()
     await arena.pin.accept(h.id, h.pubKey)
+  } else if (pin.status === 'new' && direct) {
+    await arena.pin.accept(h.id, h.pubKey) // the host already proved it knows the access code, bound to this key
   } else if (pin.status === 'new') {
     const go = await ask(`First time connecting to "${h.name}". Check that its Computer ID is ${pin.readable}. Trust it?`, [['Cancel', false], ['Trust and connect', true]])
     if (!go) return
     await arena.pin.accept(h.id, h.pubKey)
   }
-  openStage(h)
+  openStage(h, direct)
 }
 
-function openStage(h) {
+// ---------- direct (serverless) viewer ----------
+const DIRECT_ICE = [{ urls: 'stun:stun.l.google.com:19302' }]
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+async function hmac(code, msg) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  return b64(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg)))
+}
+async function hostIdOf(pubKey) {
+  const raw = Uint8Array.from(atob(pubKey), c => c.charCodeAt(0))
+  const hash = b64(await crypto.subtle.digest('SHA-256', raw)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return hash.slice(0, 22)
+}
+
+/** Opens the socket and runs the mutual access-code proof. Resolves { h, ws, sessionId }. */
+function pairDirect(addr, rawCode) {
+  const code = rawCode.toUpperCase().replace(/[^A-Z0-9]/g, '')
+  if (code.length !== 10) return Promise.reject(new Error('The access code has 10 characters'))
+  if (!/^[\w.\-\[\]:]+$/.test(addr)) return Promise.reject(new Error('That address does not look right'))
+  const ws = new WebSocket('ws://' + (/:\d+$/.test(addr) ? addr : addr + ':8951'))
+  return new Promise((res, rej) => {
+    let host = null, nonce = null
+    const fail = msg => { try { ws.close() } catch {} rej(new Error(msg)) }
+    const timer = setTimeout(() => fail('No answer from that address'), 10000)
+    ws.onerror = () => fail('Cannot reach that address')
+    ws.onclose = () => fail('The other computer closed the connection')
+    ws.onmessage = async e => {
+      const m = JSON.parse(e.data)
+      if (m.t === 'challenge') {
+        host = { id: await hostIdOf(m.pubKey), name: String(m.name).slice(0, 60), pubKey: m.pubKey }; nonce = m.nonce
+        ws.send(JSON.stringify({ t: 'join', proof: await hmac(code, `viewer|${nonce}|${m.pubKey}`) }))
+      } else if (m.t === 'joined') {
+        clearTimeout(timer)
+        // The host must know the code too, and sign over the same key: otherwise something in the middle answered.
+        if (m.proof !== await hmac(code, `host|${nonce}|${host.pubKey}`)) return fail('That computer did not prove it knows the code. Not connecting.')
+        ws.onclose = null; ws.onerror = null
+        res({ h: host, ws, sessionId: m.sessionId })
+      } else if (m.t === 'error') {
+        fail({ code: 'Wrong access code', locked: 'Too many wrong codes. Wait a minute and try again.', busy: 'That computer already has a session.' }[m.error] ?? 'Connection refused')
+      }
+    }
+  })
+}
+
+$('dConnect').onclick = async () => {
+  if (view) return
+  $('viewerMsg').textContent = 'Connecting…'
+  try {
+    const d = await pairDirect($('dAddr').value.trim(), $('dCode').value)
+    $('viewerMsg').textContent = ''
+    await connectTo(d.h, d)
+  } catch (e) { $('viewerMsg').textContent = e.message }
+}
+for (const id of ['dAddr', 'dCode']) $(id).onkeydown = e => { if (e.key === 'Enter') $('dConnect').click() }
+
+function openStage(h, direct) {
   show($('stage'), true); show($('app'), false)
   $('stageName').textContent = h.name
   $('stageMsg').textContent = 'Waiting for the other computer to accept…'
   const v = view = { h, pc: null, conn: null, sessionId: null, ctl: null, fast: null, closed: false, statsTimer: null, locked: false, pendingMove: null, ready: false }
 
-  v.conn = signaling('/viewer', async m => {
+  const onMsg = async m => {
     if (m.t === 'ready') return v.conn.send({ t: 'connect', hostId: h.id })
     if (m.t === 'session') { v.sessionId = m.sessionId; return startPeer(v) }
     if (m.t === 'signal') return onViewerSignal(v, m.data)
     if (m.t === 'ended') return leave(v, m.reason === 'denied' ? 'The other computer declined the connection.' : 'Session ended.')
     if (m.t === 'error') return leave(v, 'That computer is not available.')
-  }, () => leave(v, 'Lost connection to the server.'))
+  }
+  if (direct) { // already paired over its own socket; the host raises its consent prompt on 'go'
+    const { ws } = direct
+    v.conn = { ws, send: m => ws.readyState === 1 && ws.send(JSON.stringify(m)) }
+    ws.onmessage = e => onMsg(JSON.parse(e.data))
+    ws.onclose = () => leave(v, 'Connection lost.')
+    v.sessionId = direct.sessionId
+    ice = DIRECT_ICE
+    v.conn.send({ t: 'go' })
+    return void startPeer(v)
+  }
+  v.conn = signaling('/viewer', onMsg, () => leave(v, 'Lost connection to the server.'))
   v.conn.opened.then(() => v.conn.send({ t: 'auth', token })).catch(e => leave(v, e.message))
 }
 
@@ -347,12 +424,33 @@ async function loadSources() {
 
 $('unattended').onchange = () => show($('passRow'), $('unattended').checked)
 
-$('startHost').onclick = async () => {
+async function prepareAccess() {
   if ($('unattended').checked) {
-    if (!$('passcode').value && !(await arena.passcode.has())) return alert('Set a passcode of at least 8 characters.')
-    if ($('passcode').value && !(await arena.passcode.set($('passcode').value))) return alert('Passcode must be at least 8 characters.')
+    if (!$('passcode').value && !(await arena.passcode.has())) return alert('Set a passcode of at least 8 characters.'), false
+    if ($('passcode').value && !(await arena.passcode.set($('passcode').value))) return alert('Passcode must be at least 8 characters.'), false
     $('passcode').value = ''
   }
+  return true
+}
+
+$('startDirect').onclick = async () => {
+  if (!(await prepareAccess())) return
+  let info
+  try { info = await arena.direct.start() } catch (e) { return alert(e.message) }
+  await arena.host.arm(true, hostSel)
+  ice = DIRECT_ICE
+  hostConn = { send: m => arena.direct.send(m), ws: { close: () => arena.direct.stop() }, unattended: $('unattended').checked }
+  const addrs = info.addresses.map(a => (info.port === 8951 ? a : `${a}:${info.port}`))
+  $('dInfoAddr').textContent = addrs.join('   or   ') || 'no network address found'
+  $('dInfoCode').textContent = info.code
+  show($('directInfo'), true)
+  $('hostStatus').textContent = 'Sharing — waiting for a connection'
+  show($('hostSetup'), false); show($('hostLive'), true)
+}
+arena.direct.onMessage(m => { if (hostConn) onHostMessage(m) })
+
+$('startHost').onclick = async () => {
+  if (!(await prepareAccess())) return
   await arena.host.arm(true, hostSel)
   hostConn = signaling('/host', onHostMessage, () => { if (hostConn) stopHost('Lost connection to the server.') })
   hostConn.unattended = $('unattended').checked
@@ -426,7 +524,7 @@ async function onHostSignal(d) {
   await pc.setLocalDescription(answer)
   const sig = await arena.identity.sign(`arena-remote-session|${s.sessionId}|${fingerprint(answer.sdp)}|${fingerprint(d.sdp)}`)
   hostConn.send({ t: 'signal', sessionId: s.sessionId, data: { type: 'answer', sdp: answer.sdp, sig } })
-  $('hostStatus').textContent = `Connected: ${s.user}${s.authorized ? '' : ' (waiting for passcode)'}${(await arena.helperStatus()) ? ' � elevated access on' : ''}`
+  $('hostStatus').textContent = `Connected: ${s.user}${s.authorized ? '' : ' (waiting for passcode)'}${(await arena.helperStatus()) ? ' — elevated access on' : ''}`
   show($('hostSession'), true)
   $('hostWho').textContent = `${s.user} is ${s.authorized ? 'connected' : 'connecting'}.`
   updateControlButton()
@@ -478,7 +576,7 @@ async function swapVideo(s, toSecure) {
   track.enabled = s.authorized
   await sender.replaceTrack(track)
   s.secureActive = toSecure
-  $('hostStatus').textContent = toSecure ? `Connected: ${s.user} � secure desktop (UAC / sign-in)` : `Connected: ${s.user}`
+  $('hostStatus').textContent = toSecure ? `Connected: ${s.user} — secure desktop (UAC / sign-in)` : `Connected: ${s.user}`
   arena.host.frames(toSecure)
 }
 arena.onDesktop(name => { if (hostState?.pc) swapVideo(hostState, name !== 'Default').catch(() => {}) })
@@ -523,7 +621,7 @@ function stopHost(msg) {
   const c = hostConn; hostConn = null
   c?.ws.close()
   arena.host.arm(false)
-  show($('hostLive'), false); show($('hostSetup'), true)
+  show($('hostLive'), false); show($('hostSetup'), true); show($('directInfo'), false)
   if (msg) alert(msg)
 }
 $('stopHost').onclick = () => stopHost()

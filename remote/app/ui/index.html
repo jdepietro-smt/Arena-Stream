@@ -15,6 +15,9 @@
   <label>Password<input id="pass" type="password" autocomplete="current-password"></label>
   <button id="signin" class="primary">Sign in</button>
   <p id="loginErr" class="err"></p>
+  <hr>
+  <button id="directMode">Use without a server</button>
+  <p class="muted">Connect two computers directly with an access code. No account needed.</p>
 </main>
 
 <div id="app" hidden>
@@ -25,8 +28,16 @@
   </header>
 
   <section id="viewerPane">
-    <h2>Your computers</h2>
-    <div id="hosts" class="grid"></div>
+    <div id="acctViewer">
+      <h2>Your computers</h2>
+      <div id="hosts" class="grid"></div>
+    </div>
+    <div class="card" id="directCard">
+      <h3>Connect directly</h3>
+      <label>Address of the other computer (shown on its screen)<input id="dAddr" placeholder="192.168.1.20" spellcheck="false"></label>
+      <label>Access code<input id="dCode" placeholder="XXXXX-XXXXX" spellcheck="false" autocomplete="off"></label>
+      <button id="dConnect" class="primary">Connect</button>
+    </div>
     <p id="viewerMsg" class="muted"></p>
   </section>
 
@@ -44,11 +55,18 @@
       <h3>Access</h3>
       <label class="row"><input type="checkbox" id="unattended"> Allow unattended access with a passcode (no one needs to be here to approve)</label>
       <label id="passRow" hidden>Passcode (8+ characters, asked of the viewer)<input id="passcode" type="password"></label>
-      <button id="startHost" class="primary">Start sharing</button>
+      <button id="startHost" class="primary">Start sharing (account)</button>
+      <button id="startDirect" class="primary">Start sharing without a server</button>
       <p class="muted">Emergency stop on this computer: <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>End</kbd></p>
     </div>
     <div id="hostLive" class="card" hidden>
       <p><span class="dot"></span> <span id="hostStatus">Waiting for a connection</span></p>
+      <div id="directInfo" hidden>
+        <p>On the other computer choose <strong>Use without a server</strong>, then enter:</p>
+        <p>Address <code id="dInfoAddr"></code></p>
+        <p>Access code <code id="dInfoCode"></code></p>
+        <p class="muted">The code stays valid while you share. Over the internet, forward TCP port 8951 to this computer, or use a VPN such as Tailscale and enter this computer's VPN address.</p>
+      </div>
       <div id="hostSession" hidden>
         <p id="hostWho"></p>
         <button id="toggleControl">Allow control</button> <button id="endSession" class="danger">End session</button>

@@ -3,10 +3,21 @@
 Secure, low-latency remote desktop for the Arena suite. Sign in, pick one of your computers, and operate it
 with 60 fps video, system audio, mouse and keyboard.
 
-- `server/` — accounts, host registry and WebRTC signaling (Node, `ws`). It never carries media or input.
 - `app/` — Electron app. One build is both the **host** ("Share this computer") and the **viewer** ("Connect to a computer").
+- `server/` — optional. Accounts, a list of your computers and WebRTC signaling (Node, `ws`). It never carries media or input.
 
-## Run it
+## Quick start: no server
+
+Install the app on both computers and choose **Use without a server** on the sign-in screen.
+1. On the computer to reach: **Share this computer**, pick the screen, **Start sharing without a server**. It shows its address and an access code.
+2. On the other computer: **Connect directly**, enter that address and code. The person at the host approves the connection.
+
+The code is never sent: host and viewer prove they know it to each other (HMAC over a fresh nonce, bound to the host's key), so a
+machine in the middle can neither learn it nor pose as the host; 5 wrong tries lock the door for a minute. On a LAN this just works
+(the installer opens the firewall for private networks). Over the internet forward TCP 8951 to the host, or put both machines on a VPN
+such as Tailscale and use the host's VPN address. Direct mode pairs per run of sharing; for accounts and a list of computers use the server.
+
+## Run it (with the account server)
 
 ```bash
 cd remote/server && npm i && node server.js add-user alice "a long passphrase"   # 10+ chars

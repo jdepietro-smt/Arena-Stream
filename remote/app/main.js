@@ -5,6 +5,8 @@ const { app, BrowserWindow, desktopCapturer, globalShortcut, ipcMain, screen, se
 const path = require('node:path')
 const identity = require('./identity')
 const { SecureHelper } = require('./secure')
+const { startDirect } = require('./direct')
+const os = require('node:os')
 
 const helper = new SecureHelper()
 
@@ -45,6 +47,20 @@ ipc('pin:accept', (id, key) => identity.pinAccept(id, key))
 ipc('passcode:set', pw => identity.setPasscode(pw))
 ipc('passcode:has', () => identity.hasPasscode())
 ipc('passcode:check', pw => identity.checkPasscode(pw))
+
+// Serverless mode: this app listens for viewers itself (see direct.js).
+let direct = null
+ipc('direct:start', async () => {
+  const id = identity.info()
+  if (!direct) {
+    const d = startDirect({ pubKey: id.pubKey, name: os.hostname(), onMessage: m => win?.webContents.send('direct:msg', m) })
+    try { await d.ready } catch (e) { d.stop(); throw new Error(e.code === 'EADDRINUSE' ? 'Port 8951 is already in use' : e.message) }
+    direct = d
+  }
+  return { code: direct.code, port: direct.port, addresses: direct.addresses, readable: id.readable }
+})
+ipc('direct:send', m => direct?.send(m))
+ipc('direct:stop', () => { direct?.stop(); direct = null; return true })
 
 ipc('host:sources', async () => {
   const srcs = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 320, height: 180 } })
@@ -137,4 +153,4 @@ app.whenReady().then(() => {
 
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus() } })
 app.on('window-all-closed', () => { endHostSession(); app.quit() })
-app.on('will-quit', () => globalShortcut.unregisterAll())
+app.on('will-quit', () => { globalShortcut.unregisterAll(); direct?.stop() })

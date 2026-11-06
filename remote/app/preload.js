@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('arena', {
     frames: call('host:frames'),
     input: ev => ipcRenderer.send('host:input', ev),
   },
+  direct: { start: call('direct:start'), send: call('direct:send'), stop: call('direct:stop'), onMessage: cb => ipcRenderer.on('direct:msg', (_e, m) => cb(m)) },
   helperStatus: call('helper:status'),
   onDesktop: cb => ipcRenderer.on('desktop', (_e, name) => cb(name)),
   onFrame: cb => ipcRenderer.on('frame', (_e, data) => cb(data)),
