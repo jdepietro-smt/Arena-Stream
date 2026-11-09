@@ -95,7 +95,9 @@ public:
         : impl_(impl), input_(input), ref_(1) {}
 
     // IUnknown
-    HRESULT QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+    HRESULT QueryInterface(REFIID iid, void** out) override {
+        return query_interface<InputCallback, IDeckLinkInputCallback>(this, iid, IID_IDeckLinkInputCallback, out);
+    }
     ULONG   AddRef()  override { return ++ref_; }
     ULONG   Release() override {
         auto r = --ref_;

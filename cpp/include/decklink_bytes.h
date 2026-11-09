@@ -10,7 +10,33 @@
 
 #ifdef SDI_WITH_DECKLINK
 
+#include <cstring>
+
 namespace sdi {
+
+inline bool same_iid(REFIID a, REFIID b) {
+#ifdef _WIN32
+    return IsEqualIID(a, b) != 0;
+#else
+    return std::memcmp(&a, &b, sizeof(a)) == 0;
+#endif
+}
+
+// A COM object must hand itself back for IUnknown and for its own interface, and must clear the
+// out-pointer when it refuses. Drivers from 14.3 on query callbacks this way; an object that
+// returns E_NOINTERFACE for everything (leaving the pointer unset) makes the driver dereference
+// garbage and crash the whole process with 0xC0000005.
+template <typename Self, typename Iface>
+inline HRESULT query_interface(Self* self, REFIID iid, REFIID own_iid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (same_iid(iid, IID_IUnknown) || same_iid(iid, own_iid)) {
+        *out = static_cast<Iface*>(self);
+        self->AddRef();
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
 
 class DeckLinkBytes {
 public:

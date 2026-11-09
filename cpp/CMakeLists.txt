@@ -425,6 +425,14 @@ endif()
 if(WIN32)
     target_link_libraries(sdi_decoder PRIVATE ws2_32)
 endif()
+
+# Crash reports (crash_report.h) use dbghelp for the call stack and minidump.
+if(WIN32)
+  foreach(t link_encoder link_decoder sdi_decoder)
+    target_link_libraries(${t} PRIVATE dbghelp)
+  endforeach()
+endif()
+
 sdi_target_warnings(sdi_decoder)
 
 # ===========================================================================

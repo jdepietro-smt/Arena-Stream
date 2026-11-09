@@ -16,6 +16,7 @@
 // too).
 
 #include "latency_stamp.h"
+#include "crash_report.h"
 #include "playout_device.h"
 #include "frame_queue.h"
 
@@ -393,6 +394,7 @@ static const char* open_hw_decoder(AVCodecContext* ctx, const AVCodec* vdec) {
 }
 
 int main(int argc, char** argv) {
+    sdi::crash::install("sdi_decoder");
     // Handle --list before anything else (no network/device setup needed).
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--list") { list_devices(); return 0; }

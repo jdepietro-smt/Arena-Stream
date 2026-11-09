@@ -17,6 +17,7 @@
 int main() { std::fputs("link_decoder: Windows only for now\n", stderr); return 1; }
 #else
 
+#include "crash_report.h"
 #include "http_post.h"
 #include "link_paths.h"
 #include "mdns.h"
@@ -214,6 +215,7 @@ std::string mdns_json(const std::vector<sdi::mdns::Service>& v) {
 } // namespace
 
 int main(int argc, char** argv) {
+    sdi::crash::install("link_decoder");
     Opts o;
     if (!parse(argc, argv, o)) return 2;
     std::signal(SIGINT, on_signal);

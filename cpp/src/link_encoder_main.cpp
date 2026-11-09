@@ -7,6 +7,7 @@
 //
 // Control: stdin line "bitrate <kbps>" or "quit". Status: one JSON line per second on stdout.
 #include "capture_device.h"
+#include "crash_report.h"
 #include "codec_policy.h"
 #include "device_list.h"
 #include "encoder.h"
@@ -149,6 +150,7 @@ std::string host_name() {
 } // namespace
 
 int main(int argc, char** argv) {
+    sdi::crash::install("link_encoder");
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--list") { sdi::devlist::list_devices(); return 0; }
     sdi::latency::start_clock_sync();   // stamp frames with real time even if this PC's clock is off

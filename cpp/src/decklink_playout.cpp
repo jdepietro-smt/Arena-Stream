@@ -104,7 +104,9 @@ public:
     OutputCallback(DeckLinkPlayoutDevice::Impl* impl, FrameQueue<VideoFrame>* q)
         : impl_(impl), queue_(q), ref_(1) {}
 
-    HRESULT QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
+    HRESULT QueryInterface(REFIID iid, void** out) override {
+        return query_interface<OutputCallback, IDeckLinkVideoOutputCallback>(this, iid, IID_IDeckLinkVideoOutputCallback, out);
+    }
     ULONG   AddRef()  override { return ++ref_; }
     ULONG   Release() override {
         auto r = --ref_;
