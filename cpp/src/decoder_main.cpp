@@ -84,6 +84,8 @@ struct Args {
                                             // for TVs that treat SDI as full range and so look washed out
     int         white_pct = 100;           // peak white as a % of the range: below 100 rolls the highlights
                                             // down (for a TV that renders whites too hot)
+    uint32_t    preview_width = 640;       // monitor picture width sent to the app (smaller = far less data)
+    int         preview_fps = 0;           // monitor picture rate cap; 0 = the stream's own rate
 };
 
 // Highlight roll-down on the luma of a UYVY buffer, in place. Below the knee (65% of the range)
@@ -121,6 +123,8 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (arg=="--reference")         a.reference  = nxt();
         else if (arg=="--out-range")         { const std::string_view v = nxt(); a.out_full_range = v == "full" || v == "soft"; }
         else if (arg=="--white-level")       a.white_pct  = std::clamp(std::atoi(nxt()), 60, 100);
+        else if (arg=="--preview-width")     a.preview_width = uint32_t(std::clamp(std::atoi(nxt()), 160, 1920));
+        else if (arg=="--preview-fps")       a.preview_fps = std::clamp(std::atoi(nxt()), 1, 120);
         else if (arg=="-h"||arg=="--help") {
             std::cerr << "sdi_decoder --src srt://HOST:PORT --backend decklink|aja "
                          "--device N --conn N [--latency MS] [--preview-only] [--force-progressive] "
@@ -328,20 +332,31 @@ struct PreviewFrame {
 static void preview_pacer_loop(std::stop_token st,
                                 sdi::FrameQueue<PreviewFrame>& queue,
                                 std::atomic<bool>& mode_ready,
-                                const sdi::VideoMode& mode) {
+                                const sdi::VideoMode& mode,
+                                int max_fps) {
     while (!st.stop_requested() && !mode_ready.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     if (st.stop_requested()) return;
 
-    const auto frame_dur = mode.frame_duration();
+    // With several decoders in the app the monitor picture is capped (e.g. 15 fps): then each tick
+    // takes the newest frame and drops the rest, instead of showing ever-older queued ones.
+    auto period = mode.frame_duration();
+    bool newest_only = false;
+    if (max_fps > 0) {
+        const auto cap = std::chrono::duration_cast<sdi::Nanos>(std::chrono::seconds(1)) / max_fps;
+        if (cap > period) { period = cap; newest_only = true; }
+    }
+    const auto frame_dur = period;
     PreviewFrame last;
     bool have_last = false;
     auto next_tick = std::chrono::steady_clock::now();
 
     while (!st.stop_requested()) {
-        auto next = queue.try_pop();
-        if (next) { last = std::move(*next); have_last = true; }
+        while (auto next = queue.try_pop()) {
+            last = std::move(*next); have_last = true;
+            if (!newest_only) break;
+        }
         if (have_last) {
             uint32_t header[2] = { last.width, last.height };
             std::fwrite(header, sizeof(header), 1, stdout);
@@ -594,7 +609,7 @@ int main(int argc, char** argv) {
     AVPixelFormat preview_sws_src_fmt = AV_PIX_FMT_NONE;
     std::vector<uint8_t> preview_buf;
     int pw = 0, ph = 0;                       // preview picture size (downscaled), set with preview_sws
-    constexpr uint32_t kPreviewMaxWidth = 640;
+    const uint32_t kPreviewMaxWidth = args.preview_width;
 
     Stats stats;
     stats.decoder = hw_name ? hw_name : "software";
@@ -622,7 +637,7 @@ int main(int argc, char** argv) {
     std::atomic<bool> preview_mode_ready{false};
     sdi::VideoMode preview_mode{};
     std::jthread preview_pacer([&](std::stop_token st) {
-        preview_pacer_loop(st, preview_queue, preview_mode_ready, preview_mode);
+        preview_pacer_loop(st, preview_queue, preview_mode_ready, preview_mode, args.preview_fps);
     });
 
     // ── 9. Decode loop. ──────────────────────────────────────────────────
