@@ -29,6 +29,8 @@
 #  include <objbase.h>
 #endif
 #include "DeckLinkAPI.h"
+#include "decklink_bytes.h"
+#include "DeckLinkAPIVersion.h"
 
 #include <atomic>
 #include <cstring>
@@ -104,12 +106,10 @@ public:
     HRESULT VideoInputFrameArrived(IDeckLinkVideoInputFrame* vf,
                                    IDeckLinkAudioInputPacket* ap) override {
         if (vf && !(vf->GetFlags() & bmdFrameHasNoInputSource)) {
-            void* bytes = nullptr;
-            // GetBytes is on IDeckLinkVideoFrame (parent). On Windows with the
-            // MIDL-generated header, inherited methods are not visible directly
-            // on IDeckLinkVideoInputFrame — cast to the base interface.
-            IDeckLinkVideoFrame* baseFrame = static_cast<IDeckLinkVideoFrame*>(vf);
-            if (baseFrame->GetBytes(&bytes) == S_OK && bytes) {
+            // SDK 14.3+: the pixels are behind IDeckLinkVideoBuffer, held only for the copy below.
+            DeckLinkBytes px(vf, bmdBufferAccessRead);
+            void* bytes = px.data();
+            if (bytes) {
                 int64_t pts_ns = 0;
 #ifdef _WIN32
                 // Windows SDK 16.0 reordered GetStreamTime parameters:
@@ -352,6 +352,20 @@ void decklink_list_devices(
         std::cerr << "decklink: CreateDeckLinkIteratorInstance() returned null — "
                      "is Desktop Video installed?\n";
         return;
+    }
+#endif
+
+#ifdef _WIN32
+    {   // Which Desktop Video is installed: the first thing to know when a card misbehaves.
+        IDeckLinkAPIInformation* info = nullptr;
+        if (SUCCEEDED(::CoCreateInstance(CLSID_CDeckLinkAPIInformation, nullptr, CLSCTX_ALL, IID_IDeckLinkAPIInformation,
+                                         reinterpret_cast<void**>(&info))) && info) {
+            LONGLONG v = 0;
+            if (info->GetInt(BMDDeckLinkAPIVersion, &v) == S_OK)
+                std::cerr << "decklink: Desktop Video driver " << ((v >> 24) & 0xFF) << "." << ((v >> 16) & 0xFF) << "."
+                          << ((v >> 8) & 0xFF) << " (this app is built with SDK " << BLACKMAGIC_DECKLINK_API_VERSION_STRING << ")\n";
+            info->Release();
+        }
     }
 #endif
 

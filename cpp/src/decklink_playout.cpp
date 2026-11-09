@@ -28,6 +28,7 @@
 #  include <objbase.h>
 #endif
 #include "DeckLinkAPI.h"
+#include "decklink_bytes.h"
 
 #include <atomic>
 #include <cstring>
@@ -120,16 +121,16 @@ public:
         IDeckLinkMutableVideoFrame* out_frame = nullptr;
 
         if (next) {
-            void* bytes = nullptr;
             const HRESULT hr = impl_->output->CreateVideoFrame(
                 int(impl_->mode.width), int(impl_->mode.height),
                 int(next->stride), bmdFormat8BitYUV, bmdFrameFlagDefault,
                 &out_frame);
-            if (hr == S_OK && out_frame &&
-                out_frame->GetBytes(&bytes) == S_OK && bytes) {
-                std::memcpy(bytes, next->data.data(),
-                            std::min(next->data.size(),
-                                     size_t(next->stride) * impl_->mode.height));
+            if (hr == S_OK && out_frame) {
+                DeckLinkBytes px(out_frame, bmdBufferAccessWrite);
+                if (px)
+                    std::memcpy(px.data(), next->data.data(),
+                                std::min(next->data.size(),
+                                         size_t(next->stride) * impl_->mode.height));
             }
             if (impl_->last_frame) impl_->last_frame->Release();
             // last_frame needs its OWN reference, independent of the one
@@ -258,12 +259,12 @@ bool DeckLinkPlayoutDevice::start(const PlayoutConfig& cfg) {
         if (impl_->output->CreateVideoFrame(int(cfg.mode.width), int(cfg.mode.height),
                                             int(stride), bmdFormat8BitYUV,
                                             bmdFrameFlagDefault, &frame) == S_OK && frame) {
-            void* bytes = nullptr;
-            if (frame->GetBytes(&bytes) == S_OK && bytes) {
+            {
+                DeckLinkBytes px(frame, bmdBufferAccessWrite);
                 // Black in UYVY: fill with 0x80 (Cb/Cr neutral), Y=0x10 pattern
                 // approximated by a flat 0x10 fill — close enough for pre-roll,
                 // real content replaces it within the first few frames.
-                std::memset(bytes, 0x10, size_t(stride) * cfg.mode.height);
+                if (px) std::memset(px.data(), 0x10, size_t(stride) * cfg.mode.height);
             }
             impl_->output->ScheduleVideoFrame(
                 frame, BMDTimeValue(i) * impl_->frame_duration,
