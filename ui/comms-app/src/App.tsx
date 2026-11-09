@@ -325,15 +325,13 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
 
   const dock = (
     <div className="dock">
-      <div className="dock-group stack">
-        <div className="meterrow" title="Live level of your microphone: it moves when you talk. Keep it in the green.">
-          <span className="meterlab">MIC LEVEL</span>
-          <LedMeter engine={engine} source="mic" />
-        </div>
+      <div className="dock-mod">
         <Fader label="MIC" value={engine.micVolume} min={0} max={2} onChange={v => engine.setMicVolume(v)} readout={`${Math.round(engine.micVolume * 100)}`} />
+        <LedMeter engine={engine} source="mic" title="Live level of your microphone: it moves when you talk. Keep it in the green." />
       </div>
-      <div className="dock-group">
+      <div className="dock-mod">
         <Fader label="LISTEN" value={engine.masterVolume} min={0} max={1} onChange={v => engine.setMasterVolume(v)} readout={`${Math.round(engine.masterVolume * 100)}`} />
+        <LedMeter engine={engine} source="out" title="Live level of what you are hearing from the intercom." />
       </div>
       <span className="grow" />
       {editable && <button className={`cap sm hw${editing ? ' on' : ''}`} onClick={() => setEditing(e => !e)} title="Choose which channels are on your panel, and their order">MY PANEL</button>}
@@ -676,19 +674,19 @@ function Fader({ label, value, min, max, onChange, readout, mini }: {
 }
 
 /** Segmented LED level bar for the microphone or the program feed. */
-function LedMeter({ engine, source, channel }: { engine: CommsEngine; source: 'mic' | 'program' | 'music'; channel?: string }) {
+function LedMeter({ engine, source, channel, title }: { engine: CommsEngine; source: 'mic' | 'program' | 'music' | 'out'; channel?: string; title?: string }) {
   const bar = useRef<HTMLDivElement>(null)
   useEffect(() => {
     let raf = 0
     const tick = () => {
-      const level = source === 'mic' ? engine.micLevel() : source === 'music' ? engine.musicSendLevel(channel ?? '') : engine.programLevel()
+      const level = source === 'mic' ? engine.micLevel() : source === 'out' ? Math.min(1, Math.max(...engine.outLevels()) * 2) : source === 'music' ? engine.musicSendLevel(channel ?? '') : engine.programLevel()
       if (bar.current) bar.current.style.width = `${Math.round(level * 100)}%`
       raf = requestAnimationFrame(tick)
     }
     tick()
     return () => cancelAnimationFrame(raf)
   }, [engine, source, channel])
-  return <div className="ledmeter"><div ref={bar} /></div>
+  return <div className="ledmeter" title={title}><div ref={bar} /></div>
 }
 
 function StatusPill({ engine }: { engine: CommsEngine }) {

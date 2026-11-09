@@ -98,11 +98,10 @@ label.check { flex-direction: row; align-items: center; gap: 8px; }
 
 .dock { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; padding: 10px 16px; border-radius: 9px; background: linear-gradient(#1a1c21, #14161a); border: 1px solid #2a2e35; box-shadow: inset 0 2px 8px rgba(0,0,0,.55); }
 .dock-group { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1 1 auto; }
-.dock { align-items: flex-end; } /* the MIC and LISTEN sliders share a baseline; the level meter sits above MIC */
-.dock-group.stack { flex-direction: column; align-items: stretch; gap: 6px; }
-.meterrow { display: flex; align-items: center; gap: 10px; }
-.meterlab { font: 600 10px var(--mono); letter-spacing: .14em; color: #7fa0c8; white-space: nowrap; }
-.dock .ledmeter { flex: 1 1 60px; width: auto; min-width: 60px; max-width: none; }
+/* Two matching modules: a slider with a live meter right under it (mic level under MIC, what you hear under LISTEN) */
+.dock-mod { flex: 1 1 230px; max-width: 340px; display: flex; flex-direction: column; gap: 6px; padding: 9px 12px 10px; border-radius: 8px; background: rgba(60,110,200,.07); border: 1px solid rgba(110,160,255,.16); box-shadow: inset 0 1px 0 rgba(150,200,255,.08); }
+.dock-mod .fader { flex: none; max-width: none; min-width: 0; }
+.dock-mod .ledmeter { flex: none; width: 100%; height: 6px; border-radius: 1px; }
 
 /* Direct-call directory */
 .directory { width: 240px; flex-shrink: 0; margin: 14px 14px 14px 0; padding: 14px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
