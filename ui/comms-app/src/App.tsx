@@ -325,10 +325,12 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
 
   const dock = (
     <div className="dock">
-      <div className="dock-group">
+      <div className="dock-group stack">
+        <div className="meterrow" title="Live level of your microphone: it moves when you talk. Keep it in the green.">
+          <span className="meterlab">MIC LEVEL</span>
+          <LedMeter engine={engine} source="mic" />
+        </div>
         <Fader label="MIC" value={engine.micVolume} min={0} max={2} onChange={v => engine.setMicVolume(v)} readout={`${Math.round(engine.micVolume * 100)}`} />
-        <span className="meterlab" title="Live level of your microphone: it moves when you talk. Keep it in the green.">MIC LEVEL</span>
-        <LedMeter engine={engine} source="mic" />
       </div>
       <div className="dock-group">
         <Fader label="LISTEN" value={engine.masterVolume} min={0} max={1} onChange={v => engine.setMasterVolume(v)} readout={`${Math.round(engine.masterVolume * 100)}`} />
