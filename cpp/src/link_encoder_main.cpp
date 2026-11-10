@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -148,6 +149,20 @@ std::string host_name() {
 }
 
 } // namespace
+
+// The relay only accepts letters, digits and _ - . in a stream name, so "Truck 1 - Camera 2" is
+// published as "Truck-1-Camera-2". Decoders still show the real name; they read the relay name the
+// encoder announces.
+static std::string relay_safe_name(const std::string& n) {
+    std::string o;
+    for (unsigned char c : n) {
+        const bool ok = std::isalnum(c) || c == '_' || c == '.' || c == '-';
+        if (ok) o += char(c);
+        else if (!o.empty() && o.back() != '-') o += '-';
+    }
+    while (!o.empty() && o.back() == '-') o.pop_back();
+    return o.empty() ? "stream" : o;
+}
 
 int main(int argc, char** argv) {
     sdi::crash::install("link_encoder");
@@ -302,7 +317,7 @@ int main(int argc, char** argv) {
         fc.relay_host = args.relay.substr(0, c);
         if (c != std::string::npos) relay_port = std::atoi(args.relay.c_str() + c + 1);
         fc.relay_port       = relay_port;
-        fc.relay_name       = args.name;
+        fc.relay_name       = relay_safe_name(args.name);
         fc.relay_secret     = args.relay_secret;
         // This leg (encoder -> relay) is sized from this PC's own RTT to the server.
         relay_latency = args.relay_latency_ms;
@@ -390,7 +405,7 @@ int main(int argc, char** argv) {
             sdi::mdns::Service m;
             m.id = id; m.name = args.name; m.format = format; m.source = source; m.codec = enc.name();
             m.kbps = enc.current_bitrate_kbps(); m.port = args.direct_port;
-            if (!args.relay.empty()) { m.relay_host = fc.relay_host; m.relay_port = relay_port; m.relay_name = args.name; }
+            if (!args.relay.empty()) { m.relay_host = fc.relay_host; m.relay_port = relay_port; m.relay_name = relay_safe_name(args.name); }
             return m;
         });
         if (mdns->start()) std::cerr << "mdns: advertising " << args.name << " on the local network\n";
@@ -407,7 +422,7 @@ int main(int argc, char** argv) {
               << ",\"lanIps\":[" << (lan_ip.empty() ? "" : json_str(lan_ip)) << "]"
               << ",\"directPort\":" << args.direct_port
               << ",\"relay\":" << (args.relay.empty() ? "null" :
-                    "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(args.name) + "}")
+                    "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(relay_safe_name(args.name)) + "}")
               << ",\"version\":\"link-1\"}";
             const int st = sdi::net::http_request(dir_url, "POST", "/v1/announce", args.key, b.str());
             g_dir_state = st == 200 ? 1 : 2;
