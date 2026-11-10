@@ -258,7 +258,7 @@ public:
         auto submit = [&](AVFrame* f) {
             av_frame_remove_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED);
             if (AVFrameSideData* sd = av_frame_new_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED,
-                                                             sdi::latency::kSize))
+                                                             sdi::latency::kSizeFlags))
                 sdi::latency::pack(sd->data, sdi::latency::now_utc_us(),
                                    native_il_ ? uint8_t(sdi::latency::kFlagInterlaced | (ctx_->height >= 720 ? sdi::latency::kFlagTopFieldFirst : 0)) : uint8_t(0));
             if (tap_) tap_(f);

@@ -3,7 +3,7 @@
 #include <iostream>
 using namespace sdi::latency;
 int main() {
-    uint8_t buf[kSize];
+    uint8_t buf[kSizeFlags];
     for (int64_t t : { int64_t(0), int64_t(1), int64_t(1'793'000'000'123'456), int64_t(0x7FFFFFFFFFFFFFFF) }) {
         pack(buf, t);
         auto r = unpack(buf, kSize);

@@ -23,7 +23,8 @@
 namespace sdi::latency {
 
 inline constexpr uint8_t kUuid[16] = { 'A','R','E','N','A','-','S','T','R','E','A','M','-','L','A','T' };
-inline constexpr size_t  kSize     = 16 + 8;
+inline constexpr size_t  kSize     = 16 + 8;       // UUID + time: what every version reads
+inline constexpr size_t  kSizeFlags = kSize + 1;    // plus one picture-flags byte (newer versions)
 
 // How far this PC's clock is from real time (microseconds to add), measured by SNTP.
 // Both ends correct for their own PC's error, so the Delay figure and the decoder's
@@ -112,14 +113,15 @@ inline void start_clock_sync() {
     }).detach();
 }
 
-// The top byte of the 8-byte time carries picture flags (a UTC microsecond count never gets near it):
-// encoders that cannot code interlaced pictures (NVENC) still tell the decoder the frame holds two fields.
+// A byte after the time carries picture flags: encoders that cannot code interlaced pictures (NVENC)
+// still tell the decoder the frame holds two fields. Older decoders read only the first kSize bytes
+// and ignore it, so their latency readout keeps working.
 inline constexpr uint8_t kFlagInterlaced = 1, kFlagTopFieldFirst = 2;
 
-inline void pack(uint8_t* out /* kSize bytes */, int64_t utc_us, uint8_t flags = 0) {
+inline void pack(uint8_t* out /* kSizeFlags bytes */, int64_t utc_us, uint8_t flags = 0) {
     std::memcpy(out, kUuid, 16);
-    const uint64_t v = (uint64_t(flags) << 56) | (uint64_t(utc_us) & 0x00FFFFFFFFFFFFFFULL);
-    for (int i = 0; i < 8; ++i) out[16 + i] = uint8_t((v >> (56 - 8 * i)) & 0xFF);
+    for (int i = 0; i < 8; ++i) out[16 + i] = uint8_t((uint64_t(utc_us) >> (56 - 8 * i)) & 0xFF);
+    out[kSize] = flags;
 }
 
 // Returns the stamped UTC microseconds, or nothing if this isn't our SEI.
@@ -127,8 +129,8 @@ inline std::optional<int64_t> unpack(const uint8_t* data, size_t size, uint8_t* 
     if (!data || size < kSize || std::memcmp(data, kUuid, 16) != 0) return std::nullopt;
     uint64_t v = 0;
     for (int i = 0; i < 8; ++i) v = (v << 8) | data[16 + i];
-    if (flags) *flags = uint8_t(v >> 56);
-    return int64_t(v & 0x00FFFFFFFFFFFFFFULL);
+    if (flags) *flags = size >= kSizeFlags ? data[kSize] : uint8_t(0);
+    return int64_t(v);
 }
 
 }  // namespace sdi::latency
