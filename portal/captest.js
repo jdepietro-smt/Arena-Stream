@@ -31,6 +31,8 @@ const VIEW_API = 'http://127.0.0.1:19997', VIEW_RTSP = 'rtsp://127.0.0.1:18554' 
 fs.mkdirSync(OUT, { recursive: true })
 
 let stopRequested = false
+// The page counts a status file nobody has touched for 15 s as a dead run, so keep it fresh even while a slow step blocks the runner.
+setInterval(() => { try { const t = new Date(); fs.utimesSync(path.join(OUT, 'status.json'), t, t) } catch { /* no status yet */ } }, 4000).unref()
 process.on('SIGTERM', () => { stopRequested = true })
 process.on('SIGINT', () => { stopRequested = true })
 
@@ -118,7 +120,8 @@ async function ensureViewerHost() {
   const conf = path.join(OUT, 'viewer-host.yml')
   // mediamtx versions differ in which settings they know (an unknown one is a fatal error), so try a few shapes of config.
   // Its log goes to stdout, so both streams are kept. It must not share a port with the real mediamtx.
-  const base = ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtspAddress: 127.0.0.1:18554', 'rtmp: no', 'hls: no', 'webrtc: no']
+  const base = ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtspAddress: 127.0.0.1:18554', 'rtpAddress: 127.0.0.1:18000', 'rtcpAddress: 127.0.0.1:18001',
+    'rtmp: no', 'hls: no', 'webrtc: no']
   const variants = [[...base, 'srt: no', 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'srt: no'], base]
   let last = ''
   for (const lines of variants) {

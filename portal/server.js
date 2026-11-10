@@ -384,7 +384,8 @@ function createPortal(cfg) {
     let fresh = false
     try { fresh = Date.now() - fs.statSync(path.join(captestDir, 'status.json')).mtimeMs < 15000 } catch { /* no file */ }
     const requested = fs.existsSync(path.join(ctlDir, 'request'))
-    return { running: !!status && status.phase !== 'done' && fresh, starting: !status && requested, status, history: readJsonFile('history.json') || [] }
+    const unfinished = !!status && status.phase !== 'done'
+    return { running: unfinished && fresh, stalled: unfinished && !fresh && !requested, starting: !status && requested, status, history: readJsonFile('history.json') || [] }
   }
 
   const MIN_PW = 10

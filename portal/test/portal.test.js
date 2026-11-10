@@ -734,7 +734,7 @@ test('capacity test: shows what the runner writes, and only counts a fresh statu
   try {
     await adminLogin(t); await ownerLogin(t)
     const dir = path.join(t.dataDir, 'captest'); fs.mkdirSync(dir, { recursive: true })
-    assert.deepEqual((await t.call('/portal/api/owner/captest')).body, { running: false, starting: false, status: null, history: [] })
+    assert.deepEqual((await t.call('/portal/api/owner/captest')).body, { running: false, stalled: false, starting: false, status: null, history: [] })
 
     fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ phase: 'ramping', step: 4, steps: [], now: { streams: 4, cpu: 20 }, cfg: {} }))
     let s = (await t.call('/portal/api/owner/captest')).body
@@ -743,7 +743,8 @@ test('capacity test: shows what the runner writes, and only counts a fresh statu
 
     const old = new Date(Date.now() - 60000)
     fs.utimesSync(path.join(dir, 'status.json'), old, old)
-    assert.equal((await t.call('/portal/api/owner/captest')).body.running, false, 'a status nobody has updated for a minute is not running')
+    s = (await t.call('/portal/api/owner/captest')).body
+    assert.equal(s.running, false, 'a status nobody has updated for a minute is not running'); assert.equal(s.stalled, true, 'and it is reported as stopped without finishing')
 
     fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ phase: 'done', conclusion: 'Clean through 8 streams', steps: [] }))
     fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify([{ at: 1, conclusion: 'older' }]))

@@ -462,7 +462,10 @@ async function capacitySection(box) {
         el('div', { class: 'row' }, el('button', { class: 'b', onclick: async () => { try { await oapi('/captest/stop', 'POST') } catch (e) { flash(err, e.message) } } }, 'Stop the test'), el('span', { class: 'hint' }, 'It also stops by itself if CPU stays high, memory runs low, readers fall behind, or a live stream is affected.'))))
     }
     results.replaceChildren()
-    const last = !st.running && s && s.phase === 'done' ? s : null
+    if (st.stalled && s) results.append(el('div', { class: 'card', style: 'margin:0 0 14px;max-width:none' }, el('h2', {}, 'The last test stopped without finishing'),
+      el('div', { class: 'hint', style: 'margin:0 0 8px' }, 'It was at "' + (s.phase || '?') + '"' + (s.step ? ', step ' + s.step : '') + ' when it stopped reporting. What it measured before that:'),
+      s.steps && s.steps.length ? stepTable(s.steps) : el('div', { class: 'hint' }, 'No step was completed.')))
+    const last =!st.running && s && s.phase === 'done' ? s : null
     if (last) results.append(el('div', { class: 'card', style: 'margin:0 0 14px;max-width:none' }, el('h2', {}, 'Last result'), el('div', {}, last.conclusion || ''), last.steps && last.steps.length ? stepTable(last.steps) : null))
     if (st.history.length) results.append(el('h2', { style: 'margin-top:18px' }, 'Earlier runs'), ...st.history.slice(0, 5).map(h => el('details', { class: 'adv', style: 'margin:6px 0' }, el('summary', {}, fmtTime(h.at) + ' - ' + (h.steps.length ? 'up to ' + h.steps[h.steps.length - 1].streams + ' streams' : 'did not run')),
       el('div', { class: 'hint', style: 'margin:6px 0' }, h.conclusion || ''), h.steps.length ? stepTable(h.steps) : null)))
