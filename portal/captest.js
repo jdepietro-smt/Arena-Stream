@@ -149,7 +149,15 @@ async function ensureViewerHost() {
     last = tail(p.err.replace(/\x1b\[[0-9;]*m/g, ''), 3, 300) || ('exit code ' + p.exitCode)
     await killProc(p)
   }
-  throw new Error('the viewer host would not start: ' + last)
+  // Say who holds the port it wanted, and where the real config mentions it, so the cause can be seen instead of guessed.
+  let why = ''
+  const pm = /listen (?:tcp|udp)\d?\s+\S*?:(\d+)/.exec(last)
+  if (pm) {
+    const port = pm[1]
+    try { why += ' | on this server: ' + (spawnSync('ss', ['-ltunpH'], { encoding: 'utf8' }).stdout || '').split('\n').filter(l => l.includes(':' + port + ' ')).map(l => l.trim().replace(/\s+/g, ' ')).join(' ; ').slice(0, 250) } catch { /* no ss */ }
+    try { why += ' | ' + (process.env.MEDIAMTX_CONF || '/etc/mediamtx.yml') + ': ' + (fs.readFileSync(process.env.MEDIAMTX_CONF || '/etc/mediamtx.yml', 'utf8').split('\n').filter(l => l.includes(port)).map(l => l.trim()).join(' ; ').slice(0, 250) || 'no line mentions ' + port) } catch (e) { why += ' | could not read the real mediamtx config (' + e.code + ')' }
+  }
+  throw new Error('the viewer host would not start: ' + last + why + ' | config tried: ' + base.filter(l => /Address|Port/.test(l)).join(', '))
 }
 async function ensureViewerPath(i) {
   await ensureViewerHost()
