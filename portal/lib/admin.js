@@ -15,6 +15,7 @@ const SETTINGS = {
   thumbEverySec:        { type: 'int', min: 2, max: 30, def: 3 },
   defaultLinkExpiryMin: { type: 'int', min: 0, max: 525600, def: 1440 },
   requireLinkPassword:  { type: 'bool', def: false },
+  sharedLogin:          { type: 'bool', def: true },                   // the one shared portal password still works at sign-in
 }
 
 function cleanSetting(key, v) {
@@ -39,7 +40,7 @@ function cleanSetting(key, v) {
 function openAdmin(dir) {
   fs.mkdirSync(dir, { recursive: true })
   const file = path.join(dir, 'admin.json')
-  let data = { ownerPwHash: '', adminPwHash: '', epoch: 1, settings: {}, audit: [] }
+  let data = { ownerPwHash: '', adminPwHash: '', epoch: 1, settings: {}, audit: [], users: {} }
   try { data = { ...data, ...JSON.parse(fs.readFileSync(file, 'utf8')) } } catch { /* first run */ }
 
   let timer = null
@@ -69,6 +70,17 @@ function openAdmin(dir) {
       if (Object.keys(changed).length) flush()
       return changed
     },
+    // Named portal accounts. `ver` changes with the password, which ends that user's sessions.
+    users: () => Object.values(data.users).map(u => ({ username: u.username, createdAt: u.createdAt, ver: u.ver })),
+    user: name => data.users[String(name).toLowerCase()] || null,
+    setUser(name, pwHash) {
+      const key = String(name).toLowerCase()
+      const old = data.users[key]
+      data.users[key] = { username: old ? old.username : String(name), pwHash, createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
+      flush()
+      return data.users[key]
+    },
+    deleteUser(name) { const k = String(name).toLowerCase(); const had = !!data.users[k]; delete data.users[k]; if (had) flush(); return had },
     audit(who, action, detail = '', ip = '') {
       data.audit.push({ at: Date.now(), who, action, detail: String(detail).slice(0, 300), ip })
       if (data.audit.length > MAX_AUDIT) data.audit.splice(0, data.audit.length - MAX_AUDIT)
@@ -81,4 +93,5 @@ function openAdmin(dir) {
   }
 }
 
-module.exports = { openAdmin, SETTINGS, cleanSetting }
+const USERNAME = /^[A-Za-z0-9._@-]{2,40}$/
+module.exports = { openAdmin, SETTINGS, cleanSetting, USERNAME }

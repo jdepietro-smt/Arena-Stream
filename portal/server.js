@@ -17,7 +17,7 @@ const auth = require('./lib/auth')
 const os = require('node:os')
 const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
-const { openAdmin, SETTINGS } = require('./lib/admin')
+const { openAdmin, SETTINGS, USERNAME } = require('./lib/admin')
 const { createThumbs } = require('./lib/thumbs')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
@@ -66,6 +66,7 @@ function createPortal(cfg) {
   const run = cfg.execFile || execFile
   if (!admin.ownerPwHash && cfg.ownerInit) { admin.ownerPwHash = auth.hashPassword(cfg.ownerInit); admin.audit('system', 'owner.init', 'owner password set from the installer') }
   const thumbs = createThumbs({ ffmpeg: cfg.ffmpeg, dir: cfg.thumbDir, relaySrt: cfg.relaySrt, latencyMs: relayLatency, everySec: () => S().thumbEverySec, spawn: cfg.spawn, log: m => console.log(m) })
+  const DUMMY_HASH = auth.hashPassword('not-a-real-account-' + crypto.randomBytes(8).toString('hex'))
   const loginOk = auth.throttle(8, 60000)
   const ownerLoginOk = auth.throttle(5, 60000)
   const pwOk = auth.throttle(10, 60000)
@@ -92,8 +93,14 @@ function createPortal(cfg) {
     const c = auth.parseCookies(req.headers.cookie).arena_portal
     const v = auth.unsign(c, cfg.secret)
     if (!v) return false
-    const [kind, exp, epoch] = v.split('|')
-    return kind === 'admin' && Number(exp) > Date.now() && Number(epoch) === admin.epoch
+    const [kind, exp, epoch, user, ver] = v.split('|')
+    if (kind !== 'admin' || !(Number(exp) > Date.now()) || Number(epoch) !== admin.epoch) return false
+    if (user) { const u = admin.user(user); return !!u && String(u.ver) === ver }   // a removed account, or one whose password changed, is signed out
+    return true
+  }
+  const sessionUser = req => {
+    const v = auth.unsign(auth.parseCookies(req.headers.cookie).arena_portal, cfg.secret)
+    return v ? (v.split('|')[3] || '') : ''
   }
   const ownerCookieValid = req => {
     const v = auth.unsign(auth.parseCookies(req.headers.cookie).arena_owner, cfg.secret)
@@ -200,9 +207,19 @@ function createPortal(cfg) {
       if (!sameOrigin(req)) return send(res, 403, { error: 'bad origin' })
       if (!loginOk(clientIp(req))) return send(res, 429, { error: 'too many attempts, wait a minute' })
       const b = await readJson(req)
-      if (!b || !adminPasswordOk(String(b.password || ''))) { admin.audit('admin', 'login.fail', '', clientIp(req)); return send(res, 401, { error: 'wrong password' }) }
-      admin.audit('admin', 'login', '', clientIp(req))
-      const sess = auth.sign(`admin|${Date.now() + SESSION_SEC * 1000}|${admin.epoch}`, cfg.secret)
+      const name = b ? String(b.username || '').trim() : ''
+      const pw = b ? String(b.password || '') : ''
+      let who = ''   // '' = the shared portal password
+      let ok
+      if (name) {
+        const u = admin.user(name)
+        ok = auth.checkPassword(pw, u ? u.pwHash : DUMMY_HASH) && !!u   // checks a dummy hash for unknown names, so timing does not reveal them
+        who = u ? u.username : ''
+      } else ok = S().sharedLogin && adminPasswordOk(pw)
+      if (!b || !ok) { admin.audit(name || 'admin', 'login.fail', name ? 'account sign-in' : 'shared password', clientIp(req)); return send(res, 401, { error: name ? 'wrong username or password' : 'wrong password' }) }
+      admin.audit(who || 'admin', 'login', who ? 'account' : 'shared password', clientIp(req))
+      const u2 = who ? admin.user(who) : null
+      const sess = auth.sign(`admin|${Date.now() + SESSION_SEC * 1000}|${admin.epoch}|${who}|${u2 ? u2.ver : ''}`, cfg.secret)
       return send(res, 200, { ok: true }, { 'Set-Cookie': auth.cookie('arena_portal', sess, { maxAgeSec: SESSION_SEC, secure: secure(req) }) })
     }
     if (p === '/portal/api/logout' && m === 'POST') {
@@ -220,7 +237,7 @@ function createPortal(cfg) {
   async function adminApi(req, res, p, m) {
     if (p === '/portal/api/me') {
       const s = S()
-      return send(res, 200, { ok: true, publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
+      return send(res, 200, { ok: true, user: sessionUser(req), publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
     }
     if (p.startsWith('/portal/api/owner/')) return ownerApi(req, res, p, m)
 
@@ -375,6 +392,7 @@ function createPortal(cfg) {
     if (sub === 'settings' && m === 'POST') {
       const b = await readJson(req)
       if (!b || typeof b.settings !== 'object') return send(res, 400, { error: 'settings required' })
+      if ('sharedLogin' in b.settings && !(b.settings.sharedLogin === true || b.settings.sharedLogin === 'true') && !admin.users().length) return send(res, 400, { error: 'create an account first, or nobody could sign in' })
       let changed
       try { changed = admin.patchSettings(b.settings) } catch (e) { return send(res, 400, { error: e.message }) }
       for (const [k, v] of Object.entries(changed)) admin.audit('owner', 'settings.change', `${k}: ${JSON.stringify(v.from)} -> ${JSON.stringify(v.to)}`, ip)
@@ -391,6 +409,37 @@ function createPortal(cfg) {
       admin.bumpEpoch()   // everyone signs in again, this browser included
       admin.audit('owner', `account.password.${b.which}`, 'changed; all sessions signed out', ip)
       return send(res, 200, { ok: true, signedOut: true })
+    }
+    if (sub === 'users' && m === 'GET') return send(res, 200, { users: admin.users().sort((a, b) => a.username.localeCompare(b.username)), sharedLogin: S().sharedLogin })
+    if (sub === 'users' && m === 'POST') {
+      const b = await readJson(req)
+      const name = b ? String(b.username || '').trim() : ''
+      if (!USERNAME.test(name)) return send(res, 400, { error: 'username: 2 to 40 letters, digits, dot, dash, underscore or @' })
+      if (admin.user(name)) return send(res, 409, { error: 'that username already exists' })
+      const pw = String(b.password || '')
+      if (pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
+      admin.setUser(name, auth.hashPassword(pw))
+      admin.audit('owner', 'account.user.create', name, ip)
+      return send(res, 200, { ok: true, users: admin.users() })
+    }
+    let um
+    if ((um = sub.match(/^users\/([^/]+)$/)) && m === 'DELETE') {
+      const name = decodeURIComponent(um[1])
+      if (!S().sharedLogin && admin.users().length <= 1 && admin.user(name)) return send(res, 400, { error: 'this is the last account and shared sign-in is off; turn shared sign-in on first' })
+      if (!admin.deleteUser(name)) return send(res, 404, { error: 'no such user' })
+      admin.audit('owner', 'account.user.delete', name, ip)
+      return send(res, 200, { ok: true, users: admin.users() })
+    }
+    if ((um = sub.match(/^users\/([^/]+)\/password$/)) && m === 'POST') {
+      const name = decodeURIComponent(um[1])
+      const u = admin.user(name)
+      if (!u) return send(res, 404, { error: 'no such user' })
+      const b = await readJson(req)
+      const pw = String((b && b.password) || '')
+      if (pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
+      admin.setUser(u.username, auth.hashPassword(pw))
+      admin.audit('owner', 'account.user.password', u.username, ip)
+      return send(res, 200, { ok: true })
     }
     if (sub === 'signout-all' && m === 'POST') {
       admin.bumpEpoch(); admin.audit('owner', 'account.signout-all', '', ip)

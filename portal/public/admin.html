@@ -48,7 +48,7 @@ async function api(path, method = 'GET', body) {
   return j
 }
 const fmtTime = t => t ? new Date(t).toLocaleString() : 'never'
-let publicBase = ''
+let publicBase = '', me = {}
 const linkUrl = id => (publicBase || location.origin) + '/w/' + id
 async function copy(text, btn) {
   try { await navigator.clipboard.writeText(text) } catch { const t = el('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove() }
@@ -61,11 +61,13 @@ let tab = 'streams', timer = null, streams = [], links = [], decoders = []
 function showLogin() {
   clearInterval(timer); clearInterval(thumbTimer); clearInterval(ownerTimer); clearInterval(healthTimer); tab = 'streams'
   const err = el('div', { class: 'err' })
-  const pw = el('input', { type: 'password', placeholder: 'Password', autofocus: true })
-  const go = async () => { try { await api('/login', 'POST', { password: pw.value }); publicBase = (await api('/me')).publicBase || ''; start() } catch (e) { err.textContent = e.message } }
-  pw.addEventListener('keydown', e => e.key === 'Enter' && go())
-  $app.replaceChildren(el('div', { class: 'card' }, el('h1', {}, 'Arena Portal'), pw, el('button', { class: 'b pri', onclick: go }, 'Sign in'), err))
-  pw.focus()
+  const user = el('input', { type: 'text', placeholder: 'Username', autocomplete: 'username', autofocus: true })
+  const pw = el('input', { type: 'password', placeholder: 'Password', autocomplete: 'current-password' })
+  const go = async () => { try { await api('/login', 'POST', { username: user.value, password: pw.value }); const m = await api('/me'); publicBase = m.publicBase || ''; me = m; start() } catch (e) { err.textContent = e.message } }
+  pw.addEventListener('keydown', e => e.key === 'Enter' && go()); user.addEventListener('keydown', e => e.key === 'Enter' && pw.focus())
+  $app.replaceChildren(el('div', { class: 'card' }, el('h1', {}, 'Arena Portal'), user, pw, el('button', { class: 'b pri', onclick: go }, 'Sign in'), err,
+    el('div', { class: 'hint' }, 'Leave the username empty to use the shared portal password.')))
+  user.focus()
 }
 
 function shell(content) {
@@ -73,7 +75,7 @@ function shell(content) {
   return [
     el('header', {}, el('h1', {}, 'Arena Portal'),
       el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); refresh() } }, t))),
-      el('div', { class: 'sp' }),
+      el('div', { class: 'sp' }), me.user ? el('span', { class: 'hint' }, me.user) : null,
       el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
     el('main', {}, content),
   ]
@@ -264,6 +266,29 @@ function lockCard() {
     pw, el('button', { class: 'b pri', onclick: go, disabled: !owner.configured }, 'Unlock'), err)
 }
 
+async function usersCard() {
+  const card = el('div', { class: 'card', style: 'max-width:560px;margin:0' })
+  const m = msgBox()
+  const draw = async () => {
+    const { users, sharedLogin } = await oapi('/users')
+    const name = el('input', { type: 'text', placeholder: 'Username', autocomplete: 'off' })
+    const pw = el('input', { type: 'password', placeholder: 'Password (10+ characters)', autocomplete: 'new-password' })
+    const add = async () => { try { await oapi('/users', 'POST', { username: name.value, password: pw.value }); flash(m, 'Account created.', true); draw() } catch (e) { flash(m, e.message) } }
+    card.replaceChildren(el('h2', {}, 'Portal users'),
+      el('div', { class: 'hint' }, 'Named logins for the portal. Each person signs in with their own username and password; the Admin area still needs the owner password.'),
+      users.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, users.map(u => el('tr', {},
+        el('td', {}, u.username), el('td', { class: 'hint' }, 'since ' + new Date(u.createdAt).toLocaleDateString()),
+        el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' },
+          el('button', { class: 'b', onclick: async () => { const n = prompt('New password for ' + u.username + ' (10+ characters)'); if (!n) return; try { await oapi('/users/' + encodeURIComponent(u.username) + '/password', 'POST', { password: n }); flash(m, 'Password changed; ' + u.username + ' is signed out.', true) } catch (e) { flash(m, e.message) } } }, 'Set password'),
+          el('button', { class: 'b', onclick: async () => { if (confirm('Delete the account ' + u.username + '?')) { try { await oapi('/users/' + encodeURIComponent(u.username), 'DELETE'); draw() } catch (e) { flash(m, e.message) } } } }, 'Delete'))))))) : el('div', { class: 'hint' }, 'No accounts yet. Only the shared portal password signs in.'),
+      el('div', { class: 'row' }, name, pw), el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: add }, 'Add account'), m),
+      el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, el('input', { type: 'checkbox', checked: sharedLogin, onchange: async e => { try { await oapi('/settings', 'POST', { settings: { sharedLogin: e.target.checked } }); flash(m, 'Saved.', true) } catch (err) { flash(m, err.message) } } }),
+        el('span', {}, 'The shared portal password can still sign in (turn off once everyone has an account)')))
+  }
+  await draw()
+  return card
+}
+
 async function accountSection(box) {
   const mkForm = (which, title, hint) => {
     const cur = el('input', { type: 'password', placeholder: 'Current owner password', autocomplete: 'off' })
@@ -281,7 +306,8 @@ async function accountSection(box) {
   const rows = act.entries.filter(e => e.action === 'login' || e.action === 'login.fail' || e.action.startsWith('owner.login') || e.action.startsWith('account.')).slice(0, 25)
   box.replaceChildren(
     el('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap;gap:16px' },
-      mkForm('admin', 'Portal password', 'The everyday login. Changing it signs everyone out, this browser included.'),
+      await usersCard(),
+      mkForm('admin', 'Shared portal password', 'The one password everyone can use if shared sign-in is on. Changing it signs everyone out, this browser included.'),
       mkForm('owner', 'Owner password', 'Protects this Admin area. Changing it signs everyone out.'),
       el('div', { class: 'card', style: 'max-width:420px;margin:0' }, el('h2', {}, 'Sessions'), el('div', { class: 'hint' }, 'Signs out every browser that is logged in to the portal, including this one.'),
         el('button', { class: 'b', onclick: async () => { if (confirm('Sign out everywhere?')) { await oapi('/signout-all', 'POST'); showLogin() } } }, 'Sign out everywhere'), sm)),
@@ -387,5 +413,5 @@ async function refresh() {
   $app.replaceChildren(...shell(tab === 'streams' ? streamsView() : tab === 'links' ? linksView() : decodersView()))
 }
 function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal') && tab !== 'admin') refresh() }, 2500) }
-api('/me').then(m => { publicBase = m.publicBase || ''; start() }).catch(() => showLogin())
+api('/me').then(m => { publicBase = m.publicBase || ''; me = m; start() }).catch(() => showLogin())
 </script></body></html>

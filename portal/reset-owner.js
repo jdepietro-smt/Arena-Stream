@@ -1,7 +1,7 @@
 'use strict'
 // Sets a new owner password when the old one is lost. Run on the server as root:
 //   node /opt/arena-portal/reset-owner.js [data dir]
-// Prints the new password once. Everyone is signed out.
+// Prints the new password once. Everyone is signed out, and the shared portal password signs in again.
 const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -15,6 +15,7 @@ for (const b of crypto.randomBytes(14)) pw += abc[b % abc.length]
 
 const admin = openAdmin(dir)
 admin.ownerPwHash = auth.hashPassword(pw)
+admin.patchSettings({ sharedLogin: true })   // so there is always a way to sign in again
 admin.bumpEpoch()
 admin.audit('system', 'owner.reset', 'owner password reset from the server')
 admin.flush()

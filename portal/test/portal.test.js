@@ -96,7 +96,7 @@ async function setup() {
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
   const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, thumbs, admin, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar }
+  return { call, calls, close, thumbs, admin, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -442,5 +442,68 @@ test('activity log records who did what, and all links show their views', async 
     assert.ok(only.length >= 3 && only.every(e => e.action.startsWith('link')))
     const links = (await t.call('/portal/api/owner/links')).body.links
     assert.equal(links[0].views, 1); assert.equal(links[0].uniqueViewers, 1); assert.equal(links[0].state, 'revoked'); assert.equal(links[0].recent[0].ip, '203.0.113.9')
+  } finally { await t.close() }
+})
+
+// ── named accounts ────────────────────────────────────────────────────────────
+const signIn = (t, username, password) => t.call('/portal/api/login', { method: 'POST', body: { username, password } })
+
+test('accounts: the owner creates one, and it signs in with its own username and password', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'x', password: 'long-enough-pw' })).status, 400)          // username too short
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'bad name!', password: 'long-enough-pw' })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'test.user', password: 'short' })).status, 400)           // password too short
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'test.user', password: 'test-Passw0rd!' })).status, 200)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'TEST.user', password: 'test-Passw0rd!' })).status, 409)  // names are not case sensitive
+    const raw = fs.readFileSync(path.join(t.dataDir, 'admin.json'), 'utf8')
+    assert.ok(!raw.includes('test-Passw0rd!'), 'the password is never stored in plain text')
+
+    t.resetCookie()
+    assert.equal((await signIn(t, 'test.user', 'wrong-password')).status, 401)
+    assert.equal((await signIn(t, 'nobody', 'test-Passw0rd!')).status, 401)
+    assert.equal((await signIn(t, 'Test.User', 'test-Passw0rd!')).status, 200)                                                    // any letter case
+    assert.equal((await t.call('/portal/api/streams')).status, 200)
+    assert.equal((await t.call('/portal/api/me')).body.user, 'test.user')
+    const act = t.admin.auditList().map(e => e.action + ':' + e.who)
+    assert.ok(act.includes('login:test.user') && act.includes('login.fail:nobody'))
+  } finally { await t.close() }
+})
+
+test('accounts: removing one, or changing its password, signs that user out', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await post(t, '/portal/api/owner/users', { username: 'person.one', password: 'first-password-1' })
+    const ownerJar = { ...t.jar() }
+    t.resetCookie()
+    await signIn(t, 'person.one', 'first-password-1')
+    const userJar = { ...t.jar() }
+    const cookieOf = jar => Object.entries(jar).map(([k, v]) => k + '=' + v).join('; ')
+    const as = async (jar, p, o = {}) => (await fetch(t.base + p, { method: o.method || 'GET', headers: { Cookie: cookieOf(jar), 'Content-Type': 'application/json' }, body: o.body ? JSON.stringify(o.body) : undefined })).status
+    assert.equal(await as(userJar, '/portal/api/streams'), 200)
+    assert.equal(await as(ownerJar, '/portal/api/owner/users/person.one/password', { method: 'POST', body: { password: 'second-password-2' } }), 200)
+    assert.equal(await as(userJar, '/portal/api/streams'), 401, 'old session ends when the password changes')
+    assert.equal((await signIn(t, 'person.one', 'first-password-1')).status, 401)
+    assert.equal((await signIn(t, 'person.one', 'second-password-2')).status, 200)
+    assert.equal(await as(ownerJar, '/portal/api/owner/users/person.one', { method: 'DELETE' }), 200)
+    assert.equal((await t.call('/portal/api/streams')).status, 401, 'a removed account is signed out')
+    assert.equal((await signIn(t, 'person.one', 'second-password-2')).status, 401)
+  } finally { await t.close() }
+})
+
+test('accounts: shared sign-in can be turned off, but never leaves nobody able to sign in', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/settings', { settings: { sharedLogin: false } })).status, 400)   // no accounts yet
+    await post(t, '/portal/api/owner/users', { username: 'only.user', password: 'only-password-1' })
+    assert.equal((await post(t, '/portal/api/owner/settings', { settings: { sharedLogin: false } })).status, 200)
+    t.resetCookie()
+    assert.equal((await adminLogin(t)).status, 401, 'the shared password no longer signs in')
+    assert.equal((await signIn(t, 'only.user', 'only-password-1')).status, 200)
+    await ownerLogin(t)
+    assert.equal((await t.call('/portal/api/owner/users/only.user', { method: 'DELETE' })).status, 400)            // last account, shared sign-in off
   } finally { await t.close() }
 })
