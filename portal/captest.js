@@ -116,18 +116,27 @@ async function ensureViewerHost() {
   if (viewerHost) { if (viewerHost.exitCode !== null) throw new Error('the viewer host stopped: ' + tail(viewerHost.err)); return }
   if (!fs.existsSync(MTX_BIN)) throw new Error(MTX_BIN + ' was not found')
   const conf = path.join(OUT, 'viewer-host.yml')
-  fs.writeFileSync(conf, ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtsp: yes', 'rtspAddress: 127.0.0.1:18554', 'rtspTransports: [tcp]',
-    'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'paths:', '  all_others:', ''].join('\n'))
-  const p = spawn(MTX_BIN, [conf], { stdio: ['ignore', 'ignore', 'pipe'] })
-  p.err = ''; p.stderr.on('data', d => { p.err = (p.err + d).slice(-500) }); p.on('error', e => { p.err = e.message })
-  children.add(p); p.on('close', () => children.delete(p))
-  viewerHost = p
-  for (let i = 0; i < 20; i++) {
-    await sleep(500)
-    if (p.exitCode !== null) throw new Error('the viewer host would not start: ' + tail(p.err))
-    try { if ((await fetch(VIEW_API + '/v3/config/global/get', { signal: AbortSignal.timeout(1000) })).ok) return } catch { /* not up yet */ }
+  // mediamtx versions differ in which settings they know (an unknown one is a fatal error), so try a few shapes of config.
+  // Its log goes to stdout, so both streams are kept. It must not share a port with the real mediamtx.
+  const base = ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtspAddress: 127.0.0.1:18554', 'rtmp: no', 'hls: no', 'webrtc: no']
+  const variants = [[...base, 'srt: no', 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'srt: no'], base]
+  let last = ''
+  for (const lines of variants) {
+    fs.writeFileSync(conf, lines.join('\n') + '\n')
+    const p = spawn(MTX_BIN, [conf], { stdio: ['ignore', 'pipe', 'pipe'], cwd: OUT })
+    p.err = ''
+    const keep = d => { p.err = (p.err + d).slice(-600) }
+    p.stdout.on('data', keep); p.stderr.on('data', keep); p.on('error', e => { p.err = e.message })
+    children.add(p); p.on('close', () => children.delete(p))
+    for (let i = 0; i < 20; i++) {
+      await sleep(500)
+      if (p.exitCode !== null) break
+      try { if ((await fetch(VIEW_API + '/v3/config/global/get', { signal: AbortSignal.timeout(1000) })).ok) { viewerHost = p; return } } catch { /* not up yet */ }
+    }
+    last = tail(p.err.replace(/\x1b\[[0-9;]*m/g, ''), 3, 300) || ('exit code ' + p.exitCode)
+    await killProc(p)
   }
-  throw new Error('the viewer host did not come up')
+  throw new Error('the viewer host would not start: ' + last)
 }
 async function ensureViewerPath(i) {
   await ensureViewerHost()
