@@ -174,7 +174,7 @@ async function runCapacityTest(rawCfg, d) {
   const parts = []
   if (lastClean) parts.push(`Clean through ${lastClean} streams at ${sample.mbps.toFixed(1)} Mbps (each read back ${cfg.srtReaders} time${cfg.srtReaders === 1 ? '' : 's'} like a decoder${skip.has('rtsp') ? '' : ` and ${cfg.rtspReaders} through mediamtx like a browser`}).`)
   if (status.note) parts.push(status.note)
-  else parts.push('No step finished clean.')
+  else if (!lastClean) parts.push('No step finished clean.')
   if (aborted) parts.push(`Stopped: ${aborted}.`)
   else if (lastClean >= cfg.streamsMax) parts.push('Reached the requested maximum without strain, so the limit is higher than this run.')
   if (fit && fit.b > 0) {
