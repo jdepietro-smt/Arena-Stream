@@ -594,6 +594,7 @@ int main(int argc, char** argv) {
     AVFrame* aframe = av_frame_alloc();
     AVPacket* pkt   = av_packet_alloc();
     SwsContext*   sws          = nullptr;
+    SwsContext*   sws_field    = nullptr;   // interlaced output: one field at a time (keeps chroma within its field)
     AVPixelFormat sws_src_fmt  = AV_PIX_FMT_NONE;
     bool          have_out_mode   = false;   // out_mode known, buffers sized
     bool          playout_started = false;   // SDI hardware actually running (false in --preview-only)
@@ -784,11 +785,18 @@ int main(int argc, char** argv) {
                             vframe->width, vframe->height, sws_src_fmt,
                             int(out_mode.width), int(out_mode.height), AV_PIX_FMT_UYVY422,
                             SWS_BILINEAR, nullptr, nullptr, nullptr);
+                        if (sws_field) { sws_freeContext(sws_field); sws_field = nullptr; }
+                        if (out_mode.interlaced)
+                            sws_field = sws_getContext(
+                                vframe->width, vframe->height / 2, sws_src_fmt,
+                                int(out_mode.width), int(out_mode.height) / 2, AV_PIX_FMT_UYVY422,
+                                SWS_BILINEAR, nullptr, nullptr, nullptr);
                         // Stretch 16-235 to 0-255 on the way out (the stream itself is untouched).
-                        if (sws && args.out_full_range) {
+                        if (args.out_full_range) {
                             const int* co = sws_getCoefficients(SWS_CS_ITU709);
-                            sws_setColorspaceDetails(sws, co, vframe->color_range == AVCOL_RANGE_JPEG ? 1 : 0,
-                                                     co, 1, 0, 1 << 16, 1 << 16);
+                            for (SwsContext* c : { sws, sws_field })
+                                if (c) sws_setColorspaceDetails(c, co, vframe->color_range == AVCOL_RANGE_JPEG ? 1 : 0,
+                                                                co, 1, 0, 1 << 16, 1 << 16);
                         }
                     }
 
@@ -821,8 +829,22 @@ int main(int argc, char** argv) {
                     if (sws && playout_started && !frame_behind) {
                         uint8_t* dst[4]     = { uyvy_buf.data(), nullptr, nullptr, nullptr };
                         int      dst_ls[4]  = { int(out_mode.width) * 2, 0, 0, 0 };
-                        sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height,
-                                  dst, dst_ls);
+                        if (sws_field) {
+                            // Interlaced: each field is converted on its own, so the 4:2:0 -> 4:2:2 chroma
+                            // upsampling never blends lines from two moments in time.
+                            for (int fld = 0; fld < 2; ++fld) {
+                                const uint8_t* fs[4] = { vframe->data[0] + size_t(fld) * vframe->linesize[0],
+                                                         vframe->data[1] ? vframe->data[1] + size_t(fld) * vframe->linesize[1] : nullptr,
+                                                         vframe->data[2] ? vframe->data[2] + size_t(fld) * vframe->linesize[2] : nullptr, nullptr };
+                                int fl[4] = { vframe->linesize[0] * 2, vframe->linesize[1] * 2, vframe->linesize[2] * 2, 0 };
+                                uint8_t* fd[4] = { dst[0] + size_t(fld) * dst_ls[0], nullptr, nullptr, nullptr };
+                                int fdl[4] = { dst_ls[0] * 2, 0, 0, 0 };
+                                sws_scale(sws_field, fs, fl, 0, vframe->height / 2, fd, fdl);
+                            }
+                        } else {
+                            sws_scale(sws, vframe->data, vframe->linesize, 0, vframe->height,
+                                      dst, dst_ls);
+                        }
                         if (args.white_pct < 100) apply_white_rolloff(uyvy_buf.data(), uyvy_buf.size(), args.out_full_range, args.white_pct);
 
                         sdi::VideoFrame vf;
@@ -851,8 +873,9 @@ int main(int argc, char** argv) {
                             // stalls decoding. The SDI output path above is always full size.
                             pw = int(std::min<uint32_t>(out_mode.width, kPreviewMaxWidth)) & ~1;
                             ph = int(std::lround(double(out_mode.height) * pw / double(out_mode.width))) & ~1;
+                            // Interlaced: the monitor shows one field (no two-moment blend, so it stays sharp).
                             preview_sws = sws_getContext(
-                                vframe->width, vframe->height, preview_sws_src_fmt,
+                                vframe->width, vframe->height / (out_mode.interlaced ? 2 : 1), preview_sws_src_fmt,
                                 pw, ph, AV_PIX_FMT_YUV420P,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
                             const size_t ySz  = size_t(pw) * ph;
@@ -871,8 +894,13 @@ int main(int argc, char** argv) {
                                 nullptr,
                             };
                             int dst_ls[4] = { y_ls, uv_ls, uv_ls, 0 };
-                            sws_scale(preview_sws, vframe->data, vframe->linesize, 0, vframe->height,
-                                      dst, dst_ls);
+                            if (out_mode.interlaced) {
+                                const int pl[4] = { vframe->linesize[0] * 2, vframe->linesize[1] * 2, vframe->linesize[2] * 2, 0 };
+                                sws_scale(preview_sws, vframe->data, pl, 0, vframe->height / 2, dst, dst_ls);
+                            } else {
+                                sws_scale(preview_sws, vframe->data, vframe->linesize, 0, vframe->height,
+                                          dst, dst_ls);
+                            }
 
                             static int diag_frames = 0;
                             if (diag_frames < 5) {
@@ -1010,6 +1038,7 @@ int main(int argc, char** argv) {
     if (adec_ctx) avcodec_free_context(&adec_ctx);
     if (swr) swr_free(&swr);
     if (sws) sws_freeContext(sws);
+    if (sws_field) sws_freeContext(sws_field);
     if (preview_sws) sws_freeContext(preview_sws);
     avformat_close_input(&fmt);
     return 0;
