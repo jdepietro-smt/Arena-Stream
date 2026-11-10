@@ -122,6 +122,16 @@ async function ensureViewerHost() {
   // Its log goes to stdout, so both streams are kept. It must not share a port with the real mediamtx.
   const base = ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtspAddress: 127.0.0.1:18554', 'rtpAddress: 127.0.0.1:18000', 'rtcpAddress: 127.0.0.1:18001',
     'rtmp: no', 'hls: no', 'webrtc: no']
+  // Every address or port the real mediamtx is configured on is moved by +10000 for the viewer host (read from the real config,
+  // so ports this server customised are covered too).
+  const taken = new Set(base.map(l => l.split(':')[0]))
+  try {
+    for (const l of fs.readFileSync(process.env.MEDIAMTX_CONF || '/etc/mediamtx.yml', 'utf8').split('\n')) {
+      const m = /^(\w+(?:Address|Port)):\s*['"]?(?:[\d.]*:)?(\d{2,5})['"]?\s*(#.*)?$/.exec(l)
+      if (!m || taken.has(m[1]) || +m[2] > 55000) continue
+      taken.add(m[1]); base.push(/Port$/.test(m[1]) ? `${m[1]}: ${+m[2] + 10000}` : `${m[1]}: 127.0.0.1:${+m[2] + 10000}`)
+    }
+  } catch { /* the real config is not readable: the defaults are tried */ }
   const variants = [[...base, 'srt: no', 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'srt: no'], base]
   let last = ''
   for (const lines of variants) {
