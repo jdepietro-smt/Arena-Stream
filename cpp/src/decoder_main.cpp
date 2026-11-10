@@ -877,7 +877,7 @@ int main(int argc, char** argv) {
                             preview_sws = sws_getContext(
                                 vframe->width, vframe->height / (out_mode.interlaced ? 2 : 1), preview_sws_src_fmt,
                                 pw, ph, AV_PIX_FMT_YUV420P,
-                                SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                SWS_BICUBIC | SWS_ACCURATE_RND, nullptr, nullptr, nullptr);   // same scaler as the encoder's monitor: crisp edges
                             const size_t ySz  = size_t(pw) * ph;
                             const size_t uvSz = (size_t(pw) / 2) * (ph / 2);
                             preview_buf.resize(8 + ySz + 2 * uvSz);
