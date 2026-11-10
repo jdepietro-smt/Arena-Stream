@@ -75,7 +75,7 @@ function shell(content) {
   return [
     el('header', {}, el('h1', {}, 'Arena Portal'),
       el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); refresh() } }, t))),
-      el('div', { class: 'sp' }), me.user ? el('button', { class: 'b', title: 'Edit your name and email', onclick: myProfile }, me.name ? me.name + ' (' + me.user + ')' : me.user) : null,
+      el('div', { class: 'sp' }), me.user ? el('button', { class: 'b', title: 'Signed in as ' + me.user + '. Click to edit your name and email.', onclick: myProfile }, me.name || me.user) : null,
       el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
     el('main', {}, content),
   ]
