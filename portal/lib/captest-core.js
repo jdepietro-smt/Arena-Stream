@@ -153,7 +153,7 @@ async function runCapacityTest(rawCfg, d) {
       const step = {
         streams: n, readers: measured.length, cpuAvg: +cpu.toFixed(1), cpuMax: +Math.max(0, ...rec.cpu).toFixed(1), generatorCpu: +gen.toFixed(1), serverCpu: +Math.max(0, cpu - gen).toFixed(1),
         load1Max: rec.load, memAvailMinGB: +rec.memMin.toFixed(1), netRxMbps: +median(rec.net.map(x => x.rx)).toFixed(0), netTxMbps: +median(rec.net.map(x => x.tx)).toFixed(0),
-        readerMbpsMin: +Math.min(...measured.map(r => r.mbps), 0).toFixed(2), readerMbpsMedian: +median(measured.map(r => r.mbps)).toFixed(2),
+        readerMbpsMin: +(measured.length ? Math.min(...measured.map(r => r.mbps)) : 0).toFixed(2), readerMbpsMedian: +median(measured.map(r => r.mbps)).toFixed(2),
         readerSpeedMin: +Math.min(...measured.map(r => r.speed), 1).toFixed(2), maxGapSec: +Math.max(0, ...measured.map(r => r.maxGap)).toFixed(2), strained: bad.length, top,
         verdict: aborted ? 'stopped' : bad.length ? 'strained' : 'clean',
       }
