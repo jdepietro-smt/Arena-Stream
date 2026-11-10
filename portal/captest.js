@@ -3,8 +3,9 @@
 // Capacity test runner, for the server. Started from the Admin page (through the root helper, as its own
 // transient service so the portal's CPU limit does not hold it back), or by hand:
 //   node /opt/arena-portal/captest.js [--streams 20] [--step 2] [--step-sec 40] [--allow-live]
-// Needs ffmpeg, the relay on 127.0.0.1:8895 and mediamtx. Reads LINK_KEY, DIRECTORY_URL, MEDIAMTX_API, RELAY_SRT
-// from the environment (the portal's /etc/arena-portal/env). Writes status.json and history.json to the output dir.
+//   node /opt/arena-portal/captest.js --preflight     (only checks that one stream goes through the relay and back)
+// Needs ffmpeg with SRT, the relay on 127.0.0.1:8895 and mediamtx. Reads LINK_KEY, DIRECTORY_URL, MEDIAMTX_API,
+// RELAY_SRT from the environment (the portal's /etc/arena-portal/env). Writes status.json and history.json to the output dir.
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -33,6 +34,11 @@ process.on('SIGINT', () => { stopRequested = true })
 const writeJson = (file, obj) => { const t = file + '.tmp'; fs.writeFileSync(t, JSON.stringify(obj)); fs.renameSync(t, file) }
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const children = new Set()
+const handles = []   // every publisher and reader, for the error report
+// ffmpeg's errors repeat the stream URL, and the publish URL carries the relay secret: it must never reach the page or the history.
+let secret = ''
+const scrub = t => { let s = String(t || '').replace(/\r/g, ''); if (secret) s = s.split(secret).join('***'); return s.replace(/(streamid=publish:[^:&\s]+:)[^&\s]+/g, '$1***') }
+const tail = (t, n = 2, max = 220) => scrub(t).trim().split('\n').slice(-n).join(' / ').slice(0, max)
 
 async function dirGet(p) {
   const r = await fetch(DIRECTORY + p, { headers: { 'X-Arena-Key': KEY }, signal: AbortSignal.timeout(3000) })
@@ -40,27 +46,48 @@ async function dirGet(p) {
   return r.json()
 }
 
-function proc(args, { progress = false } = {}) {
-  const p = spawn(FFMPEG, args, { stdio: ['ignore', progress ? 'pipe' : 'ignore', 'ignore'] })
+// One ffmpeg child. Its last words (stderr) are kept so a failure can be explained.
+// A reader's media goes to stdout (counted here, then dropped) and its -progress lines to stderr, so the byte count does
+// not depend on ffmpeg's own total_size, which is not reported for devices such as /dev/null.
+function launch(args, h) {
+  const p = spawn(FFMPEG, args, { stdio: ['ignore', h ? 'pipe' : 'ignore', 'pipe'] })
+  p.err = ''
+  if (!h) p.stderr.on('data', d => { p.err = (p.err + d).slice(-500) })
+  else {
+    p.stdout.on('data', d => { h.bytes += d.length })
+    let ebuf = ''
+    p.stderr.on('data', d => {
+      ebuf += d; const lines = ebuf.split('\n'); ebuf = lines.pop()
+      for (const l of lines) {
+        if (l.startsWith('out_time_us=')) h.mediaUs = Number(l.slice(12)) || h.mediaUs
+        else if (l.startsWith('progress=')) { const now = Date.now(); if (h.last) h.gaps.push([now, (now - h.last) / 1000]); h.last = now; if (h.gaps.length > 400) h.gaps.splice(0, 100) }
+        else if (!/^[a-z_0-9]+=/.test(l)) p.err = (p.err + l + '\n').slice(-500)   // progress is key=value; anything else is an error message
+      }
+    })
+  }
   children.add(p); p.on('close', () => children.delete(p))
+  p.on('error', e => { p.err = 'could not run ffmpeg: ' + e.message })
   return p
 }
-const killProc = p => new Promise(res => { if (p.exitCode !== null) return res(); p.once('close', res); p.kill('SIGTERM'); setTimeout(() => { try { p.kill('SIGKILL') } catch { /* gone */ } }, 1500) })
+const killProc = p => new Promise(res => { if (!p || p.exitCode !== null) return res(); p.once('close', res); p.kill('SIGTERM'); setTimeout(() => { try { p.kill('SIGKILL') } catch { /* gone */ } }, 1500) })
 
-function makeReader(kind, ffArgs) {
-  const h = { kind, bytes: 0, mediaUs: 0, last: 0, gaps: [] }
-  const p = proc(['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats', ...ffArgs, '-c', 'copy', '-f', 'mpegts', os.devNull], { progress: true })
-  let buf = ''
-  p.stdout.on('data', d => {
-    buf += d; const lines = buf.split('\n'); buf = lines.pop()
-    for (const l of lines) {
-      if (l.startsWith('total_size=')) h.bytes = Number(l.slice(11)) || h.bytes
-      else if (l.startsWith('out_time_us=')) h.mediaUs = Number(l.slice(12)) || h.mediaUs
-      else if (l.startsWith('progress=')) { const now = Date.now(); if (h.last) h.gaps.push([now, (now - h.last) / 1000]); h.last = now; if (h.gaps.length > 400) h.gaps.splice(0, 100) }
-    }
-  })
+// A publisher or reader that dies before any data has flowed is started again (a few times): the relay or mediamtx
+// may simply not have been ready for it yet.
+function managed(name, kind, build, readerStats) {
+  const h = { name, kind, stopped: false, restarts: 0, bytes: 0, mediaUs: 0, last: 0, gaps: [], p: null, exits: [] }
+  const run = () => {
+    const p = launch(build(), readerStats ? h : null)
+    h.p = p
+    p.on('close', code => {
+      if (h.stopped) return
+      h.exits.push(`${name} ${kind} exited (${code}): ${tail(p.err)}`)
+      if (h.restarts < 6 && h.bytes === 0) { h.restarts++; setTimeout(() => { if (!h.stopped) run() }, 1500) }
+    })
+  }
+  run()
   h.stats = since => ({ bytes: h.bytes, mediaUs: h.mediaUs, maxGapSec: Math.max(0, ...h.gaps.filter(g => !since || g[0] >= since).map(g => g[1]), h.last && Date.now() - h.last > 3000 ? (Date.now() - h.last) / 1000 : 0) })
-  h.stop = () => killProc(p)
+  h.stop = async () => { h.stopped = true; await killProc(h.p) }
+  handles.push(h)
   return h
 }
 
@@ -78,11 +105,29 @@ async function dropMtxPaths() {
   mtxPaths.clear()
 }
 
-let secret = ''
+let sampleFile = ''
+const pubArgs = i => ['-hide_banner', '-loglevel', 'error', '-re', '-stream_loop', '-1', '-i', sampleFile, '-c', 'copy', '-f', 'mpegts', `srt://${RELAY}?streamid=publish:CT-${i}:${secret}&mode=caller&latency=150`]
+const srtReadArgs = i => ['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:2', '-nostats', '-i', `srt://${RELAY}?streamid=read:CT-${i}&mode=caller&latency=150`, '-c', 'copy', '-f', 'mpegts', 'pipe:1']
+
+async function preflight() {
+  const prot = spawnSync(FFMPEG, ['-hide_banner', '-protocols'], { encoding: 'utf8' })
+  if (prot.status !== 0) return { ok: false, message: 'ffmpeg could not run: ' + scrub(String(prot.error || prot.stderr)).slice(0, 200) }
+  if (!/^\s*srt\s*$/m.test(prot.stdout || '')) return { ok: false, message: 'this server\'s ffmpeg has no SRT support, so it cannot publish to or read from the relay. Install an ffmpeg built with libsrt (the Ubuntu package has it).' }
+  // One stream, end to end, before anything is ramped: if this does not work the ramp would only fail the same way.
+  const pub = managed('CT-0', 'publisher', () => pubArgs(0), false)
+  const rd = managed('CT-0', 'reader', () => srtReadArgs(0), true)
+  let ok = false
+  for (let s = 0; s < 15 && !stopRequested; s++) { await sleep(1000); if (rd.bytes > 200000) { ok = true; break } }
+  const problems = handles.flatMap(h => h.exits).slice(0, 3).concat([pub.p && pub.p.err, rd.p && rd.p.err].filter(Boolean).map(x => tail(x)))
+  await pub.stop(); await rd.stop()
+  handles.length = 0
+  if (!ok) return { ok: false, message: 'a single test stream published to the relay at ' + RELAY + ' was not received back within 15 s.' + (problems.length ? ' ffmpeg said: ' + problems.join(' | ') : ' ffmpeg printed no error, so check that the relay service is running and listening on UDP 8895.') }
+  return { ok: true }
+}
+
 async function world() {
-  if (spawnSync(FFMPEG, ['-version'], { stdio: 'ignore' }).status !== 0) throw new Error('ffmpeg is not installed')
   secret = (await dirGet('/v1/config')).relaySecret || ''
-  const sampleFile = path.join(OUT, 'sample-10m.ts')
+  sampleFile = path.join(OUT, 'sample-10m.ts')
   return {
     now: () => Date.now(), sleep, selfPid: process.pid, cores: os.cpus().length,
     stopped: () => stopRequested,
@@ -92,18 +137,21 @@ async function world() {
       if (!fs.existsSync(sampleFile) || fs.statSync(sampleFile).size < 5e6) {
         const r = spawnSync(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30000/1001', '-vf', 'noise=alls=25:allf=t+u,format=yuv420p', '-t', '20',
           '-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '10M', '-minrate', '10M', '-maxrate', '10M', '-bufsize', '5M', '-x264-params', 'nal-hrd=cbr:force-cfr=1', '-g', '30', '-bf', '0', '-an', '-f', 'mpegts', sampleFile], { timeout: 180000 })
-        if (r.status !== 0 || !fs.existsSync(sampleFile)) throw new Error('could not make the 10 Mbps sample')
+        if (r.status !== 0 || !fs.existsSync(sampleFile)) throw new Error('could not make the 10 Mbps sample: ' + String(r.error || r.stderr || '').slice(0, 200))
       }
       return { mbps: fs.statSync(sampleFile).size * 8 / 20 / 1e6 }
     },
+    preflight,
+    diagnostics: async () => {
+      const out = []
+      for (const h of handles) { for (const e of h.exits.slice(-1)) out.push(e); if (!h.exits.length && h.bytes === 0 && h.p && h.p.err) out.push(`${h.name} ${h.kind}: ${tail(h.p.err, 2, 200)}`) }
+      return [...new Set(out)]
+    },
     start: async (kind, i) => {
-      if (kind === 'pub') {
-        const p = proc(['-hide_banner', '-loglevel', 'error', '-re', '-stream_loop', '-1', '-i', sampleFile, '-c', 'copy', '-f', 'mpegts', `srt://${RELAY}?streamid=publish:CT-${i}:${secret}&mode=caller&latency=150`])
-        return { stop: () => killProc(p) }
-      }
-      if (kind === 'srt') return makeReader('srt', ['-i', `srt://${RELAY}?streamid=read:CT-${i}&mode=caller&latency=150`])
+      if (kind === 'pub') return managed(`CT-${i}`, 'publisher', () => pubArgs(i), false)
+      if (kind === 'srt') return managed(`CT-${i}`, 'srt reader', () => srtReadArgs(i), true)
       const name = await ensureMtxPath(i)
-      return makeReader('rtsp', ['-rtsp_transport', 'tcp', '-i', `${MTX_RTSP}/${name}`])
+      return managed(`CT-${i}`, 'rtsp reader', () => ['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:2', '-nostats', '-rtsp_transport', 'tcp', '-i', `${MTX_RTSP}/${name}`, '-c', 'copy', '-f', 'mpegts', 'pipe:1'], true)
     },
     sample: async () => {
       const procs = []
@@ -118,6 +166,11 @@ async function world() {
 }
 
 ;(async () => {
+  if (argv.includes('--preflight')) {   // just the end-to-end check: node captest.js --preflight
+    try { await world(); const r = await preflight(); console.log(JSON.stringify(r)); process.exitCode = r.ok ? 0 : 1 } catch (e) { console.log(JSON.stringify({ ok: false, message: e.message })); process.exitCode = 1 }
+    for (const p of children) { try { p.kill('SIGKILL') } catch { /* gone */ } }
+    process.exit()
+  }
   let status
   try {
     const d = await world()
@@ -131,7 +184,7 @@ async function world() {
   }
   const hist = path.join(OUT, 'history.json')
   let h = []; try { h = JSON.parse(fs.readFileSync(hist, 'utf8')) } catch { /* first run */ }
-  h.unshift({ at: status.startedAt || Date.now(), cfg: status.cfg, expectedMbps: status.expectedMbps, steps: status.steps, conclusion: status.conclusion, aborted: status.aborted, estimate: status.estimate })
+  h.unshift({ at: status.startedAt || Date.now(), cfg: status.cfg, expectedMbps: status.expectedMbps, steps: status.steps, conclusion: status.conclusion, aborted: status.aborted, estimate: status.estimate, diagnostics: status.diagnostics })
   writeJson(hist, h.slice(0, 10))
   console.log(status.conclusion)
   process.exit(0)

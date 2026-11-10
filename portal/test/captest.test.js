@@ -17,6 +17,8 @@ function fakeWorld(o = {}) {
     progress: s => { w.status = s },
     live: async () => (typeof live === 'function' ? live(w) : live),
     prepareSample: async () => ({ mbps: 10 }),
+    ...(o.preflight ? { preflight: async () => o.preflight } : {}),
+    ...(o.diagnostics ? { diagnostics: async () => o.diagnostics } : {}),
     start: async (kind, i) => {
       w.started.push(kind + i)
       if (kind === 'pub') w.streams = Math.max(w.streams, i)
@@ -76,6 +78,22 @@ test('stops at the first step where readers fall behind, and says so', async () 
   assert.equal(r.steps[3].streams, 8)
   assert.match(r.conclusion, /Clean through 6 streams/); assert.match(r.conclusion, /readers fell behind/)
   assert.equal(w.stopped.length, w.started.length)
+})
+
+test('a failed pre-flight stops the test before anything is ramped, and says why', async () => {
+  const { d, w } = fakeWorld({ preflight: { ok: false, message: "this server's ffmpeg has no SRT support" } })
+  const r = await core.runCapacityTest({ streamsMax: 8, step: 2 }, d)
+  assert.match(r.conclusion, /could not start: this server's ffmpeg has no SRT support/)
+  assert.equal(r.steps.length, 0); assert.equal(w.started.length, 0, 'no stream was started')
+  const ok = await core.runCapacityTest({ streamsMax: 2, step: 2, stepSec: 15, warmSec: 5 }, fakeWorld({ preflight: { ok: true } }).d)
+  assert.equal(ok.steps[0].verdict, 'clean')
+})
+
+test('when readers get nothing, the errors from the test processes are in the conclusion', async () => {
+  const { d } = fakeWorld({ failAt: 0, diagnostics: ['CT-1 srt reader exited (1): Connection setup failure', 'CT-1 publisher exited (1): Error opening output file'] })
+  const r = await core.runCapacityTest({ streamsMax: 4, step: 2, stepSec: 15, warmSec: 5 }, d)
+  assert.match(r.aborted, /Errors from the test processes: CT-1 srt reader exited \(1\): Connection setup failure/)
+  assert.deepEqual(r.diagnostics.length, 2)
 })
 
 test('carries on with decoder-style readers when the mediamtx readers get nothing', async () => {

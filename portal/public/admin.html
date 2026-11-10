@@ -455,7 +455,7 @@ async function capacitySection(box) {
     if (st.running || st.starting) {
       const n = s && s.now
       live.append(el('div', { class: 'card', style: 'margin:0;max-width:none' },
-        el('h2', {}, st.starting && !s ? 'Starting (the server is launching the test)...' : 'Running: ' + (s.phase === 'preparing' ? 'making the 10 Mbps sample' : 'step ' + (s.step || '') + ' of up to ' + s.cfg.streamsMax + ' streams, ' + (n ? n.phase : ''))),
+        el('h2', {}, st.starting && !s ? 'Starting (the server is launching the test)...' : 'Running: ' + (s.phase === 'preparing' ? 'making the 10 Mbps sample' : s.phase === 'checking' ? 'checking that one stream goes through the relay and back' : 'step ' + (s.step || '') + ' of up to ' + s.cfg.streamsMax + ' streams, ' + (n ? n.phase : ''))),
         n ? el('div', { class: 'tiles' }, tile('Streams', String(n.streams)), tile('Server CPU', n.serverCpu + '%', n.serverCpu > 70 ? 'warn' : 'ok'), tile('Generator CPU', n.generatorCpu + '%'), tile('All CPU', n.cpu + '%', n.cpu > 85 ? 'bad' : ''),
           tile('Load (1 min)', n.load1.toFixed(2)), tile('Free memory', n.memAvailGB + ' GB'), tile('Network in', n.netRxMbps + ' Mbps'), tile('Network out', n.netTxMbps + ' Mbps')) : null,
         s && s.steps && s.steps.length ? stepTable(s.steps) : null,

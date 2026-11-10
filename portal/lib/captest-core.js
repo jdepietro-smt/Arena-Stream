@@ -58,7 +58,7 @@ function defaults(cfg = {}) {
 // ── the run ───────────────────────────────────────────────────────────────────
 // d: { now(), sleep(ms), sample() -> {stat, net, mem, load, procs:[{pid,comm,ppid,ticks}]}, selfPid,
 //      live() -> [{name,kbps}], prepareSample() -> {mbps}, start(kind, i) -> handle{stop(), stats()}, stopped() -> bool,
-//      progress(status), cores }
+//      preflight() -> {ok, message}, diagnostics() -> [string], progress(status), cores }
 // A reader handle's stats(since) gives {bytes, mediaUs, maxGapSec}, the gap being the longest silence after time `since`.
 async function runCapacityTest(rawCfg, d) {
   const cfg = defaults(rawCfg)
@@ -76,6 +76,11 @@ async function runCapacityTest(rawCfg, d) {
   status.phase = 'preparing'; publish()
   const sample = await d.prepareSample()
   status.expectedMbps = sample.mbps
+  if (d.preflight) {
+    status.phase = 'checking'; publish()
+    const pre = await d.preflight()
+    if (!pre.ok) return finish(`The test could not start: ${pre.message}`, pre.message)
+  }
   const handles = { pub: [], srt: [], rtsp: [] }
   const stopAll = async () => { for (const k of Object.keys(handles)) for (const h of handles[k]) { try { await h.stop() } catch { /* gone */ } } }
 
@@ -156,7 +161,11 @@ async function runCapacityTest(rawCfg, d) {
       if (step.verdict === 'clean') { lastClean = n; cpuPoints.push([n, step.serverCpu]) }
       else if (!firstStrain) firstStrain = step
       publish()
-      if (!aborted && bad.length) { aborted = `${bad.length} of ${measured.length} readers fell behind (slowest ${step.readerMbpsMin} Mbps against ${sample.mbps.toFixed(1)}, or stalled)`; }
+      if (!aborted && bad.length) {
+        aborted = `${bad.length} of ${measured.length} readers fell behind (slowest ${step.readerMbpsMin} Mbps against ${sample.mbps.toFixed(1)}, or stalled)`
+        const diag = d.diagnostics ? await d.diagnostics() : []
+        if (diag.length) { status.diagnostics = diag; aborted += '. Errors from the test processes: ' + diag.slice(0, 3).join(' | ') }
+      }
       if (n >= cfg.streamsMax) break
     }
   } finally { await stopAll() }
