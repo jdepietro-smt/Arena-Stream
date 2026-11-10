@@ -14,8 +14,19 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const auth = require('./lib/auth')
+const os = require('node:os')
+const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
+const { openAdmin, SETTINGS } = require('./lib/admin')
 const { createThumbs } = require('./lib/thumbs')
+
+// Services the owner can look at and restart from the Admin page. Restarts go through a root helper
+// (portal/deploy/ctl.sh) that accepts only these names; the portal itself runs unprivileged.
+const SERVICES = [
+  ['mediamtx', 'Stream server (mediamtx)'], ['arena-lowlat', 'Low-latency relay'], ['arena-link-directory', 'Arena Link directory'],
+  ['arena-linkd', 'Share-link check'], ['arena-portal', 'Portal'], ['arena-comms', 'Comms'], ['arena-livekit', 'Comms media (LiveKit)'], ['nginx', 'Web server (nginx)'],
+]
+const OWNER_SEC = 15 * 60
 
 function loadConfig(env = process.env) {
   return {
@@ -32,6 +43,8 @@ function loadConfig(env = process.env) {
     relayLatencyMs: parseInt(env.PORTAL_RELAY_LATENCY_MS || '150', 10),
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
+    ownerInit: env.PORTAL_OWNER_PASSWORD_INIT || '',                // first owner password; stored hashed, then removed from the env file
+    ctlDir: env.PORTAL_CTL_DIR || '',                               // where restart requests are left for the root helper
   }
 }
 
@@ -45,8 +58,16 @@ function createPortal(cfg) {
   if (!cfg.adminPassword) throw new Error('PORTAL_ADMIN_PASSWORD is not set')
   if (!cfg.secret || cfg.secret.length < 16) throw new Error('PORTAL_SECRET must be at least 16 characters')
   const store = openStore(cfg.dataDir)
-  const thumbs = createThumbs({ ffmpeg: cfg.ffmpeg, dir: cfg.thumbDir, relaySrt: cfg.relaySrt, latencyMs: cfg.relayLatencyMs, spawn: cfg.spawn, log: m => console.log(m) })
+  const admin = openAdmin(cfg.dataDir)
+  const S = () => admin.settings()
+  const relayLatency = () => S().relayLatencyMs || cfg.relayLatencyMs
+  const publicBase = () => S().publicBase || cfg.publicBase
+  const ctlDir = cfg.ctlDir || path.join(cfg.dataDir, 'ctl')
+  const run = cfg.execFile || execFile
+  if (!admin.ownerPwHash && cfg.ownerInit) { admin.ownerPwHash = auth.hashPassword(cfg.ownerInit); admin.audit('system', 'owner.init', 'owner password set from the installer') }
+  const thumbs = createThumbs({ ffmpeg: cfg.ffmpeg, dir: cfg.thumbDir, relaySrt: cfg.relaySrt, latencyMs: relayLatency, everySec: () => S().thumbEverySec, spawn: cfg.spawn, log: m => console.log(m) })
   const loginOk = auth.throttle(8, 60000)
+  const ownerLoginOk = auth.throttle(5, 60000)
   const pwOk = auth.throttle(10, 60000)
 
   // ── helpers ────────────────────────────────────────────────────────────────
@@ -66,13 +87,22 @@ function createPortal(cfg) {
   const clientIp = req => (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim()
   const secure = req => req.headers['x-forwarded-proto'] === 'https'   // nginx sets it; plain http (tests, local) gets a non-Secure cookie
 
+  // Session cookies carry the epoch: "sign out everywhere" bumps it and every cookie stops working.
   const isAdmin = req => {
     const c = auth.parseCookies(req.headers.cookie).arena_portal
     const v = auth.unsign(c, cfg.secret)
     if (!v) return false
-    const [kind, exp] = v.split('|')
-    return kind === 'admin' && Number(exp) > Date.now()
+    const [kind, exp, epoch] = v.split('|')
+    return kind === 'admin' && Number(exp) > Date.now() && Number(epoch) === admin.epoch
   }
+  const ownerCookieValid = req => {
+    const v = auth.unsign(auth.parseCookies(req.headers.cookie).arena_owner, cfg.secret)
+    if (!v) return 0
+    const [kind, exp, epoch] = v.split('|')
+    return kind === 'owner' && Number(exp) > Date.now() && Number(epoch) === admin.epoch ? Number(exp) : 0
+  }
+  const ownerCookie = req => auth.cookie('arena_owner', auth.sign(`owner|${Date.now() + OWNER_SEC * 1000}|${admin.epoch}`, cfg.secret), { maxAgeSec: OWNER_SEC, secure: secure(req) })
+  const adminPasswordOk = pw => (admin.adminPwHash ? auth.checkPassword(pw, admin.adminPwHash) : auth.safeEqual(pw, cfg.adminPassword))
   // State-changing admin calls must come from this site (cookie is SameSite=Lax as well).
   const sameOrigin = req => {
     const o = req.headers.origin
@@ -106,14 +136,23 @@ function createPortal(cfg) {
     const tag = crypto.createHmac('sha256', cfg.secret).update('path:' + relayName).digest('hex').slice(0, 10)
     return `portal_${String(relayName).replace(/[^A-Za-z0-9_.-]/g, '-')}_${tag}`
   }
+  const pathLatency = new Map()   // path -> the relay latency its source was configured with
   async function ensurePath(relayName) {
     const name = pathName(relayName)
+    const lat = relayLatency()
     const body = {
-      source: `srt://${cfg.relaySrt}?streamid=read:${relayName}&mode=caller&latency=${cfg.relayLatencyMs}`,
+      source: `srt://${cfg.relaySrt}?streamid=read:${relayName}&mode=caller&latency=${lat}`,
       sourceOnDemand: true, sourceOnDemandStartTimeout: '10s', sourceOnDemandCloseAfter: '15s',
     }
-    const r = await mtx(`/v3/config/paths/add/${encodeURIComponent(name)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    if (!r.ok && r.status !== 400) throw new Error(`mediamtx ${r.status}`)   // 400 = already configured
+    const hdr = { 'Content-Type': 'application/json' }
+    const r = await mtx(`/v3/config/paths/add/${encodeURIComponent(name)}`, { method: 'POST', headers: hdr, body: JSON.stringify(body) })
+    if (r.ok) pathLatency.set(name, lat)
+    else if (r.status === 400) {   // already configured: follow a changed relay latency setting
+      if (pathLatency.get(name) !== lat) {
+        const pr = await mtx(`/v3/config/paths/patch/${encodeURIComponent(name)}`, { method: 'PATCH', headers: hdr, body: JSON.stringify({ source: body.source }) })
+        if (pr.ok) pathLatency.set(name, lat)
+      }
+    } else throw new Error(`mediamtx ${r.status}`)
     return name
   }
   async function readerCounts() {
@@ -161,12 +200,14 @@ function createPortal(cfg) {
       if (!sameOrigin(req)) return send(res, 403, { error: 'bad origin' })
       if (!loginOk(clientIp(req))) return send(res, 429, { error: 'too many attempts, wait a minute' })
       const b = await readJson(req)
-      if (!b || !auth.safeEqual(b.password || '', cfg.adminPassword)) return send(res, 401, { error: 'wrong password' })
-      const sess = auth.sign(`admin|${Date.now() + SESSION_SEC * 1000}`, cfg.secret)
+      if (!b || !adminPasswordOk(String(b.password || ''))) { admin.audit('admin', 'login.fail', '', clientIp(req)); return send(res, 401, { error: 'wrong password' }) }
+      admin.audit('admin', 'login', '', clientIp(req))
+      const sess = auth.sign(`admin|${Date.now() + SESSION_SEC * 1000}|${admin.epoch}`, cfg.secret)
       return send(res, 200, { ok: true }, { 'Set-Cookie': auth.cookie('arena_portal', sess, { maxAgeSec: SESSION_SEC, secure: secure(req) }) })
     }
     if (p === '/portal/api/logout' && m === 'POST') {
-      return send(res, 200, { ok: true }, { 'Set-Cookie': auth.cookie('arena_portal', '', { maxAgeSec: 0, secure: secure(req) }) })
+      res.setHeader('Set-Cookie', [auth.cookie('arena_portal', '', { maxAgeSec: 0, secure: secure(req) }), auth.cookie('arena_owner', '', { maxAgeSec: 0, secure: secure(req) })])
+      return send(res, 200, { ok: true })
     }
     if (p.startsWith('/portal/api/')) {
       if (!isAdmin(req)) return send(res, 401, { error: 'sign in' })
@@ -177,7 +218,11 @@ function createPortal(cfg) {
   }
 
   async function adminApi(req, res, p, m) {
-    if (p === '/portal/api/me') return send(res, 200, { ok: true, publicBase: cfg.publicBase })
+    if (p === '/portal/api/me') {
+      const s = S()
+      return send(res, 200, { ok: true, publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
+    }
+    if (p.startsWith('/portal/api/owner/')) return ownerApi(req, res, p, m)
 
     if (p === '/portal/api/streams' && m === 'GET') {
       const [list, readers] = await Promise.all([encoders(), readerCounts()])
@@ -199,7 +244,7 @@ function createPortal(cfg) {
     let tm
     if ((tm = p.match(/^\/portal\/api\/thumb\/([^/]+)$/)) && m === 'GET') {
       const e = (await encoders()).find(x => x.id === decodeURIComponent(tm[1]))
-      if (!e || !e.relay || !e.relay.name || !browserOk(e)) { res.writeHead(204); return res.end() }
+      if (!e || !e.relay || !e.relay.name || !browserOk(e) || !S().thumbnailsEnabled) { res.writeHead(204); return res.end() }
       thumbs.want(e.relay.name)
       const img = thumbs.read(e.relay.name)
       if (!img) { res.writeHead(204); return res.end() }
@@ -213,7 +258,7 @@ function createPortal(cfg) {
       if (!e) return send(res, 404, { error: 'stream is offline' })
       if (!e.relay || !e.relay.name) return send(res, 409, { error: 'this stream is not sent to the relay' })
       if (!browserOk(e)) return send(res, 415, { error: 'this stream is H.265, which browsers cannot play' })
-      if (livePreviews() >= MAX_PREVIEWS) return send(res, 429, { error: 'close another preview first' })
+      if (livePreviews() >= S().maxPreviews) return send(res, 429, { error: 'close another preview first' })
       return whepStart(req, res, e, sid => { previews.set(sid, Date.now()); return `/portal/api/whep/${pm[1]}/${encodeURIComponent(sid)}` })
     }
     if ((pm = p.match(/^\/portal\/api\/whep\/([^/]+)\/([^/]+)$/)) && (m === 'DELETE' || m === 'PATCH')) {
@@ -234,21 +279,23 @@ function createPortal(cfg) {
     if (p === '/portal/api/links' && m === 'POST') {
       const b = await readJson(req)
       if (!b || typeof b.stream !== 'string' || !b.stream.trim()) return send(res, 400, { error: 'choose a stream' })
-      const mins = Number(b.expiresInMin) || 0
+      const mins = b.expiresInMin === undefined ? S().defaultLinkExpiryMin : (Number(b.expiresInMin) || 0)
       if (mins < 0 || mins > 60 * 24 * 365) return send(res, 400, { error: 'bad expiry' })
+      if (S().requireLinkPassword && !b.password) return send(res, 400, { error: 'links need a password (Admin settings)' })
       const l = {
         id: auth.newId(12), stream: b.stream.trim().slice(0, 128), label: String(b.label || '').trim().slice(0, 80),
         createdAt: Date.now(), expiresAt: mins ? Date.now() + mins * 60000 : 0, revoked: false,
         pwHash: b.password ? auth.hashPassword(String(b.password).slice(0, 128)) : '',
       }
       store.putLink(l)
+      admin.audit('admin', 'link.create', `${l.id} ${l.stream}${l.expiresAt ? '' : ' (no expiry)'}${l.pwHash ? ' (password)' : ''}`, clientIp(req))
       return send(res, 200, { link: publicLink(l) })
     }
     let mm
     if ((mm = p.match(/^\/portal\/api\/links\/([a-z0-9]+)$/))) {
       const l = store.link(mm[1])
       if (!l) return send(res, 404, { error: 'no such link' })
-      if (m === 'DELETE') { l.revoked = true; store.putLink(l); return send(res, 200, { link: publicLink(l) }) }
+      if (m === 'DELETE') { l.revoked = true; store.putLink(l); admin.audit('admin', 'link.revoke', `${l.id} ${l.stream}`, clientIp(req)); return send(res, 200, { link: publicLink(l) }) }
       if (m === 'GET') return send(res, 200, { link: publicLink(l), recent: store.views(l.id).slice(-50).reverse() })
     }
 
@@ -258,7 +305,120 @@ function createPortal(cfg) {
     if ((mm = p.match(/^\/portal\/api\/decoders\/([^/]+)\/want$/)) && m === 'POST') {
       const b = await readJson(req)
       if (!b || typeof b.stream !== 'string') return send(res, 400, { error: 'stream required ("" disconnects)' })
+      admin.audit('admin', 'decoder.want', `${decodeURIComponent(mm[1])} -> ${b.stream || '(disconnect)'}`, clientIp(req))
       try { return send(res, 200, await dir('/v1/decoder/want', { id: decodeURIComponent(mm[1]), stream: b.stream })) } catch (e) { return send(res, 502, { error: String(e.message) }) }
+    }
+    send(res, 404, { error: 'not found' })
+  }
+
+  // ── owner section ──────────────────────────────────────────────────────────
+  // Needs the normal admin login plus the owner password, re-asked after 15 idle minutes.
+  const exec = (cmd, args) => new Promise(resolve => {
+    try { run(cmd, args, { timeout: 3000 }, (err, stdout) => resolve(err ? '' : String(stdout))) } catch { resolve('') }
+  })
+  const parseShow = text => { const o = {}; for (const l of text.split('\n')) { const i = l.indexOf('='); if (i > 0) o[l.slice(0, i)] = l.slice(i + 1) } return o }
+
+  async function health() {
+    const services = await Promise.all(SERVICES.map(async ([name, label]) => {
+      const o = parseShow(await exec('systemctl', ['show', name + '.service', '-p', 'LoadState', '-p', 'ActiveState', '-p', 'SubState', '-p', 'ActiveEnterTimestamp', '--no-pager']))
+      const installed = o.LoadState && o.LoadState !== 'not-found'
+      return { name, label, installed: !!installed, state: installed ? `${o.ActiveState}${o.SubState && o.SubState !== o.ActiveState ? ' (' + o.SubState + ')' : ''}` : 'not installed', active: o.ActiveState === 'active', since: o.ActiveEnterTimestamp || '' }
+    }))
+    const df = async mount => {
+      const l = (await exec('df', ['-P', '-B1', mount])).trim().split('\n')[1]
+      if (!l) return null
+      const f = l.split(/\s+/)
+      return { mount, total: Number(f[1]), used: Number(f[2]), free: Number(f[3]) }
+    }
+    const disks = (await Promise.all([df('/'), df('/var/recordings')])).filter(Boolean)
+    const [list, readers] = await Promise.all([encoders(), readerCounts()])
+    let mediamtx = false
+    try { mediamtx = (await mtx('/v3/paths/list?itemsPerPage=1')).ok } catch { /* down */ }
+    let directory = false
+    try { await dir('/v1/encoders'); directory = true } catch { /* down */ }
+    return {
+      services, disks,
+      system: { load: os.loadavg(), cpus: os.cpus().length, memTotal: os.totalmem(), memFree: os.freemem(), uptimeSec: Math.round(os.uptime()) },
+      app: { directory, mediamtx, encoders: list.length, webViewers: Object.entries(readers).filter(([k]) => k.startsWith('portal_')).reduce((a, [, n]) => a + n, 0),
+             thumbWorkers: thumbs.active(), previews: livePreviews() },
+    }
+  }
+
+  const MIN_PW = 10
+  async function ownerApi(req, res, p, m) {
+    const ip = clientIp(req)
+    const sub = p.slice('/portal/api/owner/'.length)
+
+    if (sub === 'status' && m === 'GET') {
+      const exp = ownerCookieValid(req)
+      return send(res, 200, { configured: !!admin.ownerPwHash, unlocked: !!exp, remainingSec: exp ? Math.max(0, Math.round((exp - Date.now()) / 1000)) : 0 })
+    }
+    if (sub === 'login' && m === 'POST') {
+      if (!admin.ownerPwHash) return send(res, 503, { error: 'no owner password is set; see the portal README' })
+      if (!ownerLoginOk(ip)) return send(res, 429, { error: 'too many attempts, wait a minute' })
+      const b = await readJson(req)
+      if (!b || !auth.checkPassword(String(b.password || ''), admin.ownerPwHash)) { admin.audit('owner', 'owner.login.fail', '', ip); return send(res, 401, { error: 'wrong owner password' }) }
+      admin.audit('owner', 'owner.login', '', ip)
+      res.setHeader('Set-Cookie', ownerCookie(req))
+      return send(res, 200, { ok: true, remainingSec: OWNER_SEC })
+    }
+    if (sub === 'logout' && m === 'POST') {
+      res.setHeader('Set-Cookie', auth.cookie('arena_owner', '', { maxAgeSec: 0, secure: secure(req) }))
+      return send(res, 200, { ok: true })
+    }
+
+    // Everything below needs the owner unlock; each call keeps it alive for another 15 minutes.
+    if (!ownerCookieValid(req)) return send(res, 403, { error: 'owner password needed', locked: true })
+    res.setHeader('Set-Cookie', ownerCookie(req))
+
+    if (sub === 'settings' && m === 'GET') return send(res, 200, { settings: S(), defs: SETTINGS, installed: { relayLatencyMs: cfg.relayLatencyMs, publicBase: cfg.publicBase } })
+    if (sub === 'settings' && m === 'POST') {
+      const b = await readJson(req)
+      if (!b || typeof b.settings !== 'object') return send(res, 400, { error: 'settings required' })
+      let changed
+      try { changed = admin.patchSettings(b.settings) } catch (e) { return send(res, 400, { error: e.message }) }
+      for (const [k, v] of Object.entries(changed)) admin.audit('owner', 'settings.change', `${k}: ${JSON.stringify(v.from)} -> ${JSON.stringify(v.to)}`, ip)
+      return send(res, 200, { settings: S(), changed })
+    }
+
+    if (sub === 'password' && m === 'POST') {
+      const b = await readJson(req)
+      if (!b || !['admin', 'owner'].includes(b.which)) return send(res, 400, { error: 'say which password' })
+      if (!auth.checkPassword(String(b.current || ''), admin.ownerPwHash)) { admin.audit('owner', 'account.password.fail', b.which, ip); return send(res, 401, { error: 'the current owner password is wrong' }) }
+      const next = String(b.next || '')
+      if (next.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
+      if (b.which === 'owner') admin.ownerPwHash = auth.hashPassword(next); else admin.adminPwHash = auth.hashPassword(next)
+      admin.bumpEpoch()   // everyone signs in again, this browser included
+      admin.audit('owner', `account.password.${b.which}`, 'changed; all sessions signed out', ip)
+      return send(res, 200, { ok: true, signedOut: true })
+    }
+    if (sub === 'signout-all' && m === 'POST') {
+      admin.bumpEpoch(); admin.audit('owner', 'account.signout-all', '', ip)
+      return send(res, 200, { ok: true, signedOut: true })
+    }
+
+    if (sub === 'health' && m === 'GET') return send(res, 200, await health())
+    let sm
+    if ((sm = sub.match(/^services\/([a-z0-9-]+)\/restart$/)) && m === 'POST') {
+      const svc = SERVICES.find(s => s[0] === sm[1])
+      if (!svc) return send(res, 404, { error: 'unknown service' })
+      try {
+        fs.mkdirSync(ctlDir, { recursive: true })
+        fs.writeFileSync(path.join(ctlDir, 'request'), svc[0] + '\n')
+      } catch (e) { return send(res, 500, { error: 'could not leave the restart request: ' + e.message }) }
+      admin.audit('owner', 'service.restart', svc[0], ip)
+      return send(res, 200, { ok: true, requested: svc[0] })
+    }
+
+    if (sub === 'activity' && m === 'GET') {
+      const u = new URL(req.url, 'http://x')
+      return send(res, 200, { entries: admin.auditList({ limit: Math.min(1000, Number(u.searchParams.get('limit')) || 200), action: u.searchParams.get('action') || '' }) })
+    }
+    if (sub === 'links' && m === 'GET') {
+      return send(res, 200, { links: store.links().sort((a, b) => b.createdAt - a.createdAt).map(l => {
+        const v = store.views(l.id)
+        return { ...publicLink(l), lastView: v.length ? v[v.length - 1].at : 0, uniqueViewers: new Set(v.map(x => x.ip)).size, recent: v.slice(-10).reverse() }
+      }) })
     }
     send(res, 404, { error: 'not found' })
   }
@@ -283,7 +443,6 @@ function createPortal(cfg) {
 
   // Admin previews: a few at a time, because each one sends the full stream to the browser.
   const previews = new Map()   // session id -> started
-  const MAX_PREVIEWS = 3
   const livePreviews = () => { const now = Date.now(); for (const [k, t] of previews) if (now - t > 15 * 60000) previews.delete(k); return previews.size }
 
   async function viewer(req, res, id, rest, m) {
@@ -315,6 +474,7 @@ function createPortal(cfg) {
       if (!browserOk(e)) return send(res, 415, { error: 'this stream is H.265, which browsers cannot play' })
       return whepStart(req, res, e, sid => {
         store.addView({ id, at: Date.now(), ip: clientIp(req), ua: String(req.headers['user-agent'] || '').slice(0, 160) })
+        admin.audit('viewer', 'link.view', `${id} ${l.stream}`, clientIp(req))
         return `/w/${id}/whep/${encodeURIComponent(sid)}`
       })
     }
@@ -341,8 +501,8 @@ function createPortal(cfg) {
       else res.end()
     })
   })
-  server.on('close', () => thumbs.stopAll())
-  return { server, store, pathName, thumbs }
+  server.on('close', () => { thumbs.stopAll(); admin.flush() })
+  return { server, store, pathName, thumbs, admin }
 }
 
 module.exports = { createPortal, loadConfig }

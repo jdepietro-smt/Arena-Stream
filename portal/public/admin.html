@@ -59,7 +59,7 @@ let thumbTimer = null
 let tab = 'streams', timer = null, streams = [], links = [], decoders = []
 
 function showLogin() {
-  clearInterval(timer); clearInterval(thumbTimer)
+  clearInterval(timer); clearInterval(thumbTimer); clearInterval(ownerTimer); clearInterval(healthTimer); tab = 'streams'
   const err = el('div', { class: 'err' })
   const pw = el('input', { type: 'password', placeholder: 'Password', autofocus: true })
   const go = async () => { try { await api('/login', 'POST', { password: pw.value }); publicBase = (await api('/me')).publicBase || ''; start() } catch (e) { err.textContent = e.message } }
@@ -69,10 +69,10 @@ function showLogin() {
 }
 
 function shell(content) {
-  const tabs = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders']]
+  const tabs = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders'], ['admin', 'Admin']]
   return [
     el('header', {}, el('h1', {}, 'Arena Portal'),
-      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; refresh() } }, t))),
+      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); refresh() } }, t))),
       el('div', { class: 'sp' }),
       el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
     el('main', {}, content),
@@ -209,7 +209,175 @@ function newLinkDialog(stream) {
   label.focus()
 }
 
+// ── Admin (owner-only) ─────────────────────────────────────────────────────────
+// Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
+let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['activity', 'Activity and links']]
+
+async function oapi(path, method = 'GET', body) {
+  const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+  const j = await r.json().catch(() => ({}))
+  if (r.status === 401 && path !== '/login') { showLogin(); throw new Error('signed out') }
+  if (r.status === 403 && j.locked) { owner.unlocked = false; adminRender(); throw new Error('locked') }
+  if (!r.ok) throw new Error(j.error || r.statusText)
+  return j
+}
+const mmss = s => Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')
+const bytes = n => n >= 1e12 ? (n / 1e12).toFixed(1) + ' TB' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : (n / 1e6).toFixed(0) + ' MB'
+const fmtAgo = s => s >= 86400 ? Math.floor(s / 86400) + ' d ' + Math.floor(s % 86400 / 3600) + ' h' : s >= 3600 ? Math.floor(s / 3600) + ' h ' + Math.floor(s % 3600 / 60) + ' min' : Math.floor(s / 60) + ' min'
+
+function msgBox() { return el('div', { class: 'err' }) }
+function flash(box, text, good) { box.textContent = text; box.style.color = good ? 'var(--ok)' : 'var(--bad)' }
+
+async function adminRender() {
+  clearInterval(ownerTimer); clearInterval(healthTimer)
+  try { owner = await oapi('/status') } catch (e) { if (e.message === 'signed out') return }
+  const body = $app.querySelector('main')
+  if (!body) return $app.replaceChildren(...shell(el('div')))
+  if (!owner.unlocked) return body.replaceChildren(lockCard())
+  const content = el('div')
+  body.replaceChildren(
+    el('div', { class: 'row', style: 'margin-bottom:14px;flex-wrap:wrap' },
+      SUBS.map(([k, t]) => el('button', { class: 'b' + (adminSub === k ? ' pri' : ''), onclick: () => { adminSub = k; adminRender() } }, t)),
+      el('div', { class: 'sp' }),
+      el('span', { class: 'hint', id: 'ownerLeft' }, 'Owner unlocked, locks in ' + mmss(owner.remainingSec)),
+      el('button', { class: 'b', onclick: async () => { await oapi('/logout', 'POST'); adminRender() } }, 'Lock now')),
+    content)
+  let left = owner.remainingSec
+  ownerTimer = setInterval(() => { left = Math.max(0, left - 1); const n = document.getElementById('ownerLeft'); if (n) n.textContent = 'Owner unlocked, locks in ' + mmss(left); if (left === 0) adminRender() }, 1000)
+  try {
+    if (adminSub === 'account') await accountSection(content)
+    else if (adminSub === 'settings') await settingsSection(content)
+    else if (adminSub === 'health') await healthSection(content)
+    else await activitySection(content)
+  } catch (e) { if (e.message !== 'locked' && e.message !== 'signed out') content.replaceChildren(el('div', { class: 'err' }, e.message)) }
+}
+
+function lockCard() {
+  const err = msgBox()
+  const pw = el('input', { type: 'password', placeholder: 'Owner password', autocomplete: 'off' })
+  const go = async () => { try { await oapi('/login', 'POST', { password: pw.value }); adminRender() } catch (e) { flash(err, e.message) } }
+  pw.addEventListener('keydown', e => e.key === 'Enter' && go())
+  setTimeout(() => pw.focus(), 50)
+  return el('div', { class: 'card', style: 'margin:6vh auto' }, el('h2', {}, 'Owner area'),
+    el('div', { class: 'hint' }, owner.configured ? 'Settings, passwords, server health and the activity log need the owner password. It locks again after 15 minutes.' : 'No owner password is set yet. See the portal README to set one.'),
+    pw, el('button', { class: 'b pri', onclick: go, disabled: !owner.configured }, 'Unlock'), err)
+}
+
+async function accountSection(box) {
+  const mkForm = (which, title, hint) => {
+    const cur = el('input', { type: 'password', placeholder: 'Current owner password', autocomplete: 'off' })
+    const n1 = el('input', { type: 'password', placeholder: 'New password (10+ characters)', autocomplete: 'new-password' })
+    const n2 = el('input', { type: 'password', placeholder: 'New password again', autocomplete: 'new-password' })
+    const m = msgBox()
+    const go = async () => {
+      if (n1.value !== n2.value) return flash(m, 'The two new passwords differ')
+      try { await oapi('/password', 'POST', { which, current: cur.value, next: n1.value }); showLogin() } catch (e) { flash(m, e.message) }
+    }
+    return el('div', { class: 'card', style: 'max-width:420px;margin:0' }, el('h2', {}, title), el('div', { class: 'hint' }, hint), cur, n1, n2, el('button', { class: 'b pri', onclick: go }, 'Change password'), m)
+  }
+  const sm = msgBox()
+  const [act] = await Promise.all([oapi('/activity?limit=300')])
+  const rows = act.entries.filter(e => e.action === 'login' || e.action === 'login.fail' || e.action.startsWith('owner.login') || e.action.startsWith('account.')).slice(0, 25)
+  box.replaceChildren(
+    el('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap;gap:16px' },
+      mkForm('admin', 'Portal password', 'The everyday login. Changing it signs everyone out, this browser included.'),
+      mkForm('owner', 'Owner password', 'Protects this Admin area. Changing it signs everyone out.'),
+      el('div', { class: 'card', style: 'max-width:420px;margin:0' }, el('h2', {}, 'Sessions'), el('div', { class: 'hint' }, 'Signs out every browser that is logged in to the portal, including this one.'),
+        el('button', { class: 'b', onclick: async () => { if (confirm('Sign out everywhere?')) { await oapi('/signout-all', 'POST'); showLogin() } } }, 'Sign out everywhere'), sm)),
+    el('h2', { style: 'margin-top:22px' }, 'Recent sign-ins and account changes'),
+    rows.length ? el('table', {}, el('thead', {}, el('tr', {}, ['When', 'Event', 'From', 'Detail'].map(h => el('th', {}, h)))),
+      el('tbody', {}, rows.map(e => el('tr', {}, el('td', {}, fmtTime(e.at)), el('td', {}, el('span', { class: 'chip ' + (e.action.includes('fail') ? 'bad' : 'ok') }, e.action)), el('td', {}, e.ip || '-'), el('td', {}, e.detail || ''))))) : el('div', { class: 'empty' }, 'Nothing yet.'))
+}
+
+const SETTING_TEXT = {
+  publicBase: ['Link address', 'What share links start with, for example https://stream.example.com. Empty uses the installed default.'],
+  relayLatencyMs: ['Web viewer relay delay (ms)', '0 uses the installed default. Higher survives a lossy relay link; lower cuts delay.'],
+  maxPreviews: ['Live previews at once', 'Each sends the full stream to your browser.'],
+  thumbnailsEnabled: ['Thumbnails', 'Pictures on the Streams and Decoders tabs. Off stops the picture workers on the server.'],
+  thumbEverySec: ['Thumbnail refresh (seconds)', 'Seconds between pictures.'],
+  defaultLinkExpiryMin: ['Default link expiry (minutes)', 'Used when a link is created without choosing one. 0 means no expiry.'],
+  requireLinkPassword: ['Require a password on every link', 'The Create link form refuses a link without one.'],
+}
+async function settingsSection(box) {
+  const { settings, installed } = await oapi('/settings')
+  const fields = {}
+  const rows = Object.keys(SETTING_TEXT).map(k => {
+    const [label, hint] = SETTING_TEXT[k]
+    const v = settings[k]
+    const input = typeof v === 'boolean' ? el('input', { type: 'checkbox', checked: v }) : el('input', { type: 'text', value: String(v) })
+    fields[k] = input
+    return el('label', { class: typeof v === 'boolean' ? 'check' : '', style: 'flex-direction:' + (typeof v === 'boolean' ? 'row' : 'column') + ';gap:6px;color:var(--text)' },
+      typeof v === 'boolean' ? [input, el('span', {}, label)] : [el('span', {}, label), input], el('span', { class: 'hint', style: 'margin:0' }, hint + (k === 'relayLatencyMs' ? ' Installed default: ' + installed.relayLatencyMs + ' ms.' : '')))
+  })
+  const m = msgBox()
+  const save = async () => {
+    const patch = {}
+    for (const [k, input] of Object.entries(fields)) patch[k] = input.type === 'checkbox' ? input.checked : input.value
+    try {
+      const r = await oapi('/settings', 'POST', { settings: patch })
+      const n = Object.keys(r.changed).length
+      flash(m, n ? 'Saved ' + n + ' change' + (n > 1 ? 's' : '') + '.' : 'Nothing changed.', true)
+      publicBase = r.settings.publicBase || ''
+    } catch (e) { flash(m, e.message) }
+  }
+  box.replaceChildren(el('div', { class: 'card', style: 'max-width:560px;margin:0;gap:14px' }, el('h2', {}, 'Portal settings'), rows, el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: save }, 'Save'), m)))
+}
+
+function bar(used, total) {
+  const pct = total ? Math.round(used / total * 100) : 0
+  return el('div', { style: 'height:8px;background:#232832;border-radius:4px;overflow:hidden;min-width:120px' }, el('div', { style: 'height:100%;width:' + pct + '%;background:' + (pct > 90 ? 'var(--bad)' : pct > 75 ? 'var(--acc)' : 'var(--ok)') }))
+}
+async function healthSection(box) {
+  const draw = async () => {
+    const h = await oapi('/health')
+    const warn = n => n === 'arena-lowlat' || n === 'mediamtx' || n === 'arena-link-directory' || n === 'nginx'
+    box.replaceChildren(
+      el('h2', {}, 'Services'),
+      el('table', {}, el('thead', {}, el('tr', {}, ['Service', 'State', 'Running since', ''].map(x => el('th', {}, x)))),
+        el('tbody', {}, h.services.map(s => el('tr', {}, el('td', {}, s.label, el('span', { class: 'hint' }, '  ' + s.name)),
+          el('td', {}, el('span', { class: 'chip ' + (s.active ? 'ok' : s.installed ? 'bad' : '') }, s.state)), el('td', {}, s.since || '-'),
+          el('td', {}, s.installed ? el('button', { class: 'b', onclick: async e => {
+            const extra = warn(s.name) ? '\n\nThis interrupts streams and viewers for a few seconds.' : ''
+            if (!confirm('Restart ' + s.label + '?' + extra)) return
+            e.target.disabled = true
+            try { await oapi('/services/' + s.name + '/restart', 'POST'); e.target.textContent = 'Requested' } catch (err) { e.target.textContent = err.message }
+            setTimeout(() => adminSub === 'health' && adminRender(), 4000)
+          } }, 'Restart') : null))))),
+      el('h2', { style: 'margin-top:22px' }, 'Server'),
+      el('table', {}, el('tbody', {},
+        el('tr', {}, el('td', {}, 'Load (1 / 5 / 15 min)'), el('td', {}, h.system.load.map(x => x.toFixed(2)).join(' / ') + '   on ' + h.system.cpus + ' CPU cores')),
+        el('tr', {}, el('td', {}, 'Memory'), el('td', {}, el('div', { class: 'row' }, bar(h.system.memTotal - h.system.memFree, h.system.memTotal), bytes(h.system.memTotal - h.system.memFree) + ' of ' + bytes(h.system.memTotal)))),
+        h.disks.map(d => el('tr', {}, el('td', {}, 'Disk ' + d.mount), el('td', {}, el('div', { class: 'row' }, bar(d.used, d.total), bytes(d.used) + ' of ' + bytes(d.total) + ' (' + bytes(d.free) + ' free)')))),
+        el('tr', {}, el('td', {}, 'Server up for'), el('td', {}, fmtAgo(h.system.uptimeSec))))),
+      el('h2', { style: 'margin-top:22px' }, 'Portal'),
+      el('table', {}, el('tbody', {},
+        el('tr', {}, el('td', {}, 'Directory'), el('td', {}, el('span', { class: 'chip ' + (h.app.directory ? 'ok' : 'bad') }, h.app.directory ? 'reachable' : 'not reachable'))),
+        el('tr', {}, el('td', {}, 'mediamtx API'), el('td', {}, el('span', { class: 'chip ' + (h.app.mediamtx ? 'ok' : 'bad') }, h.app.mediamtx ? 'reachable' : 'not reachable'))),
+        el('tr', {}, el('td', {}, 'Encoders on air'), el('td', {}, String(h.app.encoders))),
+        el('tr', {}, el('td', {}, 'Web viewers now'), el('td', {}, String(h.app.webViewers))),
+        el('tr', {}, el('td', {}, 'Thumbnail workers / live previews'), el('td', {}, h.app.thumbWorkers + ' / ' + h.app.previews)))))
+  }
+  await draw()
+  healthTimer = setInterval(() => { if (adminSub === 'health' && tab === 'admin' && !document.hidden && !document.querySelector('.modal')) draw().catch(() => {}) }, 5000)
+}
+
+let actFilter = ''
+async function activitySection(box) {
+  const [act, ls] = await Promise.all([oapi('/activity?limit=200' + (actFilter ? '&action=' + actFilter : '')), oapi('/links')])
+  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
+  box.replaceChildren(
+    el('h2', {}, 'All links'),
+    ls.links.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Link', 'Stream', 'Status', 'Created', 'Views', 'Viewers (IPs)', 'Last viewed'].map(h => el('th', {}, h)))),
+      el('tbody', {}, ls.links.map(l => el('tr', {}, el('td', {}, l.label || '(no label)', el('span', { class: 'hint' }, '  ' + l.id)), el('td', {}, l.stream),
+        el('td', {}, el('span', { class: 'chip ' + (l.state === 'active' ? 'ok' : 'bad') }, l.state)), el('td', {}, fmtTime(l.createdAt)), el('td', {}, String(l.views)), el('td', {}, String(l.uniqueViewers)), el('td', {}, l.lastView ? fmtTime(l.lastView) : '-'))))) : el('div', { class: 'empty' }, 'No links yet.'),
+    el('div', { class: 'row', style: 'margin:22px 0 10px' }, el('h2', { style: 'margin:0' }, 'Activity'), sel),
+    act.entries.length ? el('table', {}, el('thead', {}, el('tr', {}, ['When', 'Who', 'Event', 'Detail', 'From'].map(h => el('th', {}, h)))),
+      el('tbody', {}, act.entries.map(e => el('tr', {}, el('td', {}, fmtTime(e.at)), el('td', {}, e.who), el('td', {}, el('span', { class: 'chip ' + (e.action.includes('fail') ? 'bad' : '') }, e.action)), el('td', {}, e.detail || ''), el('td', {}, e.ip || '-'))))) : el('div', { class: 'empty' }, 'Nothing recorded.'))
+}
+
 async function refresh() {
+  if (tab === 'admin') { $app.replaceChildren(...shell(el('div'))); return adminRender() }
   try {
     const [s, l, d] = await Promise.all([api('/streams'), api('/links'), tab === 'decoders' ? api('/decoders').catch(() => ({ decoders: [] })) : Promise.resolve({ decoders })])
     streams = s.streams; links = l.links; decoders = d.decoders
@@ -218,6 +386,6 @@ async function refresh() {
   if (document.activeElement && document.activeElement.tagName === 'SELECT') return   // do not close an open dropdown
   $app.replaceChildren(...shell(tab === 'streams' ? streamsView() : tab === 'links' ? linksView() : decodersView()))
 }
-function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal')) refresh() }, 2500) }
+function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal') && tab !== 'admin') refresh() }, 2500) }
 api('/me').then(m => { publicBase = m.publicBase || ''; start() }).catch(() => showLogin())
 </script></body></html>

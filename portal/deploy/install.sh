@@ -36,7 +36,8 @@ ffmpeg -hide_banner -protocols 2>/dev/null | grep -qw srt && echo "ffmpeg with S
 
 step "Portal files"
 rm -rf "$APP.new"; mkdir -p "$APP.new"
-cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/lib" "$SRC/public" "$APP.new/"
+cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/reset-owner.js" "$SRC/lib" "$SRC/public" "$APP.new/"
+install -m 755 "$SRC/deploy/ctl.sh" "$APP.new/ctl.sh"
 rm -rf "$APP"; mv "$APP.new" "$APP"
 mkdir -p "$ETC" "$DATA"; chmod 700 "$ETC"
 chown -R nobody:nogroup "$DATA"
@@ -61,6 +62,15 @@ PORTAL_DATA_DIR=$DATA
 PORTAL_PUBLIC_BASE=http://$IP
 ENV
 fi
+# The owner password (Admin section) is kept hashed in the data folder. First install, or an upgrade from
+# a portal that had no Admin section: make one now and hand it to the service once.
+NEW_OWNER=""
+if ! grep -q '"ownerPwHash":"s1' "$DATA/admin.json" 2>/dev/null; then
+  NEW_OWNER="$(rand 'abcdefghjkmnpqrstuvwxyz23456789' 12)"
+  sed -i '/^PORTAL_OWNER_PASSWORD_INIT=/d' "$ETC/env"
+  printf 'PORTAL_OWNER_PASSWORD_INIT=%s\n' "$NEW_OWNER" >> "$ETC/env"
+fi
+
 # The directory access key is shared with the Arena Link directory; keep ours in step with it.
 KEY="$(grep -m1 '^LINK_KEY=' /etc/arena-link.env | cut -d= -f2-)"
 [ -n "$KEY" ] || { echo "no LINK_KEY in /etc/arena-link.env"; exit 1; }
@@ -91,12 +101,37 @@ ReadWritePaths=$DATA
 [Install]
 WantedBy=multi-user.target
 UNIT
+# Root helper that restarts a fixed list of services when the Admin page asks for it.
+mkdir -p "$DATA/ctl"; chown nobody:nogroup "$DATA/ctl"; rm -f "$DATA/ctl/request"
+cat > /etc/systemd/system/arena-portal-ctl.service <<UNIT
+[Unit]
+Description=Arena Portal service restarts (root helper)
+
+[Service]
+Type=oneshot
+ExecStart=$APP/ctl.sh
+UNIT
+cat > /etc/systemd/system/arena-portal-ctl.path <<UNIT
+[Unit]
+Description=Watches for Arena Portal restart requests
+
+[Path]
+PathExists=$DATA/ctl/request
+
+[Install]
+WantedBy=multi-user.target
+UNIT
 systemctl daemon-reload
 systemctl enable arena-portal >/dev/null 2>&1
+systemctl enable --now arena-portal-ctl.path >/dev/null 2>&1
 systemctl restart arena-portal
 sleep 1
 systemctl is-active --quiet arena-portal || { journalctl -u arena-portal -n 20 --no-pager; echo "portal failed to start"; exit 1; }
 echo "portal running"
+if [ -n "$NEW_OWNER" ]; then
+  for _ in 1 2 3 4 5 6 7 8; do grep -q '"ownerPwHash":"s1' "$DATA/admin.json" 2>/dev/null && break; sleep 1; done
+  if grep -q '"ownerPwHash":"s1' "$DATA/admin.json" 2>/dev/null; then sed -i '/^PORTAL_OWNER_PASSWORD_INIT=/d' "$ETC/env"; else echo "WARNING: owner password was not stored"; NEW_OWNER=""; fi
+fi
 
 step "nginx"
 install -d /etc/nginx/snippets
@@ -161,6 +196,11 @@ if [ -n "$NEW_PW" ]; then
 echo "  Password:      $NEW_PW"
 else
 echo "  Password:      unchanged (grep PORTAL_ADMIN_PASSWORD $ETC/env)"
+fi
+if [ -n "$NEW_OWNER" ]; then
+echo "  Owner password (Admin tab): $NEW_OWNER"
+else
+echo "  Owner password: unchanged (lost it? node $APP/reset-owner.js)"
 fi
 echo "  Web links:     http://$IPNOW/w/<id>"
 echo "=========================================="

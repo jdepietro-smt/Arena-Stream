@@ -7,6 +7,19 @@ Web side of Arena Link, added next to the existing server services (nothing is r
 - **Previews.** A thumbnail per stream (and per decoder, showing what it plays) on the Streams and Decoders tabs; click one for live video. Live previews are limited to three at a time because each sends the full stream to the browser.
 - **Decoders.** See every decoder PC running the Arena Link app and choose which stream each one plays out to SDI.
 
+## Admin section (owner only)
+
+The Admin tab asks for a second, owner-only password on top of the normal login, and locks again after 15 idle minutes (the unlock cookie slides while you work). It holds:
+
+- **Account and security.** Change the everyday portal password and the owner password (both need the current owner password; either change, and "Sign out everywhere", signs every browser out). Recent sign-ins and failed attempts.
+- **Settings.** Link address, relay delay for web viewers, live previews at once, thumbnails on or off and how often, default link expiry, and whether every link needs a password. They apply at once, no restart; a new relay delay is pushed to the mediamtx paths already in use.
+- **Server health.** State of mediamtx, the relay, the directory, the share-link check, the portal, Comms, LiveKit and nginx; load, memory, disk (`/` and `/var/recordings`); directory and mediamtx reachability; web viewers. A Restart button per service (with a warning for the ones that carry streams).
+- **Activity and links.** Every sign-in, link created, revoked or opened (with the viewer's address), decoder change, setting change and restart, filterable; and all links with views, distinct viewers and last view.
+
+Restarts: the portal runs as an unprivileged user, so it leaves the service name in `/var/lib/arena-portal/ctl/request`; `arena-portal-ctl.path` runs `ctl.sh` as root, which restarts it only if the name is on a fixed list. Settings, the passwords (hashed with scrypt), the session epoch and the activity log live in `/var/lib/arena-portal/admin.json`.
+
+Lost the owner password? On the server: `node /opt/arena-portal/reset-owner.js` prints a new one and signs everyone out.
+
 ## How a web link plays
 
 ```
@@ -49,7 +62,7 @@ Settings live in `/etc/arena-portal/env`; links and the view log in `/var/lib/ar
 ## Development
 
 ```
-cd portal; node --test          # 12 tests with stand-ins for the directory and mediamtx
+cd portal; node --test          # 20 tests with stand-ins for the directory and mediamtx
 ```
 
 Standard library only (Node 18+), no `npm install`.

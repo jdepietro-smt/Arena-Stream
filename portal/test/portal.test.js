@@ -8,12 +8,14 @@ const path = require('node:path')
 const { EventEmitter } = require('node:events')
 const { createPortal } = require('../server')
 const { createThumbs } = require('../lib/thumbs')
+const auth = require('../lib/auth')
 
 const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(srv.address().port)))
 
 async function setup() {
   const calls = { want: [], mtx: [], whep: [], ffmpeg: [], killed: 0 }
   let ffmpegWrites = true
+  const addedPaths = new Set()
   let encoders = [
     { id: 'e1', name: 'ESPN 1', format: '1920x1080i@59.94', codec: 'h264_nvenc', kbps: 10000, ageMs: 100, relay: { host: 'h', port: 8895, name: 'ESPN-1' } },
     { id: 'e2', name: 'Cam HEVC', codec: 'hevc_nvenc', kbps: 8000, ageMs: 50, relay: { host: 'h', port: 8895, name: 'Cam-HEVC' } },
@@ -33,7 +35,12 @@ async function setup() {
     let b = ''; req.on('data', c => b += c); req.on('end', () => {
       calls.mtx.push({ m: req.method, u: req.url, b })
       if (req.url.startsWith('/v3/paths/list')) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ items: [{ name: 'x', readers: [1, 2] }] })) }
-      if (req.url.startsWith('/v3/config/paths/add/')) { res.setHeader('Content-Type', 'application/json'); return res.end('{}') }
+      if (req.url.startsWith('/v3/config/paths/add/')) {
+        res.setHeader('Content-Type', 'application/json')
+        if (addedPaths.has(req.url)) { res.writeHead(400); return res.end('{"error":"path already exists"}') }
+        addedPaths.add(req.url); return res.end('{}')
+      }
+      if (req.url.startsWith('/v3/config/paths/patch/')) { res.setHeader('Content-Type', 'application/json'); return res.end('{}') }
       res.writeHead(404); res.end()
     })
   })
@@ -54,26 +61,42 @@ async function setup() {
     if (ffmpegWrites) setTimeout(() => fs.writeFileSync(args[args.length - 1], Buffer.from('JPEGDATA')), 20)
     return p
   }
-  const { server, store, pathName, thumbs } = createPortal({
+  // Stand-ins for systemctl and df.
+  const fakeExec = (cmd, args, opts, cb) => {
+    if (cmd === 'systemctl') {
+      const n = args[1].replace('.service', '')
+      if (n === 'arena-comms') return cb(null, 'LoadState=not-found\nActiveState=inactive\nSubState=dead\nActiveEnterTimestamp=\n')
+      return cb(null, 'LoadState=loaded\nActiveState=' + (n === 'mediamtx' ? 'failed' : 'active') + '\nSubState=running\nActiveEnterTimestamp=Mon 2026-11-09 10:00:00 UTC\n')
+    }
+    if (cmd === 'df') return cb(null, 'Filesystem 1-blocks Used Available Capacity Mounted\n/dev/sda1 1000 400 600 40% ' + args[2] + '\n')
+    cb(new Error('unexpected'))
+  }
+  const ctlDir = path.join(dataDir, 'ctl')
+  const { server, store, pathName, thumbs, admin } = createPortal({
+    ownerInit: 'ownerpass1234', execFile: fakeExec, ctlDir,
     spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
     mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir,
   })
   const port = await listen(server)
   const base = `http://127.0.0.1:${port}`
-  let cookie = ''
+  let jar = {}   // cookie name -> value, like a browser
   const call = async (p, { method = 'GET', body, headers = {}, raw = false, useCookie = true } = {}) => {
+    const cookie = Object.entries(jar).map(([k, v]) => k + '=' + v).join('; ')
     const r = await fetch(base + p, {
       method, redirect: 'manual',
       headers: { ...(body && !raw ? { 'Content-Type': 'application/json' } : {}), ...(useCookie && cookie ? { Cookie: cookie } : {}), ...headers },
       body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
     })
-    const sc = r.headers.get('set-cookie'); if (sc && useCookie) cookie = sc.split(';')[0]
+    if (useCookie) for (const c of r.headers.getSetCookie()) {
+      const [kv] = c.split(';'); const i = kv.indexOf('=')
+      if (c.includes('Max-Age=0')) delete jar[kv.slice(0, i)]; else jar[kv.slice(0, i)] = kv.slice(i + 1)
+    }
     const ct = r.headers.get('content-type') || ''
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
   const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, thumbs, setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { cookie = '' } }
+  return { call, calls, close, thumbs, admin, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -262,5 +285,162 @@ test('admin live preview: sessions are limited and freed', async () => {
     assert.equal((await t.call('/portal/api/whep/e1', mk('d'))).status, 201)   // a slot is free again
     t.resetCookie()
     assert.equal((await t.call('/portal/api/whep/e1', offer)).status, 401)   // admin only
+  } finally { await t.close() }
+})
+
+// ── owner (Admin) section ─────────────────────────────────────────────────────
+const adminLogin = t => t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+const ownerLogin = (t, pw = 'ownerpass1234') => t.call('/portal/api/owner/login', { method: 'POST', body: { password: pw } })
+const post = (t, p, body) => t.call(p, { method: 'POST', body })
+
+test('owner section is locked until the owner password is given', async () => {
+  const t = await setup()
+  try {
+    assert.equal((await t.call('/portal/api/owner/status')).status, 401)          // not even signed in
+    await adminLogin(t)
+    const st = (await t.call('/portal/api/owner/status')).body
+    assert.deepEqual([st.configured, st.unlocked], [true, false])
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)
+    assert.equal((await t.call('/portal/api/owner/health')).status, 403)
+    assert.equal((await ownerLogin(t, 'adminpw')).status, 401)                     // the day-to-day password is not the owner password
+    assert.equal((await ownerLogin(t)).status, 200)
+    assert.equal((await t.call('/portal/api/owner/status')).body.unlocked, true)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 200)
+    await post(t, '/portal/api/owner/logout')
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)
+    assert.ok(t.admin.ownerPwHash.startsWith('s1$'), 'stored hashed, never as plain text')
+  } finally { await t.close() }
+})
+
+test('owner unlock expires after 15 minutes and does not survive a sign-out-everywhere', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const old = auth.sign('owner|' + (Date.now() - 1000) + '|' + t.admin.epoch, t.secret)
+    t.jar().arena_owner = encodeURIComponent(old)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)         // expired cookie
+    await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/signout-all')).status, 200)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 401)         // the admin session is gone too
+    await adminLogin(t)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)         // and the owner unlock did not come back
+  } finally { await t.close() }
+})
+
+test('owner login is throttled', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t)
+    let last
+    for (let i = 0; i < 7; i++) last = await ownerLogin(t, 'wrong' + i)
+    assert.equal(last.status, 429)
+  } finally { await t.close() }
+})
+
+test('settings: bad values change nothing; good ones take effect', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/settings', { settings: { maxPreviews: 99 } })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/settings', { settings: { publicBase: 'javascript:x', maxPreviews: 2 } })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/settings', { settings: { nope: 1 } })).status, 400)
+    assert.equal((await t.call('/portal/api/owner/settings')).body.settings.maxPreviews, 3, 'a rejected request changes nothing')
+
+    const r = await post(t, '/portal/api/owner/settings', { settings: { publicBase: 'https://stream.example.com/', maxPreviews: 1, defaultLinkExpiryMin: 120, requireLinkPassword: true } })
+    assert.equal(r.status, 200)
+    const me = (await t.call('/portal/api/me')).body
+    assert.equal(me.publicBase, 'https://stream.example.com'); assert.equal(me.defaultExpiryMin, 120); assert.equal(me.requireLinkPassword, true)
+
+    assert.equal((await post(t, '/portal/api/links', { stream: 'ESPN 1' })).status, 400)            // password now required
+    const mk = await post(t, '/portal/api/links', { stream: 'ESPN 1', password: 'pw1' })             // no expiry given: the default applies
+    assert.equal(mk.status, 200)
+    const mins = (mk.body.link.expiresAt - Date.now()) / 60000
+    assert.ok(mins > 118 && mins <= 120, 'default expiry of 120 minutes, got ' + mins)
+
+    const offer = id => ({ method: 'POST', raw: true, body: 'OFFER:' + id, headers: { 'Content-Type': 'application/sdp' } })
+    assert.equal((await t.call('/portal/api/whep/e1', offer('x1'))).status, 201)
+    assert.equal((await t.call('/portal/api/whep/e1', offer('x2'))).status, 429)                     // limit is 1 now
+  } finally { await t.close() }
+})
+
+test('settings: thumbnails can be switched off, and a new relay latency reaches mediamtx', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await post(t, '/portal/api/owner/settings', { settings: { thumbnailsEnabled: false } })
+    assert.equal((await t.call('/portal/api/thumb/e1')).status, 204)
+    assert.equal(t.calls.ffmpeg.length, 0, 'no picture worker while thumbnails are off')
+
+    const offer = { method: 'POST', raw: true, body: 'OFFER', headers: { 'Content-Type': 'application/sdp' } }
+    assert.equal((await t.call('/portal/api/whep/e1', offer)).status, 201)
+    const add = t.calls.mtx.find(x => x.u.startsWith('/v3/config/paths/add/'))
+    assert.ok(JSON.parse(add.b).source.endsWith('latency=150'))
+    await post(t, '/portal/api/owner/settings', { settings: { relayLatencyMs: 300 } })
+    assert.equal((await t.call('/portal/api/whep/e1/sess-123', { method: 'DELETE' })).status, 204)
+    assert.equal((await t.call('/portal/api/whep/e1', offer)).status, 201)
+    const patch = t.calls.mtx.find(x => x.m === 'PATCH' && x.u.startsWith('/v3/config/paths/patch/'))
+    assert.ok(patch, 'the existing path was updated'); assert.ok(JSON.parse(patch.b).source.endsWith('latency=300'))
+  } finally { await t.close() }
+})
+
+test('passwords: changing needs the owner password, and signs everyone out', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'admin', current: 'nope', next: 'a-new-password' })).status, 401)
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'admin', current: 'ownerpass1234', next: 'short' })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'other', current: 'ownerpass1234', next: 'a-new-password' })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'admin', current: 'ownerpass1234', next: 'a-new-password' })).status, 200)
+    assert.equal((await t.call('/portal/api/streams')).status, 401, 'this browser is signed out')
+    assert.equal((await adminLogin(t)).status, 401, 'the old day-to-day password no longer works')
+    assert.equal((await post(t, '/portal/api/login', { password: 'a-new-password' })).status, 200)
+
+    await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'owner', current: 'ownerpass1234', next: 'another-owner-pass' })).status, 200)
+    await post(t, '/portal/api/login', { password: 'a-new-password' })
+    assert.equal((await ownerLogin(t)).status, 401)
+    assert.equal((await ownerLogin(t, 'another-owner-pass')).status, 200)
+  } finally { await t.close() }
+})
+
+test('health lists the services and the machine; restarts only go to known services', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const h = (await t.call('/portal/api/owner/health')).body
+    const by = n => h.services.find(s => s.name === n)
+    assert.equal(by('arena-portal').active, true)
+    assert.equal(by('mediamtx').state.startsWith('failed'), true)
+    assert.equal(by('arena-comms').installed, false); assert.equal(by('arena-comms').state, 'not installed')
+    assert.equal(h.disks[0].total, 1000); assert.equal(h.disks[0].used, 400)
+    assert.equal(h.app.directory, true); assert.equal(h.app.encoders, 3); assert.ok(h.system.cpus >= 1)
+
+    assert.equal((await post(t, '/portal/api/owner/services/sshd/restart')).status, 404)
+    assert.equal((await post(t, '/portal/api/owner/services/arena-lowlat;reboot/restart')).status, 404)
+    assert.equal(fs.existsSync(path.join(t.ctlDir, 'request')), false)
+    assert.equal((await post(t, '/portal/api/owner/services/arena-lowlat/restart')).status, 200)
+    assert.equal(fs.readFileSync(path.join(t.ctlDir, 'request'), 'utf8'), 'arena-lowlat\n')
+  } finally { await t.close() }
+})
+
+test('activity log records who did what, and all links show their views', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'wrong' } })
+    await adminLogin(t); await ownerLogin(t)
+    const id = (await post(t, '/portal/api/links', { stream: 'ESPN 1', label: 'Client', expiresInMin: 60 })).body.link.id
+    const w = { method: 'POST', raw: true, body: 'OFFER', headers: { 'Content-Type': 'application/sdp', 'X-Forwarded-For': '203.0.113.9' }, useCookie: false }
+    await t.call('/w/' + id + '/whep', w)
+    await t.call('/portal/api/links/' + id, { method: 'DELETE' })
+    await post(t, '/portal/api/decoders/pc-1/want', { stream: 'ESPN 1' })
+    const all = (await t.call('/portal/api/owner/activity')).body.entries
+    const actions = all.map(e => e.action)
+    for (const a of ['login.fail', 'login', 'owner.login', 'link.create', 'link.view', 'link.revoke', 'decoder.want']) assert.ok(actions.includes(a), 'missing ' + a + ' in ' + actions)
+    assert.equal(all.find(e => e.action === 'link.view').ip, '203.0.113.9')
+    assert.equal(all.find(e => e.action === 'link.view').who, 'viewer')
+    const only = (await t.call('/portal/api/owner/activity?action=link')).body.entries
+    assert.ok(only.length >= 3 && only.every(e => e.action.startsWith('link')))
+    const links = (await t.call('/portal/api/owner/links')).body.links
+    assert.equal(links[0].views, 1); assert.equal(links[0].uniqueViewers, 1); assert.equal(links[0].state, 'revoked'); assert.equal(links[0].recent[0].ip, '203.0.113.9')
   } finally { await t.close() }
 })
