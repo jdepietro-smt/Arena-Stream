@@ -507,3 +507,54 @@ test('accounts: shared sign-in can be turned off, but never leaves nobody able t
     assert.equal((await t.call('/portal/api/owner/users/only.user', { method: 'DELETE' })).status, 400)            // last account, shared sign-in off
   } finally { await t.close() }
 })
+
+// ── add-user.js / reset-owner.js (run on the server) ──────────────────────────
+test('add-user.js: creates an account with a generated password, leaves an existing one alone, resets on request', async () => {
+  const { execFileSync, spawnSync } = require('node:child_process')
+  const { openAdmin } = require('../lib/admin')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'adduser-'))
+  const script = path.join(__dirname, '..', 'add-user.js')
+  const run = (...a) => execFileSync(process.execPath, [script, ...a, dir], { encoding: 'utf8' })
+
+  const out = run('demo.one')
+  const pw = out.split('Password: ')[1].trim()
+  assert.match(pw, /^[a-z2-9]{14}$/)                       // lowercase letters and digits only: typable on any console
+  assert.ok(out.includes('Username: demo.one'))
+  const raw = fs.readFileSync(path.join(dir, 'admin.json'), 'utf8')
+  assert.ok(!raw.includes(pw), 'only a hash is stored')
+
+  // The account works at the real sign-in.
+  const { server, store, admin } = createPortal({ port: 0, adminPassword: 'x'.repeat(8), secret: 'b'.repeat(32), dataDir: dir, thumbDir: path.join(dir, 'th'), directoryUrl: 'http://127.0.0.1:1', directoryKey: 'k', mediamtxApi: 'http://127.0.0.1:1', mediamtxWebrtc: 'http://127.0.0.1:1', relaySrt: '127.0.0.1:1', relayLatencyMs: 100 })
+  const port = await listen(server)
+  const login = (u, p) => fetch(`http://127.0.0.1:${port}/portal/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) })
+  try {
+    assert.equal((await login('demo.one', pw)).status, 200)
+    assert.equal((await login('demo.one', 'wrong')).status, 401)
+  } finally { await new Promise(r => { store.flush(); admin.flush(); server.close(r) }) }
+
+  const again = run('demo.one')
+  assert.ok(again.includes('already exists') && !again.includes('Password:'), 'no second password for an existing account')
+  assert.ok(openAdmin(dir).user('demo.one'))
+  const hash1 = openAdmin(dir).user('demo.one').pwHash
+  const reset = run('demo.one', '--reset')
+  const pw2 = reset.split('Password: ')[1].trim()
+  assert.notEqual(pw2, pw)
+  assert.notEqual(openAdmin(dir).user('demo.one').pwHash, hash1)
+  assert.equal(openAdmin(dir).user('demo.one').ver, 2, 'a reset signs the old sessions out')
+
+  const bad = spawnSync(process.execPath, [script, 'x', dir], { encoding: 'utf8' })
+  assert.equal(bad.status, 2)
+})
+
+test('reset-owner.js: the new owner password works and shared sign-in comes back', async () => {
+  const { execFileSync } = require('node:child_process')
+  const { openAdmin } = require('../lib/admin')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'resetowner-'))
+  const a = openAdmin(dir); a.setUser('someone', auth.hashPassword('some-password-1')); a.patchSettings({ sharedLogin: false }); a.flush()
+  const out = execFileSync(process.execPath, [path.join(__dirname, '..', 'reset-owner.js'), dir], { encoding: 'utf8' })
+  const pw = out.split('New owner password: ')[1].trim()
+  const b = openAdmin(dir)
+  assert.ok(auth.checkPassword(pw, b.ownerPwHash))
+  assert.equal(b.settings().sharedLogin, true)
+  assert.ok(b.epoch >= 2)
+})

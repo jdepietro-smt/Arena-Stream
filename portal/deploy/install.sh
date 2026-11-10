@@ -36,7 +36,7 @@ ffmpeg -hide_banner -protocols 2>/dev/null | grep -qw srt && echo "ffmpeg with S
 
 step "Portal files"
 rm -rf "$APP.new"; mkdir -p "$APP.new"
-cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/reset-owner.js" "$SRC/lib" "$SRC/public" "$APP.new/"
+cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/reset-owner.js" "$SRC/add-user.js" "$SRC/lib" "$SRC/public" "$APP.new/"
 install -m 755 "$SRC/deploy/ctl.sh" "$APP.new/ctl.sh"
 rm -rf "$APP"; mv "$APP.new" "$APP"
 mkdir -p "$ETC" "$DATA"; chmod 700 "$ETC"
@@ -182,6 +182,16 @@ if ! nginx -t 2>/tmp/arena-nginx-test.log; then
 fi
 systemctl reload nginx
 
+# Optional first account: bash portal/deploy/install.sh <username>. Created once, with a generated
+# password printed below (change it afterwards in the Admin page if you like).
+NEW_USER_MSG=""
+if [ -n "${1:-}" ]; then
+  step "Account $1"
+  NEW_USER_MSG="$("$NODE" "$APP/add-user.js" "$1" "$DATA")" || { echo "$NEW_USER_MSG"; echo "could not create the account"; exit 1; }
+  echo "$NEW_USER_MSG" | head -1
+  systemctl is-active --quiet arena-portal || systemctl start arena-portal
+fi
+
 step "Self-test"
 code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8910/portal/ || true)"
 echo "portal page: HTTP $code"
@@ -201,6 +211,9 @@ if [ -n "$NEW_OWNER" ]; then
 echo "  Owner password (Admin tab): $NEW_OWNER"
 else
 echo "  Owner password: unchanged (lost it? node $APP/reset-owner.js)"
+fi
+if [ -n "$NEW_USER_MSG" ]; then
+echo "$NEW_USER_MSG" | sed 's/^/  /'
 fi
 echo "  Web links:     http://$IPNOW/w/<id>"
 echo "=========================================="

@@ -20,6 +20,8 @@ Restarts: the portal runs as an unprivileged user, so it leaves the service name
 
 - **Portal users.** Named accounts, each with its own username and password (letters in any case; at least 10 characters), added, re-passworded and deleted from Account and security. Changing a password or deleting an account signs that person out. The shared portal password keeps working until you turn it off (it cannot be turned off while there are no accounts, or when it would remove the last one). Sign-ins and opens in the activity log carry the username.
 
+Accounts from the server, with no typing of passwords: `node /opt/arena-portal/add-user.js <username>` creates one with a generated lowercase password it prints once (an existing account is left alone; `--reset` gives a new password). `bash portal/deploy/install.sh <username>` does the same as part of an install or update. Both stop the portal for a moment, because it holds its data in memory.
+
 Lost the owner password? On the server: `node /opt/arena-portal/reset-owner.js` prints a new one, signs everyone out and turns shared sign-in back on.
 
 ## How a web link plays
@@ -64,7 +66,7 @@ Settings live in `/etc/arena-portal/env`; links and the view log in `/var/lib/ar
 ## Development
 
 ```
-cd portal; node --test          # 23 tests with stand-ins for the directory and mediamtx
+cd portal; node --test          # 25 tests with stand-ins for the directory and mediamtx
 ```
 
 Standard library only (Node 18+), no `npm install`.
