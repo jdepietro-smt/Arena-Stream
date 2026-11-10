@@ -61,6 +61,11 @@
       {
         "from": "bin/sdi_decoder.exe",
         "to": "sdi_decoder.exe"
+      },
+      {
+        "from": "bin/crt",
+        "to": ".",
+        "filter": ["*.dll"]
       }
     ],
     "artifactName": "Arena-Link-Setup-${version}.${ext}"

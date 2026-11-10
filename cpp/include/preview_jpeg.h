@@ -23,7 +23,9 @@ public:
     ~PreviewJpeg() { release(); }
 
     // Returns the JPEG as base64 text, or "" if this frame can't be previewed.
-    std::string make(const VideoFrame& f, int max_width = 960) {
+    // field = 0 (top) or 1 (bottom): preview just that field of an interlaced frame, at the frame's
+    // picture size; -1 = the whole frame.
+    std::string make(const VideoFrame& f, int max_width = 960, int field = -1) {
         AVPixelFormat src = AV_PIX_FMT_NONE;
         if (f.mode.format == PixelFormat::UYVY422_8) src = AV_PIX_FMT_UYVY422;
 #if defined(AV_PIX_FMT_V210)
@@ -33,8 +35,9 @@ public:
         else if (f.mode.format == PixelFormat::I420_8) src = AV_PIX_FMT_YUV420P;
         if (src == AV_PIX_FMT_NONE || f.mode.width < 16 || f.mode.height < 16 || f.data.empty()) return {};
 
-        if (!ctx_ || src != src_fmt_ || int(f.mode.width) != src_w_ || int(f.mode.height) != src_h_)
-            if (!open(src, int(f.mode.width), int(f.mode.height), max_width)) return {};
+        const bool by_field = field >= 0;
+        if (!ctx_ || src != src_fmt_ || int(f.mode.width) != src_w_ || int(f.mode.height) != src_h_ || by_field != by_field_)
+            if (!open(src, int(f.mode.width), int(f.mode.height), max_width, by_field)) return {};
 
         const uint8_t* planes[4] = { f.data.data(), nullptr, nullptr, nullptr };
         int strides[4] = { int(f.stride), 0, 0, 0 };
@@ -46,7 +49,22 @@ public:
             strides[1] = strides[2] = int(f.stride / 2);
         }
         if (av_frame_make_writable(frame_) < 0) return {};
-        sws_scale(sws_, planes, strides, 0, src_h_, frame_->data, frame_->linesize);
+        int rows = src_h_;
+        if (by_field) {   // every second line, starting at the wanted field
+            for (int i = 0; i < 3; ++i) if (planes[i]) { planes[i] += size_t(field) * size_t(strides[i]); strides[i] *= 2; }
+            rows = src_h_ / 2;
+        }
+        sws_scale(sws_, planes, strides, 0, rows, frame_->data, frame_->linesize);
+        if (field == 1) {   // the bottom field sits half a line lower: shift it up to the top field's grid so detail does not bounce
+            for (int i = 0; i < 3; ++i) {
+                const int ph = i == 0 ? h_ : h_ / 2, pw = i == 0 ? w_ : w_ / 2;
+                for (int y = ph - 1; y >= 1; --y) {
+                    uint8_t* r = frame_->data[i] + size_t(y) * frame_->linesize[i];
+                    const uint8_t* q = r - frame_->linesize[i];
+                    for (int x = 0; x < pw; ++x) r[x] = uint8_t((r[x] + q[x] + 1) >> 1);
+                }
+            }
+        }
 
         std::string out;
         if (avcodec_send_frame(ctx_, frame_) < 0) return {};
@@ -61,7 +79,7 @@ public:
     int height() const { return h_; }
 
 private:
-    bool open(AVPixelFormat src, int sw, int sh, int max_width) {
+    bool open(AVPixelFormat src, int sw, int sh, int max_width, bool by_field) {
         release();
         w_ = sw < max_width ? sw & ~1 : max_width;
         h_ = int((int64_t(sh) * w_ / sw)) & ~1;
@@ -74,12 +92,12 @@ private:
         ctx_->flags |= AV_CODEC_FLAG_QSCALE;
         ctx_->global_quality = FF_QP2LAMBDA * 5;     // high quality: this is what the operator judges the picture by
         if (avcodec_open2(ctx_, c, nullptr) < 0) { release(); return false; }
-        sws_ = sws_getContext(sw, sh, src, w_, h_, AV_PIX_FMT_YUVJ420P, SWS_BICUBIC, nullptr, nullptr, nullptr);
+        sws_ = sws_getContext(sw, by_field ? sh / 2 : sh, src, w_, h_, AV_PIX_FMT_YUVJ420P, SWS_BICUBIC, nullptr, nullptr, nullptr);
         frame_ = av_frame_alloc();
         frame_->format = AV_PIX_FMT_YUVJ420P; frame_->width = w_; frame_->height = h_;
         pkt_ = av_packet_alloc();
         if (!sws_ || av_frame_get_buffer(frame_, 0) < 0) { release(); return false; }
-        src_fmt_ = src; src_w_ = sw; src_h_ = sh;
+        src_fmt_ = src; src_w_ = sw; src_h_ = sh; by_field_ = by_field;
         return true;
     }
 
@@ -105,6 +123,7 @@ private:
 
     AVCodecContext* ctx_   = nullptr;
     SwsContext*     sws_   = nullptr;
+    bool            by_field_ = false;
     AVFrame*        frame_ = nullptr;
     AVPacket*       pkt_   = nullptr;
     AVPixelFormat   src_fmt_ = AV_PIX_FMT_NONE;

@@ -751,9 +751,9 @@ int main(int argc, char** argv) {
                         // flag, so the pacer thread never observes a partially
                         // written VideoMode.
                         preview_mode = out_mode;
-                        // The monitor picture runs at no more than ~30 fps (halved for 50/60).
-                        if (double(out_mode.fps_num) / out_mode.fps_den > 35.0 && out_mode.fps_num % 2 == 0)
-                            preview_mode.fps_num /= 2;
+                        // The monitor runs at the stream's full motion rate: every frame for progressive,
+                        // every field for interlaced.
+                        if (out_mode.interlaced) preview_mode.fps_num *= 2;
                         preview_mode_ready.store(true);
 
                         if (!args.preview_only) {
@@ -894,9 +894,29 @@ int main(int argc, char** argv) {
                                 nullptr,
                             };
                             int dst_ls[4] = { y_ls, uv_ls, uv_ls, 0 };
+                            // Interlaced: every field is its own monitor picture (59.94 per second for
+                            // 1080i59.94), earlier field first, so motion is as smooth as the source.
+                            const int n_pics = out_mode.interlaced ? 2 : 1;
+                            const bool tff = (stamp_flags & sdi::latency::kFlagInterlaced)
+                                                 ? (stamp_flags & sdi::latency::kFlagTopFieldFirst) != 0
+                                                 : (vframe->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) != 0 || !(vframe->flags & AV_FRAME_FLAG_INTERLACED);
+                            for (int pic = 0; pic < n_pics; ++pic) {
                             if (out_mode.interlaced) {
+                                const int field = (pic == 0) == tff ? 0 : 1;
+                                const uint8_t* pd[4] = { vframe->data[0] + field * vframe->linesize[0], vframe->data[1] + field * vframe->linesize[1],
+                                                         vframe->data[2] + field * vframe->linesize[2], nullptr };
                                 const int pl[4] = { vframe->linesize[0] * 2, vframe->linesize[1] * 2, vframe->linesize[2] * 2, 0 };
-                                sws_scale(preview_sws, vframe->data, pl, 0, vframe->height / 2, dst, dst_ls);
+                                sws_scale(preview_sws, pd, pl, 0, vframe->height / 2, dst, dst_ls);
+                                if (field == 1) {   // bottom field sits half a line lower: align it to the top field's grid (no bounce)
+                                    for (int pl_i = 0; pl_i < 3; ++pl_i) {
+                                        const int rows = pl_i == 0 ? ph : ph / 2, cols = pl_i == 0 ? pw : pw / 2;
+                                        for (int y = rows - 1; y >= 1; --y) {
+                                            uint8_t* r = dst[pl_i] + size_t(y) * dst_ls[pl_i];
+                                            const uint8_t* q = r - dst_ls[pl_i];
+                                            for (int x = 0; x < cols; ++x) r[x] = uint8_t((r[x] + q[x] + 1) >> 1);
+                                        }
+                                    }
+                                }
                             } else {
                                 sws_scale(preview_sws, vframe->data, vframe->linesize, 0, vframe->height,
                                           dst, dst_ls);
@@ -924,6 +944,7 @@ int main(int argc, char** argv) {
                             pf.height = uint32_t(ph);
                             pf.yuv.assign(preview_buf.begin() + 8, preview_buf.end());
                             preview_queue.push(std::move(pf));
+                            }   // for each field
                         }
                     }
 

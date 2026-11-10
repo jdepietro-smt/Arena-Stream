@@ -85,6 +85,19 @@ input:disabled, select:disabled { opacity: .55; }
 .tile.bad .tvalue { color: var(--bad); text-shadow: 0 0 8px rgba(255,59,48,.4); }
 .report { align-self: flex-start; margin-top: 4px; }
 
+/* Several outgoing streams, one panel each */
+.streams { display: flex; flex-direction: column; gap: 22px; }
+.streamhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.streamtitle { font-family: var(--label); font-size: 12px; letter-spacing: .16em; color: var(--lcd); text-transform: uppercase; }
+.addstream { align-self: flex-start; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; border-bottom: 1px solid var(--line, #333); padding-bottom: 8px; }
+.tab { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: transparent; color: inherit; border: 1px solid var(--line, #444); border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+.tab.on { background: var(--lcd, #3ddc84); color: #000; border-color: transparent; }
+.tab.add { border-style: dashed; opacity: .85; }
+.tab:hover { opacity: 1; }
+.adv { margin-top: 14px; }
+.adv > summary { cursor: pointer; padding: 8px 0; font-size: 13px; opacity: .8; }
+
 /* Decoder list + picture */
 .list { gap: 8px; }
 .enc { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; text-align: left; background: var(--well); border: 1px solid #1c1f24; border-radius: 6px; padding: 10px 12px; cursor: pointer; }
@@ -109,3 +122,9 @@ input:disabled, select:disabled { opacity: .55; }
 .result { font-size: 12px; } .result.ok { color: var(--ok); } .result.bad { color: var(--bad); }
 
 @media (max-width: 960px) { .cols { grid-template-columns: 1fr; } .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.qtest { margin: 6px 0 10px; }
+.qtable { width: 100%; border-collapse: collapse; margin: 8px 0 4px; font-size: 12px; }
+.qtable th, .qtable td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line, #2a2f36); }
+.qtable th { color: var(--muted, #8a93a0); font-weight: 600; }
+.qtable tr.best td { color: var(--ok, #3ddc84); }

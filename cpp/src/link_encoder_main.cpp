@@ -22,6 +22,8 @@
 #include "ts_muxer.h"
 
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -37,6 +39,7 @@
 namespace {
 
 std::atomic<bool> g_stop{false};
+std::atomic<bool> g_idle{false};   // "idle" on stdin: stop sending, keep the input open and keep the monitor pictures coming
 std::atomic<int>  g_bitrate_req{0};
 std::atomic<int>  g_user_kbps{0};   // bitrate the user asked for (the adapter's new target)
 std::atomic<int>  g_dir_state{0};   // 0 = not announcing, 1 = last announce accepted, 2 = failing
@@ -152,6 +155,51 @@ std::string host_name() {
 
 } // namespace
 
+// Monitor pictures for the app, at the source's full motion rate: every frame, and for interlaced
+// sources every FIELD (59.94 a second for 1080i59.94), the second field half a frame after the
+// first. Runs on its own thread so the encoder is never delayed by the pacing.
+class PreviewPump {
+public:
+    PreviewPump() : th_([this] { run(); }) {}
+    ~PreviewPump() { { std::lock_guard lk(m_); stop_ = true; } cv_.notify_all(); }
+    void offer(const sdi::VideoFrame& f) {
+        auto c = std::make_shared<sdi::VideoFrame>(f);
+        { std::lock_guard lk(m_); latest_ = std::move(c); }
+        cv_.notify_one();
+    }
+private:
+    void emit(sdi::PreviewJpeg& pj, const sdi::VideoFrame& f, int field) {
+        const std::string jpg = pj.make(f, 960, field);
+        if (jpg.empty()) return;
+        std::printf("{\"type\":\"preview\",\"w\":%d,\"h\":%d,\"jpg\":\"%s\"}\n", pj.width(), pj.height(), jpg.c_str());
+        std::fflush(stdout);
+    }
+    void run() {
+        sdi::PreviewJpeg pj;
+        for (;;) {
+            std::shared_ptr<sdi::VideoFrame> f;
+            {
+                std::unique_lock lk(m_);
+                cv_.wait(lk, [&] { return stop_ || latest_; });
+                if (stop_) return;
+                f = std::move(latest_);
+            }
+            if (!f->mode.interlaced) { emit(pj, *f, -1); continue; }
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool tff = f->mode.height >= 720;   // HD is top field first, SD bottom first
+            emit(pj, *f, tff ? 0 : 1);
+            std::this_thread::sleep_until(t0 + f->mode.frame_duration() / 2);
+            { std::lock_guard lk(m_); if (stop_) return; }
+            emit(pj, *f, tff ? 1 : 0);
+        }
+    }
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::shared_ptr<sdi::VideoFrame> latest_;
+    bool stop_ = false;
+    std::jthread th_;
+};
+
 // The relay only accepts letters, digits and _ - . in a stream name, so "Truck 1 - Camera 2" is
 // published as "Truck-1-Camera-2". Decoders still show the real name; they read the relay name the
 // encoder announces.
@@ -211,8 +259,7 @@ int main(int argc, char** argv) {
             g_stop = true;
         }).detach();
         std::jthread pw([&] {
-            sdi::PreviewJpeg preview;
-            auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+            PreviewPump pump;
             auto last_levels = std::chrono::steady_clock::now();
             while (auto f = vq.pop()) {
                 const auto now = std::chrono::steady_clock::now();
@@ -231,12 +278,7 @@ int main(int argc, char** argv) {
                     int lo = 0, hi = 255; while (lo < 255 && !hist[lo]) ++lo; while (hi > 0 && !hist[hi]) --hi;
                     std::fprintf(stderr, "levels: capture Y min=%d p0.1=%d p99.9=%d max=%d\n", lo, pct(0.001), pct(0.999), hi);
                 }
-                if (now - last_preview < std::chrono::milliseconds(100)) continue;
-                last_preview = now;
-                const std::string jpg = preview.make(*f);
-                if (jpg.empty()) continue;
-                std::printf("{\"type\":\"preview\",\"w\":%d,\"h\":%d,\"jpg\":\"%s\"}\n", preview.width(), preview.height(), jpg.c_str());
-                std::fflush(stdout);
+                pump.offer(*f);
             }
         });
         std::jthread aw([&] { while (aq.pop()) {} });   // keep the audio queue from backing up
@@ -343,31 +385,31 @@ int main(int argc, char** argv) {
         return int64_t((video_kbps + (audio_on ? args.audio_kbps : 0)) * 1000.0 / 8.0 * 1.12 * pace_headroom);
     };
     fc.pace_bytes_per_sec = pace_for(enc.current_bitrate_kbps());
-    sdi::TsFanout fanout(fc);
-    sdi::TsMuxer  mux(fanout, enc.video_ctx(), aenc ? aenc->audio_ctx() : nullptr);
+    auto fanout = std::make_unique<sdi::TsFanout>(fc);
+    auto mux    = std::make_unique<sdi::TsMuxer>(*fanout, enc.video_ctx(), aenc ? aenc->audio_ctx() : nullptr);
+    std::mutex enc_mu;   // held while encoding and while the sending side is torn down for "idle"
 
     // ---- Workers: queue -> encode -> mux. Fanout never blocks, so no extra network queue. ----
+    std::unique_ptr<PreviewPump> pump;
+    if (args.preview) pump = std::make_unique<PreviewPump>();
     std::jthread vworker([&] {
-        sdi::PreviewJpeg preview;
-        auto last_preview = std::chrono::steady_clock::now() - std::chrono::seconds(1);
         while (auto f = vq.pop()) {
-            if (const int want = g_bitrate_req.exchange(0)) { enc.set_bitrate(want); fanout.set_pacing(pace_for(want)); }
-            enc.encode(*f, [&](AVPacket* pkt) { mux.write_video(pkt); });
-            // Monitor picture for the app: after the real encode, ~10 per second.
-            const auto now = std::chrono::steady_clock::now();
-            if (args.preview && now - last_preview >= std::chrono::milliseconds(100)) {
-                last_preview = now;
-                const std::string jpg = preview.make(*f);
-                if (!jpg.empty()) {
-                    std::printf("{\"type\":\"preview\",\"w\":%d,\"h\":%d,\"jpg\":\"%s\"}\n", preview.width(), preview.height(), jpg.c_str());
-                    std::fflush(stdout);
+            {
+                std::lock_guard lk(enc_mu);
+                if (!g_idle) {
+                    if (const int want = g_bitrate_req.exchange(0)) { enc.set_bitrate(want); fanout->set_pacing(pace_for(want)); }
+                    enc.encode(*f, [&](AVPacket* pkt) { mux->write_video(pkt); });
                 }
             }
+            // Monitor pictures for the app (every frame / every field), after the real encode.
+            if (pump) pump->offer(*f);
         }
     });
     std::jthread aworker([&] {
-        while (auto f = aq.pop())
-            if (aenc) aenc->encode(*f, [&](AVPacket* pkt) { mux.write_audio(pkt); });
+        while (auto f = aq.pop()) {
+            std::lock_guard lk(enc_mu);
+            if (aenc && !g_idle) aenc->encode(*f, [&](AVPacket* pkt) { mux->write_audio(pkt); });
+        }
     });
 
     // ---- Control: "bitrate N" / "quit" on stdin; EOF (parent died) also stops us. ----
@@ -378,6 +420,7 @@ int main(int argc, char** argv) {
             std::string cmd; int v = 0;
             ss >> cmd >> v;
             if (cmd == "bitrate" && v >= 500 && v <= 100000) { g_bitrate_req = v; g_user_kbps = v; }
+            else if (cmd == "idle") g_idle = true;
             else if (cmd == "quit") break;
         }
         g_stop = true;
@@ -418,7 +461,7 @@ int main(int argc, char** argv) {
     std::jthread announcer;
     if (announce) announcer = std::jthread([&] {
         int fails = 0;
-        while (!g_stop) {
+        while (!g_stop && !g_idle) {
             std::ostringstream b;
             b << "{\"id\":" << json_str(id) << ",\"name\":" << json_str(args.name)
               << ",\"format\":" << json_str(format) << ",\"source\":" << json_str(source)
@@ -433,7 +476,7 @@ int main(int argc, char** argv) {
             if (st != 200 && fails++ % 10 == 0)
                 std::cerr << "directory: announce failed (" << (st < 0 ? "unreachable" : "HTTP " + std::to_string(st)) << ")\n";
             if (st == 200) fails = 0;
-            for (int i = 0; i < 10 && !g_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            for (int i = 0; i < 10 && !g_stop && !g_idle; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
 
@@ -442,16 +485,16 @@ int main(int argc, char** argv) {
     auto last = std::chrono::steady_clock::now();
     sdi::RateAdapter adapter(enc.current_bitrate_kbps(), args.adapt && enc.supports_live_bitrate());
     std::string last_warn;
-    while (!g_stop) {
+    while (!g_stop && !g_idle) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const auto now = std::chrono::steady_clock::now();
         const double dt = std::chrono::duration<double>(now - last).count();
         last = now;
-        const uint64_t v = video_count.load(), by = fanout.bytes();
+        const uint64_t v = video_count.load(), by = fanout->bytes();
 
         // Network feedback: SRT's own counters decide whether the link can carry the bitrate.
         if (const int u = g_user_kbps.exchange(0)) adapter.set_target(u);
-        const auto rh = fanout.relay_health(), vh = fanout.viewer_health();
+        const auto rh = fanout->relay_health(), vh = fanout->viewer_health();
         if (const int nb = adapter.tick(rh.sent + vh.sent, rh.retrans + vh.retrans, rh.drops + vh.drops)) {
             g_bitrate_req = nb;   // the video worker applies it (and the pacing) on its next frame
             std::cerr << "adapt: " << (adapter.loss_pct() > 2.0 || adapter.drops_recent() ? "network is dropping packets" : "network recovering")
@@ -481,13 +524,27 @@ int main(int argc, char** argv) {
                     "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
-                    fanout.clients(), fanout.relay_up() ? "true" : "false", fanout.relay_rtt_ms(),
+                    fanout->clients(), fanout->relay_up() ? "true" : "false", fanout->relay_rtt_ms(),
                     (unsigned long long)vq.dropped(),
                     g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
                     adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str(),
                     args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms);
         std::fflush(stdout);
         last_v = v; last_bytes = by;
+    }
+
+    // ---- Idle: the app pressed STOP. Stop sending (relay, LAN viewers, directory, mDNS) but keep the
+    // input open: the video worker carries on as a monitor, so the picture never drops out. ----
+    if (g_idle && !g_stop) {
+        if (announcer.joinable()) announcer.join();
+        mdns.reset();
+        {
+            std::lock_guard lk(enc_mu);   // no frame is mid-encode while the sending side goes away
+            mux.reset();
+            fanout.reset();
+        }
+        std::cerr << "link_encoder: idle (input kept open for the monitor)\n";
+        while (!g_stop) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // ---- Shutdown: stop the source first, then drain the workers. ----
