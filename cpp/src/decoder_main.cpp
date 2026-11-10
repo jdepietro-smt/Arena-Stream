@@ -698,10 +698,11 @@ int main(int argc, char** argv) {
                     bool frame_behind = false;
                     dec_sum += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_dec0).count(); ++dec_n;
 
+                    uint8_t stamp_flags = 0;
                     for (int sdi_i = 0; sdi_i < vframe->nb_side_data; ++sdi_i) {
                         const AVFrameSideData* sd = vframe->side_data[sdi_i];
                         if (sd->type != AV_FRAME_DATA_SEI_UNREGISTERED) continue;
-                        if (auto t = sdi::latency::unpack(sd->data, sd->size)) {
+                        if (auto t = sdi::latency::unpack(sd->data, sd->size, &stamp_flags)) {
                             const double ms = double(sdi::latency::now_utc_us() - *t) / 1000.0;
                             g2g_sum += ms; ++g2g_n;
                             if (ms > g2g_max) g2g_max = ms;
@@ -725,7 +726,7 @@ int main(int argc, char** argv) {
                         // the kind of thing that shows up as the picture
                         // jumping/rolling on the monitor.
                         out_mode.interlaced = !args.force_progressive &&
-                            (vframe->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+                            ((vframe->flags & AV_FRAME_FLAG_INTERLACED) != 0 || (stamp_flags & sdi::latency::kFlagInterlaced) != 0);
 
                         // Match arena_stream's own "WxHi@FIELDRATE" / "WxHp@FRAMERATE"
                         // convention (see formatMode() in the encoder app's main.ts) so

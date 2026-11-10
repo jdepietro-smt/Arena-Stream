@@ -65,6 +65,9 @@ struct EncoderConfig {
     int         bitrate_kbps = 8000;
     int         gop          = 15;            // IDR every 0.25s at 60fps — fast recovery
     bool        zerolatency  = true;
+    // Interlaced sources are sent interlaced (field-coded, converted field by field) unless this is
+    // set, which deinterlaces them to one progressive frame per field (yadif) as older versions did.
+    bool        deinterlace  = false;
     // Encoders to try, in order — normally built by codec_policy.h. Empty
     // means "codec_name, then libx264", which is what callers that don't use
     // the policy always got.
@@ -83,6 +86,8 @@ public:
         // separately — see codec_policy.h. A chain from the policy always
         // ends in libx264, which needs no driver, so a missing GPU never
         // takes the stream down.
+        deint_     = mode.interlaced && cfg.deinterlace;
+        native_il_ = mode.interlaced && !cfg.deinterlace;
         std::string effective_name;
         const AVCodec* codec = open_with_fallback(mode, cfg, effective_name);
         if (!codec) throw std::runtime_error("no working encoder available (tried " + chain_text(cfg) + ")");
@@ -115,9 +120,12 @@ public:
             src_fmt = AV_PIX_FMT_UYVY422;
 #endif
         }
+        // Native interlaced: each field is converted on its own (half height, every other line) so
+        // 4:2:2 -> 4:2:0 chroma never mixes lines from two moments in time.
+        const int conv_h = native_il_ ? ctx_->height / 2 : ctx_->height;
         sws_ = sws_getContext(
-            ctx_->width, ctx_->height, src_fmt,
-            ctx_->width, ctx_->height, ctx_->pix_fmt,
+            ctx_->width, conv_h, src_fmt,
+            ctx_->width, conv_h, ctx_->pix_fmt,
             SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         if (!sws_) throw std::runtime_error("sws_getContext failed");
 
@@ -127,7 +135,7 @@ public:
         // content where there's no combing to fix at all (confirmed live:
         // static broadcast graphics looked permanently soft/"shadowy").
         // yadif only touches rows where the two fields actually disagree.
-        if (mode.interlaced) init_deinterlace_filter();
+        if (deint_) init_deinterlace_filter();
     }
 
     ~Encoder() {
@@ -213,10 +221,25 @@ public:
     void encode(const VideoFrame& in, EmitFn&& emit) {
         av_frame_make_writable(frame_);
 
-        const uint8_t* src[4]     = { in.data.data(), nullptr, nullptr, nullptr };
-        const int      strides[4] = { int(in.stride), 0, 0, 0 };
-        sws_scale(sws_, src, strides, 0, ctx_->height,
-                  frame_->data, frame_->linesize);
+        if (native_il_) {
+            for (int field = 0; field < 2; ++field) {
+                const uint8_t* src[4]     = { in.data.data() + size_t(field) * in.stride, nullptr, nullptr, nullptr };
+                const int      strides[4] = { int(in.stride) * 2, 0, 0, 0 };
+                uint8_t* dst[4]     = { frame_->data[0] + size_t(field) * frame_->linesize[0],
+                                        frame_->data[1] ? frame_->data[1] + size_t(field) * frame_->linesize[1] : nullptr,
+                                        frame_->data[2] ? frame_->data[2] + size_t(field) * frame_->linesize[2] : nullptr, nullptr };
+                int      dstride[4] = { frame_->linesize[0] * 2, frame_->linesize[1] * 2, frame_->linesize[2] * 2, 0 };
+                sws_scale(sws_, src, strides, 0, ctx_->height / 2, dst, dstride);
+            }
+            frame_->flags |= AV_FRAME_FLAG_INTERLACED;
+            if (ctx_->height >= 720) frame_->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+            else                     frame_->flags &= ~AV_FRAME_FLAG_TOP_FIELD_FIRST;
+        } else {
+            const uint8_t* src[4]     = { in.data.data(), nullptr, nullptr, nullptr };
+            const int      strides[4] = { int(in.stride), 0, 0, 0 };
+            sws_scale(sws_, src, strides, 0, ctx_->height,
+                      frame_->data, frame_->linesize);
+        }
 
         frame_->pts = av_rescale_q(
             in.pts.count(),
@@ -236,7 +259,8 @@ public:
             av_frame_remove_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED);
             if (AVFrameSideData* sd = av_frame_new_side_data(f, AV_FRAME_DATA_SEI_UNREGISTERED,
                                                              sdi::latency::kSize))
-                sdi::latency::pack(sd->data, sdi::latency::now_utc_us());
+                sdi::latency::pack(sd->data, sdi::latency::now_utc_us(),
+                                   native_il_ ? uint8_t(sdi::latency::kFlagInterlaced | (ctx_->height >= 720 ? sdi::latency::kFlagTopFieldFirst : 0)) : uint8_t(0));
             if (tap_) tap_(f);
             if (avcodec_send_frame(ctx_, f) < 0) return;
             while (avcodec_receive_packet(ctx_, pkt_) == 0) {
@@ -245,7 +269,7 @@ public:
             }
         };
 
-        if (!in.mode.interlaced) {
+        if (!deint_) {
             submit(frame_);
             return;
         }
@@ -343,7 +367,7 @@ private:
         // frame — the NHL Network (1920x1080i) stream played back as solid
         // black because of exactly this. Matching what the filter graph
         // actually produces removes the mismatch instead of fighting it.
-        ctx_->pix_fmt        = mode.interlaced ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_NV12;
+        ctx_->pix_fmt        = deint_ ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_NV12;
         // A time_base with one tick per frame period (fps_den/fps_num) leaves
         // zero rounding headroom: av_rescale_q from the capture's nanosecond
         // PTS collapses onto the same integer tick whenever two frames' real
@@ -356,7 +380,11 @@ private:
         ctx_->time_base      = AVRational{1, 1'000'000};
         // Interlaced sources are deinterlaced to one frame per FIELD (yadif mode=1), so the
         // encoded stream runs at twice the capture frame rate (1080i59.94 -> 1080p59.94).
-        ctx_->framerate      = AVRational{int(mode.fps_num) * (mode.interlaced ? 2 : 1), int(mode.fps_den)};
+        ctx_->framerate      = AVRational{int(mode.fps_num) * (deint_ ? 2 : 1), int(mode.fps_den)};
+        if (native_il_) ctx_->field_order = mode.height >= 720 ? AV_FIELD_TT : AV_FIELD_BB;
+        // Only x264 can code interlaced pictures; NVENC (Ada and newer) and the rest code the frame
+        // as one picture and rely on the interlace flag in the stream's SEI (latency_stamp.h).
+        if (native_il_ && name == "libx264") ctx_->flags |= AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME;
         ctx_->bit_rate       = int64_t(cfg.bitrate_kbps) * 1000;
         ctx_->rc_max_rate    = ctx_->bit_rate;
         // One-frame VBV: constrains the encoder to no more than one frame's
@@ -368,7 +396,7 @@ private:
         // and overflowed the receiver buffer, causing breakups above 5 Mbps.
         {
             const int fps = std::max(1,
-                int(mode.fps_num) * (mode.interlaced ? 2 : 1) / std::max(1, int(mode.fps_den)));
+                int(mode.fps_num) * (deint_ ? 2 : 1) / std::max(1, int(mode.fps_den)));
             vbv_frames_ = qp.vbv_frames;
             quality_used_ = cfg.quality;
             ctx_->rc_buffer_size = int(ctx_->bit_rate * vbv_frames_ / std::max(fps, 30));
@@ -451,9 +479,11 @@ private:
             // slice-max-size intentionally absent: MTU-sized slices create 40+ NALUs
             // per frame; mediamtx v1.9.x hard-caps at 25 and drops every frame.
             // SRT handles its own MTU fragmentation — encoder-level slicing is unnecessary.
-            av_opt_set(ctx_->priv_data, "x264-params",
-                       "nal-hrd=cbr:force-cfr=1:sync-lookahead=0"
-                       ":repeat-headers=1", 0);
+            {
+                std::string xp = "nal-hrd=cbr:force-cfr=1:sync-lookahead=0:repeat-headers=1";
+                if (native_il_) xp += mode.height >= 720 ? ":tff=1" : ":bff=1";   // field-coded interlaced (MBAFF)
+                av_opt_set(ctx_->priv_data, "x264-params", xp.c_str(), 0);
+            }
         } else if (name == "libx265") {
             av_opt_set(ctx_->priv_data, "preset", qp.sw_preset, 0);
             av_opt_set(ctx_->priv_data, "x265-params",
@@ -543,6 +573,8 @@ private:
     std::string      encoder_name_;
     std::string      quality_used_ = "low";
     int              vbv_frames_   = 1;
+    bool             deint_        = false;   // interlaced source, deinterlaced to field-rate progressive
+    bool             native_il_    = false;   // interlaced source, sent interlaced
     std::function<void(const AVFrame*)> tap_;
     AVCodecContext*  ctx_        = nullptr;
     AVFrame*         frame_      = nullptr;

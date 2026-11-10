@@ -112,17 +112,23 @@ inline void start_clock_sync() {
     }).detach();
 }
 
-inline void pack(uint8_t* out /* kSize bytes */, int64_t utc_us) {
+// The top byte of the 8-byte time carries picture flags (a UTC microsecond count never gets near it):
+// encoders that cannot code interlaced pictures (NVENC) still tell the decoder the frame holds two fields.
+inline constexpr uint8_t kFlagInterlaced = 1, kFlagTopFieldFirst = 2;
+
+inline void pack(uint8_t* out /* kSize bytes */, int64_t utc_us, uint8_t flags = 0) {
     std::memcpy(out, kUuid, 16);
-    for (int i = 0; i < 8; ++i) out[16 + i] = uint8_t((uint64_t(utc_us) >> (56 - 8 * i)) & 0xFF);
+    const uint64_t v = (uint64_t(flags) << 56) | (uint64_t(utc_us) & 0x00FFFFFFFFFFFFFFULL);
+    for (int i = 0; i < 8; ++i) out[16 + i] = uint8_t((v >> (56 - 8 * i)) & 0xFF);
 }
 
 // Returns the stamped UTC microseconds, or nothing if this isn't our SEI.
-inline std::optional<int64_t> unpack(const uint8_t* data, size_t size) {
+inline std::optional<int64_t> unpack(const uint8_t* data, size_t size, uint8_t* flags = nullptr) {
     if (!data || size < kSize || std::memcmp(data, kUuid, 16) != 0) return std::nullopt;
     uint64_t v = 0;
     for (int i = 0; i < 8; ++i) v = (v << 8) | data[16 + i];
-    return int64_t(v);
+    if (flags) *flags = uint8_t(v >> 56);
+    return int64_t(v & 0x00FFFFFFFFFFFFFFULL);
 }
 
 }  // namespace sdi::latency

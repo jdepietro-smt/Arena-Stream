@@ -63,6 +63,7 @@ struct Args {
     std::string key;
     bool        preview = false;              // emit {"type":"preview"} JPEG lines for the app's monitor
     bool        monitor = false;              // capture + preview only: no encode, no network
+    bool        deinterlace = false;          // old behaviour: interlaced sources sent as field-rate progressive
     bool        adapt = true;                 // lower the bitrate when the network drops packets
     std::string quality = "low";              // low | balanced | max — see encoder.h QualityProfile
     bool        qtest = false;                // measure quality/latency of each profile on a live clip, then exit
@@ -108,6 +109,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--monitor")          a.monitor = true;
         else if (k == "--quality")          a.quality = next();
         else if (k == "--no-adapt")         a.adapt = false;
+        else if (k == "--deinterlace")      a.deinterlace = true;
         else if (k == "--no-mdns")          a.mdns = false;
         else if (k == "--qtest")            a.qtest = true;
         else if (k == "--qtest-rates")      a.qtest_rates = next();
@@ -294,6 +296,7 @@ int main(int argc, char** argv) {
     enc_cfg.quality      = args.quality;
     enc_cfg.codec_name   = args.codec;
     enc_cfg.bitrate_kbps = args.bitrate_kbps;
+    enc_cfg.deinterlace  = args.deinterlace;
     enc_cfg.chain        = sdi::codec_policy::candidate_chain(args.codec, sdi::codec_policy::dest_kind("srt://x"));
     sdi::Encoder enc(mode, enc_cfg);
     enc.prewarm();
@@ -381,10 +384,11 @@ int main(int argc, char** argv) {
     }).detach();
 
     // ---- Announce ----
-    // Format as delivered to decoders: interlaced sources are sent progressive at field rate.
+    // Format as delivered to decoders: interlaced sources are sent interlaced (field rate named), or progressive with --deinterlace.
     const double src_fps = double(mode.fps_num) / double(mode.fps_den);
     const double out_fps = mode.interlaced ? src_fps * 2.0 : src_fps;
-    const std::string format = std::to_string(mode.width) + "x" + std::to_string(mode.height) + "p@" + fmt_fps(out_fps);
+    const bool native_il = mode.interlaced && !args.deinterlace;
+    const std::string format = std::to_string(mode.width) + "x" + std::to_string(mode.height) + (native_il ? "i@" : "p@") + fmt_fps(out_fps);
     const std::string source = std::to_string(mode.width) + "x" + std::to_string(mode.height) +
                                (mode.interlaced ? "i@" : "p@") + fmt_fps(mode.interlaced ? out_fps : src_fps);
     const std::string id = host_name() + "-" + args.device_id + "-" + args.connection;

@@ -178,7 +178,7 @@ inline bool run_one(const std::vector<VideoFrame>& clip, const VideoMode& mode,
     av_packet_free(&dpk); av_frame_free(&df); avcodec_free_context(&dctx);
     if (scored == 0) return false;
 
-    const double fps = double(mode.fps_num) / double(std::max<uint32_t>(1, mode.fps_den)) * (mode.interlaced ? 2 : 1);
+    const double fps = double(mode.fps_num) / double(std::max<uint32_t>(1, mode.fps_den));   // interlaced frames are coded as frames (two fields each)
     r.dec_lag  = max_lag;
     r.frames   = scored;
     r.psnr     = psnr_sum / scored;
