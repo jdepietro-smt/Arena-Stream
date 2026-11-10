@@ -17,7 +17,7 @@ const auth = require('./lib/auth')
 const os = require('node:os')
 const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
-const { openAdmin, SETTINGS, USERNAME, ROLES } = require('./lib/admin')
+const { openAdmin, SETTINGS, USERNAME, ROLES, cleanProfile } = require('./lib/admin')
 const { createThumbs } = require('./lib/thumbs')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
@@ -241,7 +241,18 @@ function createPortal(cfg) {
   async function adminApi(req, res, p, m) {
     if (p === '/portal/api/me') {
       const s = S()
-      return send(res, 200, { ok: true, user: sessionUser(req), role: roleOf(admin.user(sessionUser(req))), publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
+      const mu = admin.user(sessionUser(req))
+      return send(res, 200, { ok: true, user: sessionUser(req), name: mu ? mu.name || '' : '', email: mu ? mu.email || '' : '', role: roleOf(mu), publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
+    }
+    if (p === '/portal/api/profile' && m === 'POST') {   // an account edits its own name and email
+      const u = admin.user(sessionUser(req))
+      if (!u) return send(res, 400, { error: 'sign in with an account to have a profile' })
+      const b = await readJson(req)
+      let prof
+      try { prof = cleanProfile(b) } catch (e) { return send(res, 400, { error: e.message }) }
+      admin.setProfile(u.username, prof)
+      admin.audit(u.username, 'account.profile', 'own profile', clientIp(req))
+      return send(res, 200, { ok: true, ...prof })
     }
     if (p.startsWith('/portal/api/owner/')) return ownerApi(req, res, p, m)
 
@@ -427,7 +438,10 @@ function createPortal(cfg) {
       if (pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
       const role = b.role === undefined ? 'user' : b.role
       if (!ROLES.includes(role)) return send(res, 400, { error: 'role must be admin or user' })
+      let prof
+      try { prof = cleanProfile(b) } catch (e) { return send(res, 400, { error: e.message }) }
       admin.setUser(name, auth.hashPassword(pw), role)
+      admin.setProfile(name, prof)
       admin.audit('owner', 'account.user.create', `${name} (${role})`, ip)
       return send(res, 200, { ok: true, users: admin.users() })
     }
@@ -437,6 +451,16 @@ function createPortal(cfg) {
       if (!S().sharedLogin && admin.users().length <= 1 && admin.user(name)) return send(res, 400, { error: 'this is the last account and shared sign-in is off; turn shared sign-in on first' })
       if (!admin.deleteUser(name)) return send(res, 404, { error: 'no such user' })
       admin.audit('owner', 'account.user.delete', name, ip)
+      return send(res, 200, { ok: true, users: admin.users() })
+    }
+    if ((um = sub.match(/^users\/([^/]+)\/profile$/)) && m === 'POST') {
+      const name = decodeURIComponent(um[1])
+      if (!admin.user(name)) return send(res, 404, { error: 'no such user' })
+      const b = await readJson(req)
+      let prof
+      try { prof = cleanProfile(b) } catch (e) { return send(res, 400, { error: e.message }) }
+      admin.setProfile(name, prof)
+      admin.audit('owner', 'account.user.profile', name, ip)
       return send(res, 200, { ok: true, users: admin.users() })
     }
     if ((um = sub.match(/^users\/([^/]+)\/role$/)) && m === 'POST') {

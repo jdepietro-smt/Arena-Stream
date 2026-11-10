@@ -71,7 +71,7 @@ function openAdmin(dir) {
       return changed
     },
     // Named portal accounts. `ver` changes with the password, which ends that user's sessions.
-    users: () => Object.values(data.users).map(u => ({ username: u.username, role: u.role || 'admin', createdAt: u.createdAt, ver: u.ver })),
+    users: () => Object.values(data.users).map(u => ({ username: u.username, role: u.role || 'admin', name: u.name || '', email: u.email || '', createdAt: u.createdAt, ver: u.ver })),
     user: name => data.users[String(name).toLowerCase()] || null,
     // role: 'admin' (the Admin area opens without a second password) or 'user'. An account made before
     // roles existed has none, and counts as admin. A password change keeps the role.
@@ -81,6 +81,11 @@ function openAdmin(dir) {
       data.users[key] = { username: old ? old.username : String(name), pwHash, role: role || (old ? old.role : 'user'), createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
       flush()
       return data.users[key]
+    },
+    setProfile(name, prof) {
+      const u = data.users[String(name).toLowerCase()]
+      if (!u) return false
+      u.name = prof.name; u.email = prof.email; flush(); return true
     },
     setRole(name, role) {
       const u = data.users[String(name).toLowerCase()]
@@ -101,5 +106,14 @@ function openAdmin(dir) {
 }
 
 const ROLES = ['admin', 'user']
+
+// Name and email shown against an account. Both optional; an email must look like one.
+function cleanProfile(p) {
+  const name = String((p && p.name) || '').replace(/[\u0000-\u001f\u007f]/g, '').trim()
+  const email = String((p && p.email) || '').trim()
+  if (name.length > 80) throw new Error('name: at most 80 characters')
+  if (email.length > 120 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) throw new Error('email address does not look right')
+  return { name, email }
+}
 const USERNAME = /^[A-Za-z0-9._@-]{2,40}$/
-module.exports = { openAdmin, SETTINGS, cleanSetting, USERNAME, ROLES }
+module.exports = { openAdmin, SETTINGS, cleanSetting, USERNAME, ROLES, cleanProfile }

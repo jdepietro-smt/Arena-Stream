@@ -652,3 +652,55 @@ test('roles: an account saved before roles existed counts as admin', async () =>
     assert.deepEqual([st.unlocked, st.viaAccount], [true, true])
   } finally { await new Promise(r => { store.flush(); admin.flush(); server.close(r) }) }
 })
+
+// ── profiles: name and email per account ──────────────────────────────────────
+test('profiles: an admin sets name and email for any account; bad values are refused', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const mk = await post(t, '/portal/api/owner/users', { username: 'pat.one', password: 'pat-password-123', name: '  Pat One ', email: 'pat@example.com' })
+    assert.equal(mk.status, 200)
+    let u = (await t.call('/portal/api/owner/users')).body.users.find(x => x.username === 'pat.one')
+    assert.equal(u.name, 'Pat One'); assert.equal(u.email, 'pat@example.com')
+
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'bad.mail', password: 'bad-password-123', email: 'not-an-email' })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'long.name', password: 'long-password-123', name: 'x'.repeat(81) })).status, 400)
+    assert.equal((await t.call('/portal/api/owner/users')).body.users.some(x => x.username === 'bad.mail'), false, 'a refused account is not created')
+
+    assert.equal((await post(t, '/portal/api/owner/users/pat.one/profile', { name: 'Patricia One', email: 'patricia@example.org' })).status, 200)
+    assert.equal((await post(t, '/portal/api/owner/users/pat.one/profile', { name: 'Patricia One', email: 'oops' })).status, 400)
+    assert.equal((await post(t, '/portal/api/owner/users/ghost/profile', { name: 'No One' })).status, 404)
+    u = (await t.call('/portal/api/owner/users')).body.users.find(x => x.username === 'pat.one')
+    assert.equal(u.name, 'Patricia One'); assert.equal(u.email, 'patricia@example.org')
+    assert.equal((await post(t, '/portal/api/owner/users/pat.one/profile', { name: '', email: '' })).status, 200)   // both optional
+    assert.equal((await t.call('/portal/api/owner/users')).body.users.find(x => x.username === 'pat.one').email, '')
+    assert.ok(t.admin.auditList().some(e => e.action === 'account.user.profile'))
+  } finally { await t.close() }
+})
+
+test('profiles: an account edits its own; the shared password has no profile; /me carries it', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await post(t, '/portal/api/owner/users', { username: 'self.edit', password: 'self-password-123' })
+    assert.equal((await post(t, '/portal/api/profile', { name: 'Shared', email: 'a@b.co' })).status, 400, 'a shared-password session has no account')
+    t.resetCookie()
+    await signIn(t, 'self.edit', 'self-password-123')
+    assert.equal((await post(t, '/portal/api/profile', { name: 'Self Edit', email: 'self@example.com' })).status, 200)
+    assert.equal((await post(t, '/portal/api/profile', { name: 'Self Edit', email: 'bad' })).status, 400)
+    const me = (await t.call('/portal/api/me')).body
+    assert.deepEqual([me.user, me.name, me.email], ['self.edit', 'Self Edit', 'self@example.com'])
+    assert.equal((await t.call('/portal/api/owner/users/self.edit/profile', { method: 'POST', body: { name: 'X' } })).status, 403, 'a plain user cannot edit profiles through the owner area')
+  } finally { await t.close() }
+})
+
+test('add-user.js: --name and --email set the profile', async () => {
+  const { execFileSync } = require('node:child_process')
+  const { openAdmin } = require('../lib/admin')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addprofile-'))
+  const script = path.join(__dirname, '..', 'add-user.js')
+  execFileSync(process.execPath, [script, 'with.profile', '--name', 'With Profile', '--email', 'with@example.com', dir], { encoding: 'utf8' })
+  const u = openAdmin(dir).users()[0]
+  assert.deepEqual([u.name, u.email], ['With Profile', 'with@example.com'])
+  assert.throws(() => execFileSync(process.execPath, [script, 'bad.profile', '--email', 'nope', dir], { encoding: 'utf8', stdio: 'pipe' }))
+})
