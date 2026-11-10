@@ -436,7 +436,7 @@ let capTimer = null
 async function capacitySection(box) {
   const ph = n => el('span', { class: 'hint', style: 'margin:0' }, n)
   const num = (v, w = 70) => el('input', { type: 'text', value: String(v), style: 'width:' + w + 'px' })
-  const maxS = num(20), step = num(2), stepSec = num(40), srt = num(1), rtsp = num(1), cpuStop = num(90)
+  const maxS = num(20), step = num(2), stepSec = num(40), srt = num(1), rtsp = num(1), whep = num(1), cpuStop = num(90)
   const allowLive = el('input', { type: 'checkbox' }), ack = el('input', { type: 'checkbox' })
   const err = msgBox()
   const live = el('div'), results = el('div')
@@ -471,15 +471,15 @@ async function capacitySection(box) {
   const start = async () => {
     err.textContent = ''
     try {
-      await oapi('/captest/start', 'POST', { streamsMax: +maxS.value, step: +step.value, stepSec: +stepSec.value, srtReaders: +srt.value, rtspReaders: +rtsp.value, cpuStopPct: +cpuStop.value, allowLive: allowLive.checked, ack: ack.checked })
+      await oapi('/captest/start', 'POST', { streamsMax: +maxS.value, step: +step.value, stepSec: +stepSec.value, srtReaders: +srt.value, rtspReaders: +rtsp.value, whepReaders: +whep.value, cpuStopPct: +cpuStop.value, allowLive: allowLive.checked, ack: ack.checked })
       flash(err, 'Requested. It starts within a few seconds.', true); draw()
     } catch (e) { flash(err, e.message) }
   }
   const lab = (t, input) => el('label', { style: 'color:var(--text);flex-direction:column;gap:3px' }, el('span', { class: 'hint', style: 'margin:0' }, t), input)
   box.replaceChildren(
     el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Capacity test'),
-      el('div', { class: 'hint', style: 'margin:0' }, 'Finds how many 10 Mbps streams this server carries. It publishes synthetic streams to the relay from the server itself, reads each back like a decoder PC and like a browser viewer, and ramps up until something strains. It measures real CPU, memory, network and which process is busiest. It does not use your internet connection, and stops by itself on strain.'),
-      el('div', { class: 'row', style: 'flex-wrap:wrap;align-items:flex-end;gap:14px' }, lab('Up to streams', maxS), lab('Add per step', step), lab('Seconds per step', stepSec), lab('Decoder readers / stream', srt), lab('Browser-style readers / stream', rtsp), lab('Stop above CPU %', cpuStop)),
+      el('div', { class: 'hint', style: 'margin:0' }, 'Finds how many 10 Mbps streams this server carries. It publishes synthetic streams to the relay from the server itself, reads each back like a decoder PC, through mediamtx, and as real WebRTC viewers (the same protocol a browser uses), and ramps up until something strains. It measures real CPU, memory, network and which process is busiest. It does not use your internet connection, and stops by itself on strain.'),
+      el('div', { class: 'row', style: 'flex-wrap:wrap;align-items:flex-end;gap:14px' }, lab('Up to streams', maxS), lab('Add per step', step), lab('Seconds per step', stepSec), lab('Decoder readers / stream', srt), lab('mediamtx readers / stream', rtsp), lab('WebRTC viewers / stream', whep), lab('Stop above CPU %', cpuStop)),
       el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, allowLive, el('span', {}, 'Run even if live streams are on air (they may suffer; the test stops if one is affected)')),
       el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, ack, el('span', {}, 'I understand this loads the live server for several minutes')),
       el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: start }, 'Start the test'), err)),

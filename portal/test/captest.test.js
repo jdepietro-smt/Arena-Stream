@@ -20,10 +20,11 @@ function fakeWorld(o = {}) {
     ...(o.preflight ? { preflight: async () => o.preflight } : {}),
     ...(o.diagnostics ? { diagnostics: async () => o.diagnostics } : {}),
     start: async (kind, i) => {
+      if (kind === 'whep' && o.whepFails) throw new Error(o.whepFails)
       w.started.push(kind + i)
       if (kind === 'pub') w.streams = Math.max(w.streams, i)
       const t0 = w.t
-      const rate = () => (kind === 'rtsp' && o.rtspDown ? 0 : w.streams > model.failAt ? 4 : 10)
+      const rate = () => (kind === 'rtsp' && o.rtspDown ? 0 : kind === 'whep' && o.whepDown ? 0 : w.streams > model.failAt ? 4 : 10)
       return {
         kind, stop: async () => { w.stopped.push(kind + i) },
         stats: since => ({ bytes: (w.t - t0) / 1000 * rate() * 1e6 / 8, mediaUs: (w.t - t0) * 1000 * (rate() === 10 ? 1 : 0.5), maxGapSec: 0.5 }),
@@ -58,7 +59,7 @@ test('parsers read /proc text', () => {
 
 test('ramps to the maximum cleanly and estimates capacity from the server-side CPU', async () => {
   const { d, w } = fakeWorld()
-  const r = await core.runCapacityTest({ streamsMax: 8, step: 4, stepSec: 15, warmSec: 5 }, d)
+  const r = await core.runCapacityTest({ streamsMax: 8, step: 4, stepSec: 15, warmSec: 5, whepReaders: 0 }, d)
   assert.equal(r.phase, 'done'); assert.equal(r.aborted, '')
   assert.deepEqual(r.steps.map(s => [s.streams, s.verdict]), [[4, 'clean'], [8, 'clean']])
   assert.ok(Math.abs(r.steps[1].serverCpu - 35) < 2, 'server-side CPU leaves out the generator: ' + r.steps[1].serverCpu)
@@ -98,10 +99,25 @@ test('when readers get nothing, the errors from the test processes are in the co
 
 test('carries on with decoder-style readers when the mediamtx readers get nothing', async () => {
   const { d } = fakeWorld({ rtspDown: true })
-  const r = await core.runCapacityTest({ streamsMax: 4, step: 2, stepSec: 15, warmSec: 5 }, d)
+  const r = await core.runCapacityTest({ streamsMax: 4, step: 2, stepSec: 15, warmSec: 5, whepReaders: 0 }, d)
   assert.equal(r.aborted, ''); assert.deepEqual(r.steps.map(s => s.verdict), ['clean', 'clean'])
   assert.equal(r.steps[1].readers, 4)                                                   // only the 4 SRT readers are counted
   assert.match(r.note, /RTSP/); assert.match(r.conclusion, /RTSP/)
+})
+
+test('WebRTC viewers are measured as readers, and left out with a note when they cannot work', async () => {
+  const cfg = { streamsMax: 4, step: 2, stepSec: 15, warmSec: 5, whepReaders: 2 }
+  const ok = await core.runCapacityTest(cfg, fakeWorld().d)
+  assert.equal(ok.steps[1].readers, 4 * (1 + 1 + 2)); assert.match(ok.conclusion, /2 as a real WebRTC viewer/)
+
+  const down = await core.runCapacityTest(cfg, fakeWorld({ whepDown: true }).d)
+  assert.equal(down.aborted, ''); assert.equal(down.steps[1].readers, 8); assert.match(down.note, /WebRTC viewers received no data/)
+  assert.doesNotMatch(down.conclusion, /real WebRTC viewer/)
+
+  const { d, w } = fakeWorld({ whepFails: 'mediamtx too old' })
+  const broke = await core.runCapacityTest(cfg, d)
+  assert.equal(broke.aborted, ''); assert.match(broke.note, /could not be started \(mediamtx too old\)/)
+  assert.equal(w.stopped.length, w.started.length)
 })
 
 test('stops when the CPU stays too high', async () => {

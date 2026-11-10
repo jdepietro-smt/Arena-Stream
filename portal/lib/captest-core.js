@@ -50,7 +50,7 @@ function defaults(cfg = {}) {
   const num = (v, lo, hi, def) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n))) : def }
   return {
     streamsMax: num(cfg.streamsMax, 1, 60, 20), step: num(cfg.step, 1, 10, 2), stepSec: num(cfg.stepSec, 15, 120, 40), warmSec: num(cfg.warmSec, 5, 30, 10),
-    srtReaders: num(cfg.srtReaders, 0, 3, 1), rtspReaders: num(cfg.rtspReaders, 0, 3, 1), cpuStopPct: num(cfg.cpuStopPct, 50, 98, 90),
+    srtReaders: num(cfg.srtReaders, 0, 3, 1), rtspReaders: num(cfg.rtspReaders, 0, 3, 1), whepReaders: num(cfg.whepReaders, 0, 3, 1), cpuStopPct: num(cfg.cpuStopPct, 50, 98, 90),
     allowLive: cfg.allowLive === true, cores: num(cfg.cores, 1, 256, 4),
   }
 }
@@ -81,7 +81,7 @@ async function runCapacityTest(rawCfg, d) {
     const pre = await d.preflight()
     if (!pre.ok) return finish(`The test could not start: ${pre.message}`, pre.message)
   }
-  const handles = { pub: [], srt: [], rtsp: [] }
+  const handles = { pub: [], srt: [], rtsp: [], whep: [] }
   const stopAll = async () => { for (const k of Object.keys(handles)) for (const h of handles[k]) { try { await h.stop() } catch { /* gone */ } } }
 
   const skip = new Set()   // reader kinds that could not be measured (for example mediamtx RTSP switched off)
@@ -96,6 +96,10 @@ async function runCapacityTest(rawCfg, d) {
         await d.sleep(300)
         for (let k = 0; k < cfg.srtReaders; k++) handles.srt.push(await d.start('srt', i))
         for (let k = 0; k < cfg.rtspReaders; k++) handles.rtsp.push(await d.start('rtsp', i))
+        for (let k = 0; k < cfg.whepReaders && !skip.has('whep'); k++) {
+          try { handles.whep.push(await d.start('whep', i)) }
+          catch (e) { skip.add('whep'); status.note = (status.note ? status.note + ' ' : '') + 'WebRTC viewers could not be started (' + e.message + '), so they were left out.' }
+        }
       }
       const rec = { streams: n, cpu: [], gen: [], net: [], load: 0, memMin: 1e9, top: {} }
       let t0 = null, snap0 = null
@@ -117,7 +121,7 @@ async function runCapacityTest(rawCfg, d) {
         const dt = (cur.t - prevSample.t) / 1000 || 1
         const netMbps = { rx: (cur.net.rx - prevSample.net.rx) * 8 / dt / 1e6, tx: (cur.net.tx - prevSample.net.tx) * 8 / dt / 1e6 }
         status.now = { t: d.now(), streams: n, cpu: +sys.toFixed(1), generatorCpu: +genPct.toFixed(1), serverCpu: +Math.max(0, sys - genPct).toFixed(1), load1: cur.load[0], memAvailGB: +cur.mem.toFixed(1), netRxMbps: +netMbps.rx.toFixed(0), netTxMbps: +netMbps.tx.toFixed(0), phase: s < cfg.warmSec ? 'warming up' : 'measuring' }
-        if (s === cfg.warmSec) { t0 = d.now(); snap0 = handles.srt.concat(handles.rtsp).map(h => ({ h, ...h.stats() })) }
+        if (s === cfg.warmSec) { t0 = d.now(); snap0 = handles.srt.concat(handles.rtsp, handles.whep).map(h => ({ h, ...h.stats() })) }
         if (s >= cfg.warmSec) {
           rec.cpu.push(sys); rec.gen.push(genPct); rec.net.push(netMbps); rec.load = Math.max(rec.load, cur.load[0]); rec.memMin = Math.min(rec.memMin, cur.mem)
           for (const [c, t] of Object.entries(byComm)) rec.top[c] = (rec.top[c] || 0) + (jiffies > 0 ? 100 * t / jiffies : 0)
@@ -126,7 +130,7 @@ async function runCapacityTest(rawCfg, d) {
         hotRun = sys > cfg.cpuStopPct ? hotRun + 1 : 0
         if (hotRun >= 8) aborted = `CPU stayed above ${cfg.cpuStopPct}% for 8 s`
         else if (cur.mem < 1) aborted = 'free memory fell below 1 GB'
-        else if (cur.load[0] > cfg.cores * 1.5) aborted = `load average passed ${(cfg.cores * 1.5).toFixed(0)}`
+        else if (cur.load[0] > cfg.cores * 2.5) aborted = `load average passed ${(cfg.cores * 2.5).toFixed(0)}`
         const live = await d.live()
         const lost = Object.keys(liveBase).filter(k => { const e = live.find(x => x.name === k); return !e || e.kbps < 0.8 * liveBase[k] })
         liveBad = lost.length ? liveBad + 1 : 0
@@ -144,6 +148,10 @@ async function runCapacityTest(rawCfg, d) {
       const rtspAll = readers.filter(r => r.kind === 'rtsp')
       if (rtspAll.length && rtspAll.every(r => r.mbps < 0.1) && readers.some(r => r.kind === 'srt' && r.mbps >= 0.85 * sample.mbps)) {
         skip.add('rtsp'); status.note = 'The mediamtx-side readers (RTSP) received no data, so only the decoder-style readers were measured. Is RTSP switched off in mediamtx?'
+      }
+      const whepAll = readers.filter(r => r.kind === 'whep')
+      if (!skip.has('whep') && whepAll.length && whepAll.every(r => r.mbps < 0.1) && readers.some(r => r.kind === 'srt' && r.mbps >= 0.85 * sample.mbps)) {
+        skip.add('whep'); status.note = (status.note ? status.note + ' ' : '') + 'The WebRTC viewers received no data (is WebRTC reachable from this server to itself?), so they were left out of the measurement.'
       }
       const measured = readers.filter(r => !skip.has(r.kind))
       const bad = measured.filter(r => r.mbps < 0.85 * sample.mbps || r.speed < 0.9 || r.maxGap > 1.5)
@@ -172,7 +180,7 @@ async function runCapacityTest(rawCfg, d) {
 
   const fit = fitLine(cpuPoints)
   const parts = []
-  if (lastClean) parts.push(`Clean through ${lastClean} streams at ${sample.mbps.toFixed(1)} Mbps (each read back ${cfg.srtReaders} time${cfg.srtReaders === 1 ? '' : 's'} like a decoder${skip.has('rtsp') ? '' : ` and ${cfg.rtspReaders} through mediamtx like a browser`}).`)
+  if (lastClean) parts.push(`Clean through ${lastClean} streams at ${sample.mbps.toFixed(1)} Mbps (each read back ${cfg.srtReaders} time${cfg.srtReaders === 1 ? '' : 's'} like a decoder${skip.has('rtsp') || !cfg.rtspReaders ? '' : `, ${cfg.rtspReaders} through mediamtx`}${skip.has('whep') || !cfg.whepReaders ? '' : `, ${cfg.whepReaders} as a real WebRTC viewer`}).`)
   if (status.note) parts.push(status.note)
   else if (!lastClean) parts.push('No step finished clean.')
   if (aborted) parts.push(`Stopped: ${aborted}.`)

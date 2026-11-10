@@ -25,6 +25,9 @@ const KEY = process.env.LINK_KEY || ''
 const MTX_API = (process.env.MEDIAMTX_API || 'http://127.0.0.1:9997').replace(/\/$/, '')
 const MTX_RTSP = (process.env.MEDIAMTX_RTSP || 'rtsp://127.0.0.1:8554').replace(/\/$/, '')
 const RELAY = process.env.RELAY_SRT || '127.0.0.1:8895'
+const MTX_WEBRTC = (process.env.MEDIAMTX_WEBRTC || 'http://127.0.0.1:8889').replace(/\/$/, '')
+const MTX_BIN = process.env.MEDIAMTX_BIN || '/usr/local/bin/mediamtx'
+const VIEW_API = 'http://127.0.0.1:19997', VIEW_RTSP = 'rtsp://127.0.0.1:18554'   // the viewer simulator's own ports
 fs.mkdirSync(OUT, { recursive: true })
 
 let stopRequested = false
@@ -105,6 +108,36 @@ async function dropMtxPaths() {
   mtxPaths.clear()
 }
 
+// WebRTC viewers: a second mediamtx (the "viewer host") pulls each stream from the real one over WHEP, exactly as a browser
+// does, so the real mediamtx does the WebRTC work (DTLS/SRTP) it would do for people. The viewer host is our child process,
+// so its own CPU is counted with the generator and left out of the server's numbers; an ffmpeg reads each viewer for counting.
+let viewerHost = null
+async function ensureViewerHost() {
+  if (viewerHost) { if (viewerHost.exitCode !== null) throw new Error('the viewer host stopped: ' + tail(viewerHost.err)); return }
+  if (!fs.existsSync(MTX_BIN)) throw new Error(MTX_BIN + ' was not found')
+  const conf = path.join(OUT, 'viewer-host.yml')
+  fs.writeFileSync(conf, ['logLevel: warn', 'api: yes', 'apiAddress: 127.0.0.1:19997', 'rtsp: yes', 'rtspAddress: 127.0.0.1:18554', 'rtspTransports: [tcp]',
+    'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'paths:', '  all_others:', ''].join('\n'))
+  const p = spawn(MTX_BIN, [conf], { stdio: ['ignore', 'ignore', 'pipe'] })
+  p.err = ''; p.stderr.on('data', d => { p.err = (p.err + d).slice(-500) }); p.on('error', e => { p.err = e.message })
+  children.add(p); p.on('close', () => children.delete(p))
+  viewerHost = p
+  for (let i = 0; i < 20; i++) {
+    await sleep(500)
+    if (p.exitCode !== null) throw new Error('the viewer host would not start: ' + tail(p.err))
+    try { if ((await fetch(VIEW_API + '/v3/config/global/get', { signal: AbortSignal.timeout(1000) })).ok) return } catch { /* not up yet */ }
+  }
+  throw new Error('the viewer host did not come up')
+}
+async function ensureViewerPath(i) {
+  await ensureViewerHost()
+  const name = `viewer_CT-${i}`
+  const r = await fetch(`${VIEW_API}/v3/config/paths/add/${encodeURIComponent(name)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: `${MTX_WEBRTC.replace(/^http/, 'whep')}/captest_CT-${i}/whep`, sourceOnDemand: false }), signal: AbortSignal.timeout(3000) })
+  if (!r.ok && r.status !== 400) throw new Error('the viewer host refused the WebRTC source (' + r.status + '; is mediamtx new enough for WHEP sources?)')
+  return name
+}
+
 let sampleFile = ''
 const pubArgs = i => ['-hide_banner', '-loglevel', 'error', '-re', '-stream_loop', '-1', '-i', sampleFile, '-c', 'copy', '-f', 'mpegts', `srt://${RELAY}?streamid=publish:CT-${i}:${secret}&mode=caller&latency=150`]
 const srtReadArgs = i => ['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:2', '-nostats', '-i', `srt://${RELAY}?streamid=read:CT-${i}&mode=caller&latency=150`, '-c', 'copy', '-f', 'mpegts', 'pipe:1']
@@ -151,6 +184,10 @@ async function world() {
       if (kind === 'pub') return managed(`CT-${i}`, 'publisher', () => pubArgs(i), false)
       if (kind === 'srt') return managed(`CT-${i}`, 'srt reader', () => srtReadArgs(i), true)
       const name = await ensureMtxPath(i)
+      if (kind === 'whep') {
+        const v = await ensureViewerPath(i)
+        return managed(`CT-${i}`, 'webrtc viewer', () => ['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:2', '-nostats', '-rtsp_transport', 'tcp', '-i', `${VIEW_RTSP}/${v}`, '-c', 'copy', '-f', 'mpegts', 'pipe:1'], true)
+      }
       return managed(`CT-${i}`, 'rtsp reader', () => ['-hide_banner', '-loglevel', 'error', '-progress', 'pipe:2', '-nostats', '-rtsp_transport', 'tcp', '-i', `${MTX_RTSP}/${name}`, '-c', 'copy', '-f', 'mpegts', 'pipe:1'], true)
     },
     sample: async () => {
