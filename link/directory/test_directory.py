@@ -40,6 +40,19 @@ try:
     assert len(call("/v1/encoders")[1]["encoders"]) == 2
     time.sleep(2.0)                                              # past TTL, no heartbeat
     assert call("/v1/encoders")[1]["encoders"] == []
+    # Remote decoder control
+    st, r = call("/v1/decoder/heartbeat", {"id": "pc1-1", "name": "Truck decoder", "host": "pc1", "state": "live", "stream": "ESPN"})
+    assert st == 200 and r["want"] is None, (st, r)
+    assert call("/v1/decoder/heartbeat", {"name": "no id"})[0] == 400
+    assert call("/v1/decoder/want", {"id": "pc1-1", "stream": "CBS"}, key="wrong")[0] == 401
+    st, r = call("/v1/decoder/want", {"id": "pc1-1", "stream": "CBS"})
+    assert st == 200 and r["want"]["stream"] == "CBS"
+    seq = r["want"]["seq"]
+    st, r = call("/v1/decoder/heartbeat", {"id": "pc1-1", "name": "Truck decoder", "host": "pc1", "state": "live", "stream": "ESPN"})
+    assert r["want"] == {"stream": "CBS", "seq": seq}, r          # the decoder is told what to play
+    st, r = call("/v1/decoders")
+    assert st == 200 and len(r["decoders"]) == 1 and r["decoders"][0]["want"]["stream"] == "CBS", r
+    assert call("/v1/decoder/want", {"id": "pc1-1", "stream": ""})[1]["want"]["seq"] > seq   # "" = disconnect, newer request
     print("directory: all checks passed")
 finally:
     srv.terminate()

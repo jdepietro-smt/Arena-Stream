@@ -485,6 +485,7 @@ function DecoderPanel({ dec: d, index, all, outputs, outputNote, scanning, onSca
   const framesRef = useRef<Record<string, FrameData>>({})
   const audioCtx = useRef<AudioContext | null>(null)
   const nextPlay = useRef(0)
+  const remoteRef = useRef<(name: string) => void>(() => {})
   const monitor = useRef(d.monitorAudio)
   monitor.current = d.monitorAudio
 
@@ -507,6 +508,7 @@ function DecoderPanel({ dec: d, index, all, outputs, outputNote, scanning, onSca
         if (s.state === 'stopped') setRunning(false)
       }),
       link.onDecoderStats((id: string, s: DecStats) => { if (id === d.id) setStats(s) }),
+      link.onDecoderRemote((id: string, name: string) => { if (id === d.id) remoteRef.current(name) }),   // requested from the web portal
       link.onPreviewYuv((id: string, w: number, h: number, data: Uint8Array) => { if (id === d.id) framesRef.current.main = { w, h, data: new Uint8Array(data) } }),
       link.onPreviewAudio((id: string, rate: number, ch: number, data: Uint8Array) => { if (id === d.id && monitor.current) playPcm(rate, ch, data) }),
     ]
@@ -548,6 +550,7 @@ function DecoderPanel({ dec: d, index, all, outputs, outputNote, scanning, onSca
     const r = await link.decoderStart(d.id, name)
     if (r.ok) setRunning(true); else setMsg(r.error)
   }
+  remoteRef.current = connect
   async function disconnect() { await link.decoderStop(d.id); setRunning(false); setState({ state: 'stopped' }); setStats(null); delete framesRef.current.main }
   // Changing the output or a buffer restarts this decoder (and only this one).
   async function restartWith(patch: Partial<DecCfg>) {

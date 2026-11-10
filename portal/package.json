@@ -1,0 +1,10 @@
+{
+  "name": "arena-portal",
+  "version": "0.1.0",
+  "description": "Arena Portal: web links to watch live Arena Link streams, stream status, remote decoder control",
+  "main": "server.js",
+  "scripts": { "start": "node server.js", "test": "node --test" },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED",
+  "private": true
+}

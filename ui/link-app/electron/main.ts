@@ -7,6 +7,7 @@ import { spawn, ChildProcess } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as http from 'http'
+import * as os from 'os'
 
 // One instance only: a second launch would fight the first over the capture card and ports.
 const hasSingleLock = app.requestSingleInstanceLock()
@@ -31,7 +32,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname, '../dist/index.html'))
 }
 
-if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); createWindow() })
+if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); startDecoderBeat(); createWindow() })
 
 app.on('window-all-closed', () => {
   win = null
@@ -40,6 +41,7 @@ app.on('window-all-closed', () => {
   stopAllDecoders()
   stopMdnsWatch()
   if (pollTimer) clearInterval(pollTimer)
+  if (beatTimer) clearInterval(beatTimer)
   app.quit()
 })
 
@@ -662,6 +664,66 @@ function stopDecoder(id: string) {
 }
 
 function stopAllDecoders() { for (const id of [...decRuns.keys()]) stopDecoder(id) }
+
+// ── Remote control: each decoder reports to the directory every few seconds and is told which stream
+// someone (the web portal) wants it to play. The window applies the request the same way a click does.
+let beatTimer: NodeJS.Timeout | null = null
+const beatSeq = new Map<string, number>()    // last request number seen per decoder; the first reply after launch is only recorded
+const beatId = (localId: string) => `${os.hostname()}-${localId}`
+
+function postDirectory(directory: string, key: string, urlPath: string, payload: unknown): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let u: URL
+    try { u = new URL(directory.includes('://') ? directory : `http://${directory}`) } catch { reject(new Error('bad directory address')); return }
+    const body = Buffer.from(JSON.stringify(payload))
+    const req = http.request({
+      method: 'POST', host: u.hostname, port: Number(u.port) || 80, path: urlPath, agent: false, timeout: 2500,
+      headers: { 'X-Arena-Key': key, 'Content-Type': 'application/json', 'Content-Length': body.length },
+    }, (res) => {
+      let data = ''
+      res.on('data', (d) => { data += d })
+      res.on('end', () => { try { resolve(JSON.parse(data)) } catch { resolve(null) } })
+    })
+    req.on('timeout', () => req.destroy(new Error('timed out')))
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+function applyRemote(d: DecCfg, stream: string) {
+  d.selected = stream
+  try { fs.writeFileSync(configFile(), JSON.stringify(cfg(), null, 2)) } catch { /* settings stay in memory */ }
+  if (!stream) { stopDecoder(d.id); return }
+  if (decRuns.has(d.id)) { try { decRuns.get(d.id)?.stdin?.write(`select ${stream}\n`) } catch { /* closed */ } return }
+  const r = startDecoder(d.id, stream)
+  if (!r.ok) send('log', `[decoder] remote request failed: ${r.error}`)
+}
+
+function startDecoderBeat() {
+  const tick = async () => {
+    const c = cfg()
+    if (!c.directory || !c.key) return
+    for (const [i, d] of c.decs.entries()) {
+      const running = decRuns.has(d.id)
+      const ls = decLast.get(d.id) as { state?: string; encoder?: string } | undefined
+      try {
+        const r = await postDirectory(c.directory, c.key, '/v1/decoder/heartbeat', {
+          id: beatId(d.id), name: `${os.hostname()} decoder ${i + 1}`, host: os.hostname(),
+          state: running ? (ls?.state ?? 'connecting') : 'stopped', stream: running ? (ls?.encoder || d.selected) : '',
+        })
+        const w = r?.want as { stream: string; seq: number } | null | undefined
+        if (!w) continue
+        const prev = beatSeq.get(d.id)
+        beatSeq.set(d.id, w.seq)
+        if (prev === undefined || w.seq <= prev) continue
+        send('log', `[decoder ${i + 1}] remote request: ${w.stream ? 'play ' + w.stream : 'disconnect'}`)
+        if (c.mode === 'decoder') send('decoder-remote', d.id, w.stream)   // the window applies it like a click
+        else applyRemote(d, w.stream)                                      // window is on the encoder side: do it here
+      } catch { /* directory unreachable: try again next time */ }
+    }
+  }
+  beatTimer = setInterval(() => { void tick() }, 4000)
+}
 
 ipcMain.handle('decoder-start', (_, id: string, select: string) => startDecoder(id, select))
 ipcMain.handle('decoder-select', (_, id: string, name: string) => {

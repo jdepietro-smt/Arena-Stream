@@ -237,6 +237,9 @@ server {
         proxy_read_timeout 1h;
     }
 
+    # Arena Portal (web links, status, decoder control), when installed: portal/deploy/install.sh
+    include /etc/nginx/snippets/arena-portal*.conf;
+
     # Everything else is the existing dashboard, with the Comms tab injected into its pages.
     location / {
         proxy_pass $DASHBOARD;

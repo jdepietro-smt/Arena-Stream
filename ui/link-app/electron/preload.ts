@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('link', {
   onEncoderExit:   on('encoder-exit'),
   onDecoderState:  on('decoder-state'),
   onDecoderStats:  on('decoder-stats'),
+  onDecoderRemote: on('decoder-remote'),
   onPreviewYuv:    on('preview-yuv'),
   onPreviewAudio:  on('preview-audio'),
 })

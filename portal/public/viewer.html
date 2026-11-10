@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root{--bg:#06070a;--text:#e6e9ee;--mut:#8b93a0;--acc:#ffb938}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+body{display:flex;flex-direction:column}
+header{padding:10px 16px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #1d2128}
+header b{letter-spacing:.14em;font-size:12px;text-transform:uppercase;color:var(--acc)}header span{color:var(--mut)}
+.stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;min-height:0;background:#000}
+video{max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;background:#000}
+.msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:var(--mut);background:rgba(0,0,0,.6);font-size:16px}
+.msg.hide{display:none}.msg.sound{background:transparent;align-items:flex-end;pointer-events:none}.msg.sound button{pointer-events:auto}
+button{background:var(--acc);border:0;color:#1a1205;font:inherit;font-weight:600;padding:10px 20px;border-radius:6px;cursor:pointer}
+.live{display:inline-block;width:9px;height:9px;border-radius:50%;background:#555}.live.on{background:#34d058;box-shadow:0 0 8px #34d058}
+</style></head><body>
+<header><b>Live</b><span id="title">{{TITLE}}</span><span style="flex:1"></span><span id="info"></span><i class="live" id="led"></i></header>
+<div class="stage" id="cfg" data-ice="{{ICE}}">
+<video id="v" autoplay playsinline muted></video>
+<div class="msg" id="msg">Connecting...</div>
+</div>
+<script>
+const ID = '{{ID}}'
+const ICE = JSON.parse(document.getElementById('cfg').dataset.ice)
+const v = document.getElementById('v'), msg = document.getElementById('msg'), led = document.getElementById('led'), info = document.getElementById('info')
+let pc = null, sessionUrl = null, starting = false, lastBytes = 0, lastT = 0
+
+function say(t) { msg.className = 'msg'; msg.replaceChildren(document.createTextNode(t)) }
+function hideMsg() { msg.className = 'msg hide' }
+
+async function stop() {
+  if (sessionUrl) { fetch(sessionUrl, { method: 'DELETE' }).catch(() => {}); sessionUrl = null }
+  if (pc) { try { pc.close() } catch (e) {} pc = null }
+  led.classList.remove('on'); v.srcObject = null
+}
+
+async function start() {
+  if (starting || pc) return
+  starting = true
+  try {
+    pc = new RTCPeerConnection({ iceServers: ICE })
+    pc.addTransceiver('video', { direction: 'recvonly' }); pc.addTransceiver('audio', { direction: 'recvonly' })
+    pc.ontrack = e => { v.srcObject = e.streams[0] }
+    pc.onconnectionstatechange = () => {
+      if (!pc) return
+      if (pc.connectionState === 'connected') { hideMsg(); led.classList.add('on') }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') { stop(); say('Connection lost. Reconnecting...') }
+    }
+    await pc.setLocalDescription(await pc.createOffer())
+    await new Promise(r => { if (pc.iceGatheringState === 'complete') return r(); pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 2500) })
+    const r = await fetch('/w/' + ID + '/whep', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp })
+    if (r.status !== 201) { const j = await r.json().catch(() => ({})); throw new Error(j.error || 'not available') }
+    sessionUrl = r.headers.get('Location')
+    await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() })
+  } catch (e) { await stop(); say(e.message === 'Failed to fetch' ? 'Connection problem. Retrying...' : String(e.message)) }
+  starting = false
+}
+
+v.addEventListener('playing', () => {
+  if (!v.muted) return
+  msg.className = 'msg sound'
+  const b = document.createElement('button'); b.textContent = 'Tap for sound'
+  b.onclick = () => { v.muted = false; v.play(); hideMsg() }
+  msg.replaceChildren(b)
+})
+
+async function poll() {
+  try {
+    const r = await fetch('/w/' + ID + '/state')
+    if (r.status === 410 || r.status === 401) return location.reload()
+    const j = await r.json()
+    if (j.state === 'live') { if (!pc) { say('Connecting...'); start() } }
+    else { await stop(); say(j.state === 'unsupported' ? 'This stream cannot be shown in a browser.' : 'The stream is not live right now. This page reconnects by itself.') }
+  } catch (e) { /* network blip: try again next time */ }
+}
+setInterval(poll, 3000); poll()
+
+setInterval(async () => {
+  if (!pc || pc.connectionState !== 'connected') { info.textContent = ''; return }
+  const st = await pc.getStats(); let w = 0, h = 0, bytes = 0
+  st.forEach(s => { if (s.type === 'inbound-rtp' && s.kind === 'video') { w = s.frameWidth || 0; h = s.frameHeight || 0; bytes = s.bytesReceived || 0 } })
+  const now = performance.now(); const kbps = lastT ? Math.round((bytes - lastBytes) * 8 / (now - lastT)) : 0
+  lastBytes = bytes; lastT = now
+  info.textContent = w ? w + 'x' + h + '  ' + kbps + ' kbps' : ''
+}, 2000)
+</script></body></html>

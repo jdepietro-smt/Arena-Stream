@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Arena Portal</title>
+<style>
+:root{--bg:#0d0f13;--panel:#161a21;--edge:#2a303a;--text:#e6e9ee;--mut:#8b93a0;--acc:#ffb938;--ok:#34d058;--bad:#ff5b50}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 "Segoe UI",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:1px solid var(--edge)}
+h1{font-size:15px;letter-spacing:.14em;margin:0;font-weight:600;text-transform:uppercase}
+nav{display:flex;gap:6px;margin-left:12px}nav button{background:none;border:1px solid var(--edge);color:var(--mut);padding:6px 14px;border-radius:6px;cursor:pointer;font:inherit}
+nav button.on{background:var(--acc);border-color:var(--acc);color:#1a1205;font-weight:600}
+.sp{flex:1}main{padding:20px;max-width:1100px;margin:0 auto}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--edge);vertical-align:middle}th{color:var(--mut);font-weight:500;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+tr:last-child td{border-bottom:0}
+button.b,select,input{background:#1d222b;border:1px solid var(--edge);color:var(--text);border-radius:6px;padding:6px 12px;font:inherit}
+button.b{cursor:pointer}button.b:hover{border-color:var(--acc)}button.b.pri{background:var(--acc);border-color:var(--acc);color:#1a1205;font-weight:600}
+button.b:disabled{opacity:.45;cursor:default}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;background:#232832;color:var(--mut)}
+.chip.ok{background:rgba(52,208,88,.15);color:var(--ok)}.chip.bad{background:rgba(255,91,80,.15);color:var(--bad)}.chip.warn{background:rgba(255,185,56,.15);color:var(--acc)}
+.empty{color:var(--mut);padding:24px;text-align:center}
+.card{background:var(--panel);border:1px solid var(--edge);border-radius:10px;padding:20px;max-width:340px;margin:12vh auto;display:flex;flex-direction:column;gap:12px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:5}
+.modal .card{margin:0;max-width:440px;width:92vw}label{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12px}
+.row{display:flex;gap:8px;align-items:center}.row>*{min-width:0}.url{flex:1;font-family:Consolas,monospace;font-size:12px}
+.err{color:var(--bad);font-size:13px;min-height:1.2em}.hint{color:var(--mut);font-size:12px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.1em;color:var(--mut);text-transform:uppercase;font-weight:600}
+</style></head><body>
+<div id="app"></div>
+<script>
+const $app = document.getElementById('app')
+const el = (tag, props = {}, ...kids) => {
+  const n = document.createElement(tag)
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') n.className = v
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v)
+    else if (v !== false && v != null) n.setAttribute(k, v === true ? '' : v)
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(String(c)))
+  return n
+}
+async function api(path, method = 'GET', body) {
+  const r = await fetch('/portal/api' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+  const j = await r.json().catch(() => ({}))
+  if (r.status === 401 && path !== '/login') { showLogin(); throw new Error('signed out') }
+  if (!r.ok) throw new Error(j.error || r.statusText)
+  return j
+}
+const fmtTime = t => t ? new Date(t).toLocaleString() : 'never'
+let publicBase = ''
+const linkUrl = id => (publicBase || location.origin) + '/w/' + id
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text) } catch { const t = el('textarea'); t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove() }
+  const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = o), 1200)
+}
+
+let tab = 'streams', timer = null, streams = [], links = [], decoders = []
+
+function showLogin() {
+  clearInterval(timer)
+  const err = el('div', { class: 'err' })
+  const pw = el('input', { type: 'password', placeholder: 'Password', autofocus: true })
+  const go = async () => { try { await api('/login', 'POST', { password: pw.value }); publicBase = (await api('/me')).publicBase || ''; start() } catch (e) { err.textContent = e.message } }
+  pw.addEventListener('keydown', e => e.key === 'Enter' && go())
+  $app.replaceChildren(el('div', { class: 'card' }, el('h1', {}, 'Arena Portal'), pw, el('button', { class: 'b pri', onclick: go }, 'Sign in'), err))
+  pw.focus()
+}
+
+function shell(content) {
+  const tabs = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders']]
+  return [
+    el('header', {}, el('h1', {}, 'Arena Portal'),
+      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; refresh() } }, t))),
+      el('div', { class: 'sp' }),
+      el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
+    el('main', {}, content),
+  ]
+}
+
+function streamsView() {
+  if (!streams.length) return el('div', { class: 'empty' }, 'No encoders are on air.')
+  return el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'Format', 'Codec', 'Bitrate', 'Web viewers', 'Links', ''].map(h => el('th', {}, h)))),
+    el('tbody', {}, streams.map(s => el('tr', {},
+      el('td', {}, s.name), el('td', {}, s.format || '-'), el('td', {}, s.codec || '-'),
+      el('td', {}, s.kbps ? (s.kbps / 1000).toFixed(1) + ' Mbps' : '-'),
+      el('td', {}, String(s.webViewers)), el('td', {}, String(s.links)),
+      el('td', {}, !s.canShare ? el('span', { class: 'chip warn', title: 'Turn on "Internet viewers" for this stream in the Arena Link app' }, 'Not on relay')
+        : !s.browserOk ? el('span', { class: 'chip warn', title: 'Browsers cannot play H.265. Use H.264 in the encoder.' }, 'H.265: no browser')
+        : el('button', { class: 'b pri', onclick: () => newLinkDialog(s.name) }, 'Create web link'))))))
+}
+
+function linksView() {
+  if (!links.length) return el('div', { class: 'empty' }, 'No links yet. Create one from the Streams tab.')
+  return el('table', {}, el('thead', {}, el('tr', {}, ['Link', 'Stream', 'Status', 'Expires', 'Views', ''].map(h => el('th', {}, h)))),
+    el('tbody', {}, links.map(l => {
+      const cls = l.state === 'active' ? 'ok' : 'bad'
+      return el('tr', {},
+        el('td', {}, l.label || '(no label)', l.hasPassword ? el('span', { class: 'hint' }, '  password') : null),
+        el('td', {}, l.stream), el('td', {}, el('span', { class: 'chip ' + cls }, l.state)), el('td', {}, fmtTime(l.expiresAt)), el('td', {}, String(l.views)),
+        el('td', {}, l.state === 'active' ? el('div', { class: 'row' },
+          el('button', { class: 'b', onclick: e => copy(linkUrl(l.id), e.target) }, 'Copy link'),
+          el('button', { class: 'b', onclick: async () => { if (confirm('Revoke this link? Anyone using it is cut off.')) { await api('/links/' + l.id, 'DELETE'); refresh() } } }, 'Revoke')) : null))
+    })))
+}
+
+const dChoice = {}
+function decodersView() {
+  if (!decoders.length) return el('div', { class: 'empty' }, 'No decoders are reporting. Open the Arena Link app on a decoder PC (update it to this version first).')
+  const live = streams.map(s => s.name)
+  return el('table', {}, el('thead', {}, el('tr', {}, ['Decoder', 'PC', 'Status', 'Playing', 'Play this stream', ''].map(h => el('th', {}, h)))),
+    el('tbody', {}, decoders.map(d => {
+      const sel = el('select', {}, el('option', { value: '' }, 'Disconnect'),
+        [...new Set([...live, d.stream].filter(Boolean))].map(n => el('option', { value: n, selected: (dChoice[d.id] ?? d.stream) === n }, n)))
+      sel.addEventListener('change', () => { dChoice[d.id] = sel.value })
+      if (dChoice[d.id] === undefined && !d.stream) sel.value = ''
+      const pending = d.want && d.want.stream !== d.stream
+      return el('tr', {},
+        el('td', {}, d.name), el('td', {}, d.host || '-'),
+        el('td', {}, el('span', { class: 'chip ' + (d.state === 'live' ? 'ok' : '') }, d.state || '-')),
+        el('td', {}, d.stream || '-'),
+        el('td', {}, sel),
+        el('td', {}, el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { await api('/decoders/' + encodeURIComponent(d.id) + '/want', 'POST', { stream: sel.value }); delete dChoice[d.id]; refresh() } }, 'Apply'),
+          pending ? el('span', { class: 'chip warn' }, 'waiting for decoder') : null)))
+    })))
+}
+
+function newLinkDialog(stream) {
+  const label = el('input', { type: 'text', placeholder: 'For example: Client preview' })
+  const exp = el('select', {}, [['60', '1 hour'], ['240', '4 hours'], ['1440', '1 day'], ['10080', '7 days'], ['43200', '30 days'], ['0', 'No expiry']].map(([v, t], i) => el('option', { value: v, selected: i === 2 }, t)))
+  const pw = el('input', { type: 'text', placeholder: 'Optional password', autocomplete: 'off' })
+  const err = el('div', { class: 'err' })
+  const out = el('div')
+  const close = () => dlg.remove()
+  const make = async () => {
+    err.textContent = ''
+    try {
+      const { link } = await api('/links', 'POST', { stream, label: label.value, expiresInMin: Number(exp.value), password: pw.value })
+      const url = el('input', { type: 'text', class: 'url', readonly: true, value: linkUrl(link.id) })
+      const cb = el('button', { class: 'b pri', onclick: e => copy(url.value, e.target) }, 'Copy')
+      out.replaceChildren(el('div', { class: 'row' }, url, cb), el('div', { class: 'hint' }, 'Send this to the viewer. It works in any browser.'))
+      refresh()
+    } catch (e) { err.textContent = e.message }
+  }
+  const dlg = el('div', { class: 'modal', onclick: e => e.target === dlg && close() }, el('div', { class: 'card' },
+    el('h2', {}, 'New web link: ' + stream),
+    el('label', {}, 'Label', label), el('label', {}, 'Expires', exp), el('label', {}, 'Password', pw), err, out,
+    el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: make }, 'Create link'), el('button', { class: 'b', onclick: close }, 'Close'))))
+  document.body.append(dlg)
+  label.focus()
+}
+
+async function refresh() {
+  try {
+    const [s, l, d] = await Promise.all([api('/streams'), api('/links'), tab === 'decoders' ? api('/decoders').catch(() => ({ decoders: [] })) : Promise.resolve({ decoders })])
+    streams = s.streams; links = l.links; decoders = d.decoders
+  } catch (e) { if (e.message === 'signed out') return }
+  if (document.querySelector('.modal') && tab !== 'streams') return
+  if (document.activeElement && document.activeElement.tagName === 'SELECT') return   // do not close an open dropdown
+  $app.replaceChildren(...shell(tab === 'streams' ? streamsView() : tab === 'links' ? linksView() : decodersView()))
+}
+function start() { refresh(); clearInterval(timer); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal')) refresh() }, 2500) }
+api('/me').then(m => { publicBase = m.publicBase || ''; start() }).catch(() => showLogin())
+</script></body></html>

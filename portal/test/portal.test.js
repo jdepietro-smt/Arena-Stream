@@ -1,0 +1,195 @@
+'use strict'
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const http = require('node:http')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const { createPortal } = require('../server')
+
+const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(srv.address().port)))
+
+async function setup() {
+  const calls = { want: [], mtx: [], whep: [] }
+  let encoders = [
+    { id: 'e1', name: 'ESPN 1', format: '1920x1080i@59.94', codec: 'h264_nvenc', kbps: 10000, ageMs: 100, relay: { host: 'h', port: 8895, name: 'ESPN-1' } },
+    { id: 'e2', name: 'Cam HEVC', codec: 'hevc_nvenc', kbps: 8000, ageMs: 50, relay: { host: 'h', port: 8895, name: 'Cam-HEVC' } },
+    { id: 'e3', name: 'LAN only', codec: 'h264_nvenc', kbps: 5000, ageMs: 50, relay: null },
+  ]
+  const dirSrv = http.createServer((req, res) => {
+    if (req.headers['x-arena-key'] !== 'k') { res.writeHead(401); return res.end('{}') }
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json')
+      if (req.url === '/v1/encoders') return res.end(JSON.stringify({ encoders }))
+      if (req.url === '/v1/decoders') return res.end(JSON.stringify({ decoders: [{ id: 'pc-1', name: 'Truck', state: 'live', stream: 'ESPN 1', want: null }] }))
+      if (req.url === '/v1/decoder/want') { calls.want.push(JSON.parse(b)); return res.end(JSON.stringify({ ok: true })) }
+      res.writeHead(404); res.end('{}')
+    })
+  })
+  const mtxSrv = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      calls.mtx.push({ m: req.method, u: req.url, b })
+      if (req.url.startsWith('/v3/paths/list')) { res.setHeader('Content-Type', 'application/json'); return res.end(JSON.stringify({ items: [{ name: 'x', readers: [1, 2] }] })) }
+      if (req.url.startsWith('/v3/config/paths/add/')) { res.setHeader('Content-Type', 'application/json'); return res.end('{}') }
+      res.writeHead(404); res.end()
+    })
+  })
+  const whepSrv = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      calls.whep.push({ m: req.method, u: req.url, b })
+      if (req.method === 'POST' && req.url.endsWith('/whep')) { res.writeHead(201, { 'Content-Type': 'application/sdp', Location: req.url + '/sess-123' }); return res.end('ANSWER-SDP') }
+      res.writeHead(204); res.end()
+    })
+  })
+  const [dp, mp, wp] = await Promise.all([listen(dirSrv), listen(mtxSrv), listen(whepSrv)])
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-'))
+  const { server, store, pathName } = createPortal({
+    port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
+    mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir,
+  })
+  const port = await listen(server)
+  const base = `http://127.0.0.1:${port}`
+  let cookie = ''
+  const call = async (p, { method = 'GET', body, headers = {}, raw = false, useCookie = true } = {}) => {
+    const r = await fetch(base + p, {
+      method, redirect: 'manual',
+      headers: { ...(body && !raw ? { 'Content-Type': 'application/json' } : {}), ...(useCookie && cookie ? { Cookie: cookie } : {}), ...headers },
+      body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
+    })
+    const sc = r.headers.get('set-cookie'); if (sc && useCookie) cookie = sc.split(';')[0]
+    const ct = r.headers.get('content-type') || ''
+    return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
+  }
+  const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
+  return { call, calls, close, setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { cookie = '' } }
+}
+
+test('admin api needs a login; wrong password is refused', async () => {
+  const t = await setup()
+  try {
+    assert.equal((await t.call('/portal/api/streams')).status, 401)
+    assert.equal((await t.call('/portal/api/login', { method: 'POST', body: { password: 'nope' } })).status, 401)
+    assert.equal((await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })).status, 200)
+    assert.equal((await t.call('/portal/api/me')).status, 200)
+    const plain = await t.call('/portal/', { headers: { 'X-Forwarded-Proto': 'http' }, useCookie: false })
+    assert.equal(plain.status, 301); assert.match(plain.headers.get('location'), /^https:\/\/127\.0\.0\.1:\d+\/portal\/$/)   // admin never over plain http
+    assert.equal((await t.call('/w/zzzzzzzzzz', { headers: { 'X-Forwarded-Proto': 'http' }, useCookie: false })).status, 410)   // viewer links work over http
+    assert.equal((await t.call('/portal/api/logout', { method: 'POST' })).status, 200)
+  } finally { await t.close() }
+})
+
+test('login is throttled after repeated failures', async () => {
+  const t = await setup()
+  try {
+    let last
+    for (let i = 0; i < 10; i++) last = await t.call('/portal/api/login', { method: 'POST', body: { password: 'bad' + i }, useCookie: false })
+    assert.equal(last.status, 429)
+  } finally { await t.close() }
+})
+
+test('streams list shows relay and browser capability and web viewers', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const { body } = await t.call('/portal/api/streams')
+    const by = n => body.streams.find(s => s.name === n)
+    assert.equal(by('ESPN 1').canShare, true); assert.equal(by('ESPN 1').browserOk, true)
+    assert.equal(by('Cam HEVC').browserOk, false)
+    assert.equal(by('LAN only').canShare, false)
+  } finally { await t.close() }
+})
+
+test('link lifecycle: create, view page, whep, revoke', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const c = await t.call('/portal/api/links', { method: 'POST', body: { stream: 'ESPN 1', label: 'Client', expiresInMin: 60 } })
+    assert.equal(c.status, 200)
+    const id = c.body.link.id
+    t.resetCookie()   // a viewer has no admin cookie
+    const page = await t.call(`/w/${id}`, { useCookie: false })
+    assert.equal(page.status, 200); assert.match(page.body, /RTCPeerConnection/); assert.match(page.body, new RegExp(`'${id}'`))
+    assert.deepEqual((await t.call(`/w/${id}/state`, { useCookie: false })).body.state, 'live')
+
+    const w = await t.call(`/w/${id}/whep`, { method: 'POST', raw: true, body: 'OFFER-SDP', headers: { 'Content-Type': 'application/sdp' }, useCookie: false })
+    assert.equal(w.status, 201); assert.equal(w.body, 'ANSWER-SDP'); assert.equal(w.headers.get('location'), `/w/${id}/whep/sess-123`)
+    const add = t.calls.mtx.find(x => x.u.startsWith('/v3/config/paths/add/'))
+    assert.ok(add, 'path created in mediamtx')
+    assert.match(add.u, /portal_ESPN-1_[0-9a-f]{10}$/)
+    assert.match(JSON.parse(add.b).source, /^srt:\/\/127\.0\.0\.1:8895\?streamid=read:ESPN-1&mode=caller&latency=150$/)
+    assert.equal(t.calls.whep[0].b, 'OFFER-SDP')
+    assert.equal((await t.call(`/w/${id}/whep/sess-123`, { method: 'DELETE', useCookie: false })).status, 204)
+
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const list = await t.call('/portal/api/links')
+    assert.equal(list.body.links[0].views, 1)
+    assert.equal((await t.call(`/portal/api/links/${id}`, { method: 'DELETE' })).body.link.state, 'revoked')
+    t.resetCookie()
+    assert.equal((await t.call(`/w/${id}`, { useCookie: false })).status, 410)
+    assert.equal((await t.call(`/w/${id}/whep`, { method: 'POST', raw: true, body: 'x', useCookie: false })).status, 410)
+  } finally { await t.close() }
+})
+
+test('expired links are closed; unknown ids are closed', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const id = (await t.call('/portal/api/links', { method: 'POST', body: { stream: 'ESPN 1', expiresInMin: 5 } })).body.link.id
+    const l = t.store.link(id); l.expiresAt = Date.now() - 1000; t.store.putLink(l)
+    t.resetCookie()
+    const r = await t.call(`/w/${id}`, { useCookie: false })
+    assert.equal(r.status, 410); assert.match(r.body, /expired/)
+    assert.equal((await t.call('/w/zzzzzzzzzz', { useCookie: false })).status, 410)
+  } finally { await t.close() }
+})
+
+test('password-protected link needs the password before anything plays', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const id = (await t.call('/portal/api/links', { method: 'POST', body: { stream: 'ESPN 1', password: 'sesame' } })).body.link.id
+    t.resetCookie()
+    const gate = await t.call(`/w/${id}`, { useCookie: false })
+    assert.match(gate.body, /Enter the password/)
+    assert.equal((await t.call(`/w/${id}/whep`, { method: 'POST', raw: true, body: 'x', useCookie: false })).status, 401)
+    assert.equal((await t.call(`/w/${id}/auth`, { method: 'POST', body: { password: 'wrong' }, useCookie: false })).status, 401)
+    const ok = await t.call(`/w/${id}/auth`, { method: 'POST', body: { password: 'sesame' } })   // keeps the cookie
+    assert.equal(ok.status, 200)
+    assert.match((await t.call(`/w/${id}`)).body, /RTCPeerConnection/)
+    assert.equal((await t.call(`/w/${id}/whep`, { method: 'POST', raw: true, body: 'OFFER', headers: { 'Content-Type': 'application/sdp' } })).status, 201)
+  } finally { await t.close() }
+})
+
+test('H.265 and offline streams cannot be opened in a browser', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const hevc = (await t.call('/portal/api/links', { method: 'POST', body: { stream: 'Cam HEVC' } })).body.link.id
+    const gone = (await t.call('/portal/api/links', { method: 'POST', body: { stream: 'Not on air' } })).body.link.id
+    t.resetCookie()
+    assert.equal((await t.call(`/w/${hevc}/state`, { useCookie: false })).body.state, 'unsupported')
+    assert.equal((await t.call(`/w/${hevc}/whep`, { method: 'POST', raw: true, body: 'x', useCookie: false })).status, 415)
+    assert.equal((await t.call(`/w/${gone}/state`, { useCookie: false })).body.state, 'offline')
+    assert.equal((await t.call(`/w/${gone}/whep`, { method: 'POST', raw: true, body: 'x', useCookie: false })).status, 404)
+  } finally { await t.close() }
+})
+
+test('decoder control passes through to the directory', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    assert.equal((await t.call('/portal/api/decoders')).body.decoders[0].name, 'Truck')
+    assert.equal((await t.call('/portal/api/decoders/pc-1/want', { method: 'POST', body: { stream: 'ESPN 1' } })).status, 200)
+    assert.deepEqual(t.calls.want[0], { id: 'pc-1', stream: 'ESPN 1' })
+    assert.equal((await t.call('/portal/api/decoders/pc-1/want', { method: 'POST', body: {} })).status, 400)
+  } finally { await t.close() }
+})
+
+test('state-changing admin calls from another origin are refused', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const r = await t.call('/portal/api/links', { method: 'POST', body: { stream: 'ESPN 1' }, headers: { Origin: 'https://evil.example' } })
+    assert.equal(r.status, 403)
+  } finally { await t.close() }
+})
