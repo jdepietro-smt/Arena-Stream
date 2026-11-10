@@ -84,7 +84,7 @@ struct Args {
                                             // for TVs that treat SDI as full range and so look washed out
     int         white_pct = 100;           // peak white as a % of the range: below 100 rolls the highlights
                                             // down (for a TV that renders whites too hot)
-    uint32_t    preview_width = 640;       // monitor picture width sent to the app (smaller = far less data)
+    uint32_t    preview_width = 960;       // monitor picture width sent to the app (smaller = far less data)
     int         preview_fps = 0;           // monitor picture rate cap; 0 = the stream's own rate
 };
 
