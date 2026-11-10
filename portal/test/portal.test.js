@@ -5,12 +5,15 @@ const http = require('node:http')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { EventEmitter } = require('node:events')
 const { createPortal } = require('../server')
+const { createThumbs } = require('../lib/thumbs')
 
 const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(srv.address().port)))
 
 async function setup() {
-  const calls = { want: [], mtx: [], whep: [] }
+  const calls = { want: [], mtx: [], whep: [], ffmpeg: [], killed: 0 }
+  let ffmpegWrites = true
   let encoders = [
     { id: 'e1', name: 'ESPN 1', format: '1920x1080i@59.94', codec: 'h264_nvenc', kbps: 10000, ageMs: 100, relay: { host: 'h', port: 8895, name: 'ESPN-1' } },
     { id: 'e2', name: 'Cam HEVC', codec: 'hevc_nvenc', kbps: 8000, ageMs: 50, relay: { host: 'h', port: 8895, name: 'Cam-HEVC' } },
@@ -37,13 +40,22 @@ async function setup() {
   const whepSrv = http.createServer((req, res) => {
     let b = ''; req.on('data', c => b += c); req.on('end', () => {
       calls.whep.push({ m: req.method, u: req.url, b })
-      if (req.method === 'POST' && req.url.endsWith('/whep')) { res.writeHead(201, { 'Content-Type': 'application/sdp', Location: req.url + '/sess-123' }); return res.end('ANSWER-SDP') }
+      if (req.method === 'POST' && req.url.endsWith('/whep')) { res.writeHead(201, { 'Content-Type': 'application/sdp', Location: req.url + '/' + (b.startsWith('OFFER:') ? b.slice(6) : 'sess-123') }); return res.end('ANSWER-SDP') }
       res.writeHead(204); res.end()
     })
   })
   const [dp, mp, wp] = await Promise.all([listen(dirSrv), listen(mtxSrv), listen(whepSrv)])
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-'))
-  const { server, store, pathName } = createPortal({
+  // A stand-in for ffmpeg: records how it was started and writes a picture where it was told to.
+  const fakeSpawn = (bin, args) => {
+    const p = new EventEmitter(); p.stderr = new EventEmitter()
+    p.kill = () => { calls.killed++; p.emit('close') }
+    calls.ffmpeg.push({ bin, args })
+    if (ffmpegWrites) setTimeout(() => fs.writeFileSync(args[args.length - 1], Buffer.from('JPEGDATA')), 20)
+    return p
+  }
+  const { server, store, pathName, thumbs } = createPortal({
+    spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
     mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir,
   })
@@ -61,7 +73,7 @@ async function setup() {
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
   const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { cookie = '' } }
+  return { call, calls, close, thumbs, setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { cookie = '' } }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -191,5 +203,64 @@ test('state-changing admin calls from another origin are refused', async () => {
     await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
     const r = await t.call('/portal/api/links', { method: 'POST', body: { stream: 'ESPN 1' }, headers: { Origin: 'https://evil.example' } })
     assert.equal(r.status, 403)
+  } finally { await t.close() }
+})
+
+test('thumbnails: the picture worker starts on request, serves the picture, and only for streams a browser can show', async () => {
+  const t = await setup()
+  try {
+    assert.equal((await t.call('/portal/api/thumb/e1')).status, 401)
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    assert.equal((await t.call('/portal/api/thumb/e1')).status, 204)            // starts the worker, no picture yet
+    assert.equal(t.calls.ffmpeg.length, 1)
+    const a = t.calls.ffmpeg[0].args
+    assert.equal(t.calls.ffmpeg[0].bin, 'ffmpeg-test')
+    assert.ok(a.includes('nokey'), 'decodes key frames only')
+    assert.ok(a.some(x => /^srt:\/\/127\.0\.0\.1:8895\?streamid=read:ESPN-1&mode=caller/.test(x)))
+    await new Promise(r => setTimeout(r, 80))
+    const got = await t.call('/portal/api/thumb/e1')
+    assert.equal(got.status, 200); assert.equal(got.headers.get('content-type'), 'image/jpeg'); assert.equal(got.body, 'JPEGDATA')
+    assert.equal(t.calls.ffmpeg.length, 1, 'one worker per stream, not one per request')
+    assert.equal((await t.call('/portal/api/thumb/e2')).status, 204)            // H.265
+    assert.equal((await t.call('/portal/api/thumb/e3')).status, 204)            // not on the relay
+    assert.equal((await t.call('/portal/api/thumb/nope')).status, 204)
+    assert.equal(t.calls.ffmpeg.length, 1)
+  } finally { await t.close() }
+})
+
+test('thumbnail workers stop when nobody asks and when the portal closes', async () => {
+  const spawned = []; let killed = 0
+  const fake = (bin, args) => { const p = new EventEmitter(); p.stderr = new EventEmitter(); p.kill = () => { killed++; p.emit('close') }; spawned.push(args); return p }
+  const th = createThumbs({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'th-')), relaySrt: 'h:1', idleMs: 40, spawn: fake })
+  th.want('A'); th.want('B')
+  assert.equal(th.active(), 2)
+  await new Promise(r => setTimeout(r, 5200))        // the sweep runs every 5 s
+  assert.equal(th.active(), 0); assert.equal(killed, 2)
+  th.want('C'); th.stopAll()
+  assert.equal(killed, 3)
+})
+
+test('admin live preview: sessions are limited and freed', async () => {
+  const t = await setup()
+  try {
+    await t.call('/portal/api/login', { method: 'POST', body: { password: 'adminpw' } })
+    const offer = { method: 'POST', raw: true, body: 'OFFER', headers: { 'Content-Type': 'application/sdp' } }
+    const first = await t.call('/portal/api/whep/e1', offer)
+    assert.equal(first.status, 201); assert.equal(first.body, 'ANSWER-SDP'); assert.equal(first.headers.get('location'), '/portal/api/whep/e1/sess-123')
+    assert.match(t.calls.mtx.find(x => x.u.startsWith('/v3/config/paths/add/')).u, /portal_ESPN-1_/)
+    assert.equal((await t.call('/portal/api/whep/e1', offer)).status, 201)   // same fake session id, still counted once
+    assert.equal((await t.call('/portal/api/whep/e2', offer)).status, 415)   // H.265
+    assert.equal((await t.call('/portal/api/whep/e3', offer)).status, 409)   // not on the relay
+    assert.equal((await t.call('/portal/api/whep/zzz', offer)).status, 404)
+    assert.equal((await t.call('/portal/api/whep/e1/sess-123', { method: 'DELETE' })).status, 204)
+    const mk = id => ({ method: 'POST', raw: true, body: 'OFFER:' + id, headers: { 'Content-Type': 'application/sdp' } })
+    assert.equal((await t.call('/portal/api/whep/e1', mk('a'))).status, 201)
+    assert.equal((await t.call('/portal/api/whep/e1', mk('b'))).status, 201)
+    assert.equal((await t.call('/portal/api/whep/e1', mk('c'))).status, 201)
+    assert.equal((await t.call('/portal/api/whep/e1', mk('d'))).status, 429)   // three at a time
+    assert.equal((await t.call('/portal/api/whep/e1/a', { method: 'DELETE' })).status, 204)
+    assert.equal((await t.call('/portal/api/whep/e1', mk('d'))).status, 201)   // a slot is free again
+    t.resetCookie()
+    assert.equal((await t.call('/portal/api/whep/e1', offer)).status, 401)   // admin only
   } finally { await t.close() }
 })

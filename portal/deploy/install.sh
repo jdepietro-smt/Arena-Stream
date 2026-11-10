@@ -30,6 +30,10 @@ if ! bash "$REPO/link/directory/install.sh" >/tmp/arena-dir-install.log 2>&1; th
 fi
 systemctl is-active --quiet arena-link-directory && echo "directory running"
 
+step "ffmpeg (thumbnails)"
+command -v ffmpeg >/dev/null || { apt-get update -qq; apt-get install -y -qq ffmpeg >/dev/null; }
+ffmpeg -hide_banner -protocols 2>/dev/null | grep -qw srt && echo "ffmpeg with SRT: ok" || echo "WARNING: this ffmpeg has no SRT support, so thumbnails will not appear (web links and live preview still work)"
+
 step "Portal files"
 rm -rf "$APP.new"; mkdir -p "$APP.new"
 cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/lib" "$SRC/public" "$APP.new/"

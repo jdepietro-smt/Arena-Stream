@@ -15,6 +15,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const auth = require('./lib/auth')
 const { openStore } = require('./lib/store')
+const { createThumbs } = require('./lib/thumbs')
 
 function loadConfig(env = process.env) {
   return {
@@ -26,6 +27,8 @@ function loadConfig(env = process.env) {
     mediamtxApi: (env.MEDIAMTX_API || 'http://127.0.0.1:9997').replace(/\/$/, ''),
     mediamtxWebrtc: (env.MEDIAMTX_WEBRTC || 'http://127.0.0.1:8889').replace(/\/$/, ''),
     relaySrt: env.RELAY_SRT || '127.0.0.1:8895',
+    ffmpeg: env.PORTAL_FFMPEG || 'ffmpeg',
+    thumbDir: env.PORTAL_THUMB_DIR || '/tmp/arena-portal-thumbs',
     relayLatencyMs: parseInt(env.PORTAL_RELAY_LATENCY_MS || '150', 10),
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
@@ -42,6 +45,7 @@ function createPortal(cfg) {
   if (!cfg.adminPassword) throw new Error('PORTAL_ADMIN_PASSWORD is not set')
   if (!cfg.secret || cfg.secret.length < 16) throw new Error('PORTAL_SECRET must be at least 16 characters')
   const store = openStore(cfg.dataDir)
+  const thumbs = createThumbs({ ffmpeg: cfg.ffmpeg, dir: cfg.thumbDir, relaySrt: cfg.relaySrt, latencyMs: cfg.relayLatencyMs, spawn: cfg.spawn, log: m => console.log(m) })
   const loginOk = auth.throttle(8, 60000)
   const pwOk = auth.throttle(10, 60000)
 
@@ -191,6 +195,39 @@ function createPortal(cfg) {
       })
     }
 
+    // Thumbnail: asking for it starts the picture worker for that stream; it stops when nobody asks.
+    let tm
+    if ((tm = p.match(/^\/portal\/api\/thumb\/([^/]+)$/)) && m === 'GET') {
+      const e = (await encoders()).find(x => x.id === decodeURIComponent(tm[1]))
+      if (!e || !e.relay || !e.relay.name || !browserOk(e)) { res.writeHead(204); return res.end() }
+      thumbs.want(e.relay.name)
+      const img = thumbs.read(e.relay.name)
+      if (!img) { res.writeHead(204); return res.end() }
+      res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store', 'Content-Length': img.length })
+      return res.end(img)
+    }
+    // Live preview in the admin page: same browser playback as a share link, without making a link.
+    let pm
+    if ((pm = p.match(/^\/portal\/api\/whep\/([^/]+)$/)) && m === 'POST') {
+      const e = (await encoders()).find(x => x.id === decodeURIComponent(pm[1]))
+      if (!e) return send(res, 404, { error: 'stream is offline' })
+      if (!e.relay || !e.relay.name) return send(res, 409, { error: 'this stream is not sent to the relay' })
+      if (!browserOk(e)) return send(res, 415, { error: 'this stream is H.265, which browsers cannot play' })
+      if (livePreviews() >= MAX_PREVIEWS) return send(res, 429, { error: 'close another preview first' })
+      return whepStart(req, res, e, sid => { previews.set(sid, Date.now()); return `/portal/api/whep/${pm[1]}/${encodeURIComponent(sid)}` })
+    }
+    if ((pm = p.match(/^\/portal\/api\/whep\/([^/]+)\/([^/]+)$/)) && (m === 'DELETE' || m === 'PATCH')) {
+      const e = (await encoders()).find(x => x.id === decodeURIComponent(pm[1]))
+      const sid = decodeURIComponent(pm[2])
+      if (m === 'DELETE') previews.delete(sid)
+      if (!e || !e.relay) { res.writeHead(204); return res.end() }
+      const body = m === 'PATCH' ? await readBody(req, 65536) : undefined
+      try {
+        await fetch(`${cfg.mediamtxWebrtc}/${pathName(e.relay.name)}/whep/${encodeURIComponent(sid)}`, { method: m, headers: m === 'PATCH' ? { 'Content-Type': req.headers['content-type'] || 'application/trickle-ice-sdpfrag' } : {}, body, signal: AbortSignal.timeout(5000) })
+      } catch { /* the session ends by itself when the browser goes away */ }
+      res.writeHead(204); return res.end()
+    }
+
     if (p === '/portal/api/links' && m === 'GET') {
       return send(res, 200, { links: store.links().sort((a, b) => b.createdAt - a.createdAt).map(publicLink) })
     }
@@ -226,6 +263,29 @@ function createPortal(cfg) {
     send(res, 404, { error: 'not found' })
   }
 
+  // Browser playback of one encoder: make sure mediamtx pulls it from the relay, pass the browser's
+  // WHEP offer through, and hand back the answer. `locate(sid)` records the view and builds the
+  // Location the browser will use to close the session.
+  async function whepStart(req, res, e, locate) {
+    let name
+    try { name = await ensurePath(e.relay.name) } catch { return send(res, 502, { error: 'media server unavailable' }) }
+    const offer = (await readBody(req, 65536)).toString()
+    let r
+    try {
+      r = await fetch(`${cfg.mediamtxWebrtc}/${name}/whep`, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: offer, signal: AbortSignal.timeout(15000) })
+    } catch { return send(res, 502, { error: 'media server unavailable' }) }
+    const text = await r.text()
+    if (r.status !== 201) return send(res, r.status === 404 ? 404 : 502, { error: 'stream is not ready yet' })
+    const sid = (r.headers.get('location') || '').split('/').pop()
+    res.writeHead(201, { 'Content-Type': 'application/sdp', Location: locate(sid), 'Cache-Control': 'no-store' })
+    return res.end(text)
+  }
+
+  // Admin previews: a few at a time, because each one sends the full stream to the browser.
+  const previews = new Map()   // session id -> started
+  const MAX_PREVIEWS = 3
+  const livePreviews = () => { const now = Date.now(); for (const [k, t] of previews) if (now - t > 15 * 60000) previews.delete(k); return previews.size }
+
   async function viewer(req, res, id, rest, m) {
     const l = store.link(id)
     const st = l ? linkState(l) : 'missing'
@@ -253,19 +313,10 @@ function createPortal(cfg) {
       const e = await findEncoder(l.stream)
       if (!e) return send(res, 404, { error: 'stream is offline' })
       if (!browserOk(e)) return send(res, 415, { error: 'this stream is H.265, which browsers cannot play' })
-      let name
-      try { name = await ensurePath(e.relay.name) } catch (err) { return send(res, 502, { error: 'media server unavailable' }) }
-      const offer = (await readBody(req, 65536)).toString()
-      let r
-      try {
-        r = await fetch(`${cfg.mediamtxWebrtc}/${name}/whep`, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: offer, signal: AbortSignal.timeout(15000) })
-      } catch { return send(res, 502, { error: 'media server unavailable' }) }
-      const text = await r.text()
-      if (r.status !== 201) return send(res, r.status === 404 ? 404 : 502, { error: 'stream is not ready yet' })
-      const sid = (r.headers.get('location') || '').split('/').pop()
-      store.addView({ id, at: Date.now(), ip: clientIp(req), ua: String(req.headers['user-agent'] || '').slice(0, 160) })
-      res.writeHead(201, { 'Content-Type': 'application/sdp', Location: `/w/${id}/whep/${encodeURIComponent(sid)}`, 'Cache-Control': 'no-store' })
-      return res.end(text)
+      return whepStart(req, res, e, sid => {
+        store.addView({ id, at: Date.now(), ip: clientIp(req), ua: String(req.headers['user-agent'] || '').slice(0, 160) })
+        return `/w/${id}/whep/${encodeURIComponent(sid)}`
+      })
     }
     let mm
     if ((mm = rest.match(/^\/whep\/([^/]+)$/)) && (m === 'PATCH' || m === 'DELETE')) {
@@ -290,7 +341,8 @@ function createPortal(cfg) {
       else res.end()
     })
   })
-  return { server, store, pathName }
+  server.on('close', () => thumbs.stopAll())
+  return { server, store, pathName, thumbs }
 }
 
 module.exports = { createPortal, loadConfig }

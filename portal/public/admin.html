@@ -8,7 +8,7 @@ header{display:flex;align-items:center;gap:16px;padding:12px 20px;border-bottom:
 h1{font-size:15px;letter-spacing:.14em;margin:0;font-weight:600;text-transform:uppercase}
 nav{display:flex;gap:6px;margin-left:12px}nav button{background:none;border:1px solid var(--edge);color:var(--mut);padding:6px 14px;border-radius:6px;cursor:pointer;font:inherit}
 nav button.on{background:var(--acc);border-color:var(--acc);color:#1a1205;font-weight:600}
-.sp{flex:1}main{padding:20px;max-width:1100px;margin:0 auto}
+.sp{flex:1}main{padding:20px;max-width:1100px;margin:0 auto;overflow-x:auto}table{min-width:620px}header{flex-wrap:wrap}
 table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--edge);border-radius:8px;overflow:hidden}
 th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--edge);vertical-align:middle}th{color:var(--mut);font-weight:500;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
 tr:last-child td{border-bottom:0}
@@ -22,6 +22,9 @@ button.b:disabled{opacity:.45;cursor:default}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:5}
 .modal .card{margin:0;max-width:440px;width:92vw}label{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12px}
 .row{display:flex;gap:8px;align-items:center}.row>*{min-width:0}.url{flex:1;font-family:Consolas,monospace;font-size:12px}
+.thumb{width:128px;height:72px;object-fit:cover;background:#0b0d10;border:1px solid var(--edge);border-radius:4px;display:block;cursor:pointer}
+.nothumb{width:128px;height:72px;border:1px dashed var(--edge);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:11px;cursor:pointer}
+.live video{width:100%;aspect-ratio:16/9;background:#000;border-radius:6px}.live{max-width:760px!important;width:94vw!important}
 .err{color:var(--bad);font-size:13px;min-height:1.2em}.hint{color:var(--mut);font-size:12px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.1em;color:var(--mut);text-transform:uppercase;font-weight:600}
 </style></head><body>
 <div id="app"></div>
@@ -52,10 +55,11 @@ async function copy(text, btn) {
   const o = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = o), 1200)
 }
 
+let thumbTimer = null
 let tab = 'streams', timer = null, streams = [], links = [], decoders = []
 
 function showLogin() {
-  clearInterval(timer)
+  clearInterval(timer); clearInterval(thumbTimer)
   const err = el('div', { class: 'err' })
   const pw = el('input', { type: 'password', placeholder: 'Password', autofocus: true })
   const go = async () => { try { await api('/login', 'POST', { password: pw.value }); publicBase = (await api('/me')).publicBase || ''; start() } catch (e) { err.textContent = e.message } }
@@ -75,11 +79,68 @@ function shell(content) {
   ]
 }
 
+// Thumbnails: a picture per stream, fetched every few seconds while this page is open (the server only
+// runs the picture worker while it is asked). Kept as object URLs so a redraw does not reload them.
+const thumbCache = {}
+function thumbEl(s) {
+  const url = thumbCache[s.id]
+  const open = () => liveDialog(s)
+  if (!s.canShare || !s.browserOk) return el('div', { class: 'hint' }, '-')
+  return url ? el('img', { class: 'thumb', src: url, 'data-sid': s.id, title: 'Click for live video', onclick: open })
+             : el('div', { class: 'nothumb', 'data-sid': s.id, title: 'Click for live video', onclick: open }, 'waiting...')
+}
+async function fetchThumbs() {
+  if (document.hidden || document.querySelector('.modal') || tab === 'links') return
+  let changed = false
+  await Promise.all(streams.filter(s => s.canShare && s.browserOk).map(async s => {
+    try {
+      const r = await fetch('/portal/api/thumb/' + encodeURIComponent(s.id))
+      if (r.status !== 200) return
+      const u = URL.createObjectURL(await r.blob())
+      if (thumbCache[s.id]) URL.revokeObjectURL(thumbCache[s.id])
+      thumbCache[s.id] = u; changed = true
+    } catch (e) { /* try again next round */ }
+  }))
+  if (changed) for (const n of document.querySelectorAll('.nothumb')) { const s = streams.find(x => x.id === n.dataset.sid); if (s && thumbCache[s.id]) n.replaceWith(thumbEl(s)) }
+  if (changed) for (const i of document.querySelectorAll('img.thumb')) if (thumbCache[i.dataset.sid] && i.src !== thumbCache[i.dataset.sid]) i.src = thumbCache[i.dataset.sid]
+}
+
+async function playWhep(base, video, say) {
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+  let session = null, closed = false
+  pc.addTransceiver('video', { direction: 'recvonly' }); pc.addTransceiver('audio', { direction: 'recvonly' })
+  pc.ontrack = e => { video.srcObject = e.streams[0] }
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'connected') say(''); if (pc.connectionState === 'failed' && !closed) say('Connection lost') }
+  try {
+    await pc.setLocalDescription(await pc.createOffer())
+    await new Promise(r => { if (pc.iceGatheringState === 'complete') return r(); pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r(); setTimeout(r, 2500) })
+    const r = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp })
+    if (r.status !== 201) throw new Error((await r.json().catch(() => ({}))).error || 'not available')
+    session = r.headers.get('Location')
+    await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() })
+  } catch (e) { say(e.message) }
+  return () => { closed = true; if (session) fetch(session, { method: 'DELETE' }).catch(() => {}); try { pc.close() } catch (e) { /* closed */ } }
+}
+
+function liveDialog(s) {
+  const video = el('video', { autoplay: true, playsinline: true, muted: true, controls: true })
+  video.muted = true
+  const msg = el('div', { class: 'hint' }, 'Connecting...')
+  let stop = () => {}
+  const close = () => { stop(); dlg.remove() }
+  const dlg = el('div', { class: 'modal', onclick: e => e.target === dlg && close() }, el('div', { class: 'card live' },
+    el('h2', {}, 'Live: ' + s.name + '  ' + (s.format || '')), video, msg,
+    el('div', { class: 'row' }, el('button', { class: 'b', onclick: close }, 'Close'), el('span', { class: 'hint' }, 'Sends the full stream to this browser; close it when you are done.'))))
+  document.body.append(dlg)
+  playWhep('/portal/api/whep/' + encodeURIComponent(s.id), video, t => { msg.textContent = t })
+    .then(f => { if (!dlg.isConnected) f(); else stop = f })
+}
+
 function streamsView() {
   if (!streams.length) return el('div', { class: 'empty' }, 'No encoders are on air.')
-  return el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'Format', 'Codec', 'Bitrate', 'Web viewers', 'Links', ''].map(h => el('th', {}, h)))),
+  return el('table', {}, el('thead', {}, el('tr', {}, ['', 'Stream', 'Format', 'Codec', 'Bitrate', 'Web viewers', 'Links', ''].map(h => el('th', {}, h)))),
     el('tbody', {}, streams.map(s => el('tr', {},
-      el('td', {}, s.name), el('td', {}, s.format || '-'), el('td', {}, s.codec || '-'),
+      el('td', {}, thumbEl(s)), el('td', {}, s.name), el('td', {}, s.format || '-'), el('td', {}, s.codec || '-'),
       el('td', {}, s.kbps ? (s.kbps / 1000).toFixed(1) + ' Mbps' : '-'),
       el('td', {}, String(s.webViewers)), el('td', {}, String(s.links)),
       el('td', {}, !s.canShare ? el('span', { class: 'chip warn', title: 'Turn on "Internet viewers" for this stream in the Arena Link app' }, 'Not on relay')
@@ -105,7 +166,7 @@ const dChoice = {}
 function decodersView() {
   if (!decoders.length) return el('div', { class: 'empty' }, 'No decoders are reporting. Open the Arena Link app on a decoder PC (update it to this version first).')
   const live = streams.map(s => s.name)
-  return el('table', {}, el('thead', {}, el('tr', {}, ['Decoder', 'PC', 'Status', 'Playing', 'Play this stream', ''].map(h => el('th', {}, h)))),
+  return el('table', {}, el('thead', {}, el('tr', {}, ['Decoder', 'PC', 'Status', 'Playing', '', 'Play this stream', ''].map(h => el('th', {}, h)))),
     el('tbody', {}, decoders.map(d => {
       const sel = el('select', {}, el('option', { value: '' }, 'Disconnect'),
         [...new Set([...live, d.stream].filter(Boolean))].map(n => el('option', { value: n, selected: (dChoice[d.id] ?? d.stream) === n }, n)))
@@ -116,6 +177,7 @@ function decodersView() {
         el('td', {}, d.name), el('td', {}, d.host || '-'),
         el('td', {}, el('span', { class: 'chip ' + (d.state === 'live' ? 'ok' : '') }, d.state || '-')),
         el('td', {}, d.stream || '-'),
+        el('td', {}, (() => { const st = streams.find(x => x.name === d.stream); return st ? thumbEl(st) : el('div', { class: 'hint' }, '-') })()),
         el('td', {}, sel),
         el('td', {}, el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { await api('/decoders/' + encodeURIComponent(d.id) + '/want', 'POST', { stream: sel.value }); delete dChoice[d.id]; refresh() } }, 'Apply'),
           pending ? el('span', { class: 'chip warn' }, 'waiting for decoder') : null)))
@@ -156,6 +218,6 @@ async function refresh() {
   if (document.activeElement && document.activeElement.tagName === 'SELECT') return   // do not close an open dropdown
   $app.replaceChildren(...shell(tab === 'streams' ? streamsView() : tab === 'links' ? linksView() : decodersView()))
 }
-function start() { refresh(); clearInterval(timer); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal')) refresh() }, 2500) }
+function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal')) refresh() }, 2500) }
 api('/me').then(m => { publicBase = m.publicBase || ''; start() }).catch(() => showLogin())
 </script></body></html>

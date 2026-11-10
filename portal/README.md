@@ -4,6 +4,7 @@ Web side of Arena Link, added next to the existing server services (nothing is r
 
 - **Web links.** Share a live stream as a link that plays in any browser, with an expiry and an optional password. Links can be revoked at any time, and each open is logged.
 - **Streams.** Live encoders from the directory: format, codec, bitrate, web viewers, links.
+- **Previews.** A thumbnail per stream (and per decoder, showing what it plays) on the Streams and Decoders tabs; click one for live video. Live previews are limited to three at a time because each sends the full stream to the browser.
 - **Decoders.** See every decoder PC running the Arena Link app and choose which stream each one plays out to SDI.
 
 ## How a web link plays
@@ -16,6 +17,8 @@ browser  <--- /w/<link id>  (portal checks: link active, not expired, password)
 ```
 
 The portal creates the mediamtx path on first use and mediamtx closes it 15 s after the last viewer leaves. The browser talks to the portal, never to mediamtx directly; the media path name carries a secret tag so it cannot be guessed. Expect roughly 150 to 300 ms more delay than the SDI path.
+
+Thumbnails: while the admin page is open, the portal runs one `ffmpeg` per stream that reads the SRT relay, decodes key frames only, and writes a 480 px JPEG every few seconds (`lib/thumbs.js`). A worker stops about 25 s after the page stops asking. It needs an `ffmpeg` with SRT support (the Ubuntu package has it; the installer checks). The first picture appears after the first key frame, typically within 10 s.
 
 Browser limits: H.265 streams cannot be played (the portal says so and the Streams tab flags them); use H.264 in the encoder. Interlaced H.264 plays but depends on the browser's decoder.
 
@@ -46,7 +49,7 @@ Settings live in `/etc/arena-portal/env`; links and the view log in `/var/lib/ar
 ## Development
 
 ```
-cd portal; node --test          # 9 tests with stand-ins for the directory and mediamtx
+cd portal; node --test          # 12 tests with stand-ins for the directory and mediamtx
 ```
 
 Standard library only (Node 18+), no `npm install`.
