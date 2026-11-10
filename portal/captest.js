@@ -132,7 +132,10 @@ async function ensureViewerHost() {
       taken.add(m[1]); base.push(/Port$/.test(m[1]) ? `${m[1]}: ${+m[2] + 10000}` : `${m[1]}: 127.0.0.1:${+m[2] + 10000}`)
     }
   } catch { /* the real config is not readable: the defaults are tried */ }
-  const variants = [[...base, 'srt: no', 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'rtspTransports: [tcp]', 'paths:', '  all_others:'], [...base, 'srt: no'], base]
+  // Newer mediamtx also starts SRT and MoQ servers (MoQ defaults to :8892), which the viewer host does not need and which would
+  // collide with the real one; an older mediamtx does not know those settings, so fewer and fewer of them are tried.
+  const tail3 = ['rtspTransports: [tcp]', 'paths:', '  all_others:']
+  const variants = [[...base, 'srt: no', 'moq: no', ...tail3], [...base, 'moq: no', ...tail3], [...base, 'srt: no', ...tail3], [...base, ...tail3], [...base, 'srt: no'], base]
   let last = ''
   for (const lines of variants) {
     fs.writeFileSync(conf, lines.join('\n') + '\n')
