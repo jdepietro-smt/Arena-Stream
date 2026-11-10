@@ -36,7 +36,7 @@ ffmpeg -hide_banner -protocols 2>/dev/null | grep -qw srt && echo "ffmpeg with S
 
 step "Portal files"
 rm -rf "$APP.new"; mkdir -p "$APP.new"
-cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/reset-owner.js" "$SRC/add-user.js" "$SRC/lib" "$SRC/public" "$APP.new/"
+cp -r "$SRC/server.js" "$SRC/package.json" "$SRC/reset-owner.js" "$SRC/add-user.js" "$SRC/captest.js" "$SRC/lib" "$SRC/public" "$APP.new/"
 install -m 755 "$SRC/deploy/ctl.sh" "$APP.new/ctl.sh"
 rm -rf "$APP"; mv "$APP.new" "$APP"
 mkdir -p "$ETC" "$DATA"; chmod 700 "$ETC"
@@ -106,7 +106,7 @@ ReadWritePaths=$DATA
 WantedBy=multi-user.target
 UNIT
 # Root helper that restarts a fixed list of services when the Admin page asks for it.
-mkdir -p "$DATA/ctl"; chown nobody:nogroup "$DATA/ctl"; rm -f "$DATA/ctl/request"
+mkdir -p "$DATA/ctl" "$DATA/captest"; chown nobody:nogroup "$DATA/ctl" "$DATA/captest"; rm -f "$DATA/ctl/request"
 cat > /etc/systemd/system/arena-portal-ctl.service <<UNIT
 [Unit]
 Description=Arena Portal service restarts (root helper)

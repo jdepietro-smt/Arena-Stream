@@ -19,6 +19,7 @@ const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
 const { openAdmin, SETTINGS, USERNAME, ROLES, cleanProfile } = require('./lib/admin')
 const { createThumbs } = require('./lib/thumbs')
+const captest = require('./lib/captest-core')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
 // (portal/deploy/ctl.sh) that accepts only these names; the portal itself runs unprivileged.
@@ -376,6 +377,16 @@ function createPortal(cfg) {
     }
   }
 
+  const captestDir = path.join(cfg.dataDir, 'captest')
+  const readJsonFile = f => { try { return JSON.parse(fs.readFileSync(path.join(captestDir, f), 'utf8')) } catch { return null } }
+  const captestState = () => {
+    const status = readJsonFile('status.json')
+    let fresh = false
+    try { fresh = Date.now() - fs.statSync(path.join(captestDir, 'status.json')).mtimeMs < 15000 } catch { /* no file */ }
+    const requested = fs.existsSync(path.join(ctlDir, 'request'))
+    return { running: !!status && status.phase !== 'done' && fresh, starting: !status && requested, status, history: readJsonFile('history.json') || [] }
+  }
+
   const MIN_PW = 10
   async function ownerApi(req, res, p, m) {
     const ip = clientIp(req)
@@ -499,6 +510,31 @@ function createPortal(cfg) {
       } catch (e) { return send(res, 500, { error: 'could not leave the restart request: ' + e.message }) }
       admin.audit('owner', 'service.restart', svc[0], ip)
       return send(res, 200, { ok: true, requested: svc[0] })
+    }
+
+    // Capacity test: the runner (captest.js) is started by the root helper as its own service; the portal only
+    // leaves the request and reads what the runner writes.
+    if (sub === 'captest' && m === 'GET') return send(res, 200, captestState())
+    if (sub === 'captest/start' && m === 'POST') {
+      const b = await readJson(req)
+      if (!b || b.ack !== true) return send(res, 400, { error: 'tick the box to confirm this loads the live server' })
+      if (captestState().running) return send(res, 409, { error: 'a capacity test is already running' })
+      const live = (await encoders()).filter(e => !/^CT-/.test(e.name))
+      if (live.length && b.allowLive !== true) return send(res, 409, { error: `live streams are on air (${live.map(e => e.name).join(', ')}). Stop them, or allow the test to run alongside them.`, live: live.map(e => e.name) })
+      const cfgOut = captest.defaults(b)
+      try {
+        fs.mkdirSync(ctlDir, { recursive: true })
+        try { fs.unlinkSync(path.join(captestDir, 'status.json')) } catch { /* none yet */ }
+        fs.writeFileSync(path.join(ctlDir, 'captest.json'), JSON.stringify(cfgOut))
+        fs.writeFileSync(path.join(ctlDir, 'request'), 'captest-start\n')
+      } catch (e) { return send(res, 500, { error: 'could not leave the request: ' + e.message }) }
+      admin.audit('owner', 'captest.start', JSON.stringify({ streams: cfgOut.streamsMax, step: cfgOut.step, live: live.length }), ip)
+      return send(res, 200, { ok: true, config: cfgOut })
+    }
+    if (sub === 'captest/stop' && m === 'POST') {
+      try { fs.mkdirSync(ctlDir, { recursive: true }); fs.writeFileSync(path.join(ctlDir, 'request'), 'captest-stop\n') } catch (e) { return send(res, 500, { error: e.message }) }
+      admin.audit('owner', 'captest.stop', '', ip)
+      return send(res, 200, { ok: true })
     }
 
     if (sub === 'activity' && m === 'GET') {

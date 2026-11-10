@@ -705,3 +705,58 @@ test('add-user.js: --name and --email set the profile', async () => {
   assert.deepEqual([u.name, u.email], ['With Profile', 'with@example.com'])
   assert.throws(() => execFileSync(process.execPath, [script, 'bad.profile', '--email', 'nope', dir], { encoding: 'utf8', stdio: 'pipe' }))
 })
+
+// ── capacity test API ─────────────────────────────────────────────────────────
+test('capacity test: needs confirmation, refuses while live streams are on air, then leaves a request for the helper', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await t.call('/portal/api/owner/captest/start', { method: 'POST', body: { streamsMax: 10 } })).status, 400)          // no confirmation
+    const live = await post(t, '/portal/api/owner/captest/start', { streamsMax: 10, ack: true })
+    assert.equal(live.status, 409); assert.match(live.body.error, /live streams are on air/); assert.ok(live.body.live.includes('ESPN 1'))
+    assert.equal(fs.existsSync(path.join(t.ctlDir, 'request')), false)
+
+    const ok = await post(t, '/portal/api/owner/captest/start', { streamsMax: 9999, step: 0, stepSec: 5, allowLive: true, ack: true })
+    assert.equal(ok.status, 200)
+    assert.equal(fs.readFileSync(path.join(t.ctlDir, 'request'), 'utf8'), 'captest-start\n')
+    const cfg = JSON.parse(fs.readFileSync(path.join(t.ctlDir, 'captest.json'), 'utf8'))
+    assert.deepEqual([cfg.streamsMax, cfg.step, cfg.stepSec, cfg.allowLive], [60, 1, 15, true], 'settings are clamped before they reach the runner')
+    assert.equal((await t.call('/portal/api/owner/captest')).body.starting, true)
+    assert.ok(t.admin.auditList().some(e => e.action === 'captest.start'))
+
+    assert.equal((await post(t, '/portal/api/owner/captest/stop')).status, 200)
+    assert.equal(fs.readFileSync(path.join(t.ctlDir, 'request'), 'utf8'), 'captest-stop\n')
+  } finally { await t.close() }
+})
+
+test('capacity test: shows what the runner writes, and only counts a fresh status as running', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const dir = path.join(t.dataDir, 'captest'); fs.mkdirSync(dir, { recursive: true })
+    assert.deepEqual((await t.call('/portal/api/owner/captest')).body, { running: false, starting: false, status: null, history: [] })
+
+    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ phase: 'ramping', step: 4, steps: [], now: { streams: 4, cpu: 20 }, cfg: {} }))
+    let s = (await t.call('/portal/api/owner/captest')).body
+    assert.equal(s.running, true); assert.equal(s.status.now.streams, 4)
+    assert.equal((await post(t, '/portal/api/owner/captest/start', { ack: true, allowLive: true })).status, 409, 'one test at a time')
+
+    const old = new Date(Date.now() - 60000)
+    fs.utimesSync(path.join(dir, 'status.json'), old, old)
+    assert.equal((await t.call('/portal/api/owner/captest')).body.running, false, 'a status nobody has updated for a minute is not running')
+
+    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ phase: 'done', conclusion: 'Clean through 8 streams', steps: [] }))
+    fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify([{ at: 1, conclusion: 'older' }]))
+    s = (await t.call('/portal/api/owner/captest')).body
+    assert.equal(s.running, false); assert.equal(s.status.conclusion, 'Clean through 8 streams'); assert.equal(s.history[0].conclusion, 'older')
+  } finally { await t.close() }
+})
+
+test('capacity test: a plain user cannot reach it', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t)                                                  // shared password, owner area still locked
+    assert.equal((await t.call('/portal/api/owner/captest')).status, 403)
+    assert.equal((await post(t, '/portal/api/owner/captest/start', { ack: true, allowLive: true })).status, 403)
+  } finally { await t.close() }
+})

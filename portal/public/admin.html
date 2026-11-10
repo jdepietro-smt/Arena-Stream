@@ -25,6 +25,11 @@ button.b:disabled{opacity:.45;cursor:default}
 .thumb{width:128px;height:72px;object-fit:cover;background:#0b0d10;border:1px solid var(--edge);border-radius:4px;display:block;cursor:pointer}
 .nothumb{width:128px;height:72px;border:1px dashed var(--edge);border-radius:4px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:11px;cursor:pointer}
 .live video{width:100%;aspect-ratio:16/9;background:#000;border-radius:6px}.live{max-width:760px!important;width:94vw!important}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.tile{background:#0e1013;border:1px solid var(--edge);border-radius:6px;padding:8px 10px;min-width:0}
+.tlabel{font-size:10px;letter-spacing:.12em;color:var(--mut);text-transform:uppercase}
+.tvalue{font-family:Consolas,monospace;color:var(--acc);margin-top:2px;white-space:nowrap}
+.tile.ok .tvalue{color:var(--ok)}.tile.bad .tvalue{color:var(--bad)}
 .err{color:var(--bad);font-size:13px;min-height:1.2em}.hint{color:var(--mut);font-size:12px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.1em;color:var(--mut);text-transform:uppercase;font-weight:600}
 </style></head><body>
 <div id="app"></div>
@@ -59,7 +64,7 @@ let thumbTimer = null
 let tab = 'streams', timer = null, streams = [], links = [], decoders = []
 
 function showLogin() {
-  clearInterval(timer); clearInterval(thumbTimer); clearInterval(ownerTimer); clearInterval(healthTimer); tab = 'streams'
+  clearInterval(timer); clearInterval(thumbTimer); clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer); tab = 'streams'
   const err = el('div', { class: 'err' })
   const user = el('input', { type: 'text', placeholder: 'Username', autocomplete: 'username', autofocus: true })
   const pw = el('input', { type: 'password', placeholder: 'Password', autocomplete: 'current-password' })
@@ -74,7 +79,7 @@ function shell(content) {
   const tabs = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders'], ['admin', 'Admin']]
   return [
     el('header', {}, el('h1', {}, 'Arena Portal'),
-      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); refresh() } }, t))),
+      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer); refresh() } }, t))),
       el('div', { class: 'sp' }), me.user ? el('button', { class: 'b', title: 'Signed in as ' + me.user + '. Click to edit your name and email.', onclick: myProfile }, me.name || me.user) : null,
       el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
     el('main', {}, content),
@@ -214,7 +219,7 @@ function newLinkDialog(stream) {
 // ── Admin (owner-only) ─────────────────────────────────────────────────────────
 // Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
 let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
-const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['activity', 'Activity and links']]
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
 
 async function oapi(path, method = 'GET', body) {
   const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
@@ -232,7 +237,7 @@ function msgBox() { return el('div', { class: 'err' }) }
 function flash(box, text, good) { box.textContent = text; box.style.color = good ? 'var(--ok)' : 'var(--bad)' }
 
 async function adminRender() {
-  clearInterval(ownerTimer); clearInterval(healthTimer)
+  clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer)
   try { owner = await oapi('/status') } catch (e) { if (e.message === 'signed out') return }
   const body = $app.querySelector('main')
   if (!body) return $app.replaceChildren(...shell(el('div')))
@@ -251,6 +256,7 @@ async function adminRender() {
     if (adminSub === 'account') await accountSection(content)
     else if (adminSub === 'settings') await settingsSection(content)
     else if (adminSub === 'health') await healthSection(content)
+    else if (adminSub === 'capacity') await capacitySection(content)
     else await activitySection(content)
   } catch (e) { if (e.message !== 'locked' && e.message !== 'signed out') content.replaceChildren(el('div', { class: 'err' }, e.message)) }
 }
@@ -421,6 +427,65 @@ async function activitySection(box) {
     el('div', { class: 'row', style: 'margin:22px 0 10px' }, el('h2', { style: 'margin:0' }, 'Activity'), sel),
     act.entries.length ? el('table', {}, el('thead', {}, el('tr', {}, ['When', 'Who', 'Event', 'Detail', 'From'].map(h => el('th', {}, h)))),
       el('tbody', {}, act.entries.map(e => el('tr', {}, el('td', {}, fmtTime(e.at)), el('td', {}, e.who), el('td', {}, el('span', { class: 'chip ' + (e.action.includes('fail') ? 'bad' : '') }, e.action)), el('td', {}, e.detail || ''), el('td', {}, e.ip || '-'))))) : el('div', { class: 'empty' }, 'Nothing recorded.'))
+}
+
+// ── Capacity test ───────────────────────────────────────────────────────────────
+// Runs on the server (portal/captest.js): synthetic 10 Mbps streams are published to the relay and read back
+// the way decoders and browsers would, while CPU, memory, network and per-process load are sampled.
+let capTimer = null
+async function capacitySection(box) {
+  const ph = n => el('span', { class: 'hint', style: 'margin:0' }, n)
+  const num = (v, w = 70) => el('input', { type: 'text', value: String(v), style: 'width:' + w + 'px' })
+  const maxS = num(20), step = num(2), stepSec = num(40), srt = num(1), rtsp = num(1), cpuStop = num(90)
+  const allowLive = el('input', { type: 'checkbox' }), ack = el('input', { type: 'checkbox' })
+  const err = msgBox()
+  const live = el('div'), results = el('div')
+
+  const tile = (label, value, cls) => el('div', { class: 'tile ' + (cls || '') }, el('div', { class: 'tlabel' }, label), el('div', { class: 'tvalue', style: 'font-size:18px' }, value))
+  const stepTable = steps => el('table', { style: 'min-width:0' }, el('thead', {}, el('tr', {}, ['Streams', 'Readers', 'Server CPU', 'Generator CPU', 'Peak CPU', 'Load', 'Slowest reader', 'Net in / out', 'Busiest processes', ''].map(h => el('th', {}, h)))),
+    el('tbody', {}, steps.map(s => el('tr', {},
+      el('td', {}, String(s.streams)), el('td', {}, String(s.readers)), el('td', {}, s.serverCpu + '%'), el('td', { class: 'hint' }, s.generatorCpu + '%'), el('td', {}, s.cpuMax + '%'), el('td', {}, s.load1Max.toFixed(2)),
+      el('td', {}, s.readerMbpsMin + ' Mbps'), el('td', {}, s.netRxMbps + ' / ' + s.netTxMbps + ' Mbps'), el('td', { class: 'hint' }, (s.top || []).map(t => t[0] + ' ' + t[1] + '%').join(', ')),
+      el('td', {}, el('span', { class: 'chip ' + (s.verdict === 'clean' ? 'ok' : 'bad') }, s.verdict))))))
+
+  const draw = async () => {
+    const st = await oapi('/captest')
+    const s = st.status
+    live.replaceChildren()
+    if (st.running || st.starting) {
+      const n = s && s.now
+      live.append(el('div', { class: 'card', style: 'margin:0;max-width:none' },
+        el('h2', {}, st.starting && !s ? 'Starting (the server is launching the test)...' : 'Running: ' + (s.phase === 'preparing' ? 'making the 10 Mbps sample' : 'step ' + (s.step || '') + ' of up to ' + s.cfg.streamsMax + ' streams, ' + (n ? n.phase : ''))),
+        n ? el('div', { class: 'tiles' }, tile('Streams', String(n.streams)), tile('Server CPU', n.serverCpu + '%', n.serverCpu > 70 ? 'warn' : 'ok'), tile('Generator CPU', n.generatorCpu + '%'), tile('All CPU', n.cpu + '%', n.cpu > 85 ? 'bad' : ''),
+          tile('Load (1 min)', n.load1.toFixed(2)), tile('Free memory', n.memAvailGB + ' GB'), tile('Network in', n.netRxMbps + ' Mbps'), tile('Network out', n.netTxMbps + ' Mbps')) : null,
+        s && s.steps && s.steps.length ? stepTable(s.steps) : null,
+        el('div', { class: 'row' }, el('button', { class: 'b', onclick: async () => { try { await oapi('/captest/stop', 'POST') } catch (e) { flash(err, e.message) } } }, 'Stop the test'), el('span', { class: 'hint' }, 'It also stops by itself if CPU stays high, memory runs low, readers fall behind, or a live stream is affected.'))))
+    }
+    results.replaceChildren()
+    const last = !st.running && s && s.phase === 'done' ? s : null
+    if (last) results.append(el('div', { class: 'card', style: 'margin:0 0 14px;max-width:none' }, el('h2', {}, 'Last result'), el('div', {}, last.conclusion || ''), last.steps && last.steps.length ? stepTable(last.steps) : null))
+    if (st.history.length) results.append(el('h2', { style: 'margin-top:18px' }, 'Earlier runs'), ...st.history.slice(0, 5).map(h => el('details', { class: 'adv', style: 'margin:6px 0' }, el('summary', {}, fmtTime(h.at) + ' - ' + (h.steps.length ? 'up to ' + h.steps[h.steps.length - 1].streams + ' streams' : 'did not run')),
+      el('div', { class: 'hint', style: 'margin:6px 0' }, h.conclusion || ''), h.steps.length ? stepTable(h.steps) : null)))
+  }
+
+  const start = async () => {
+    err.textContent = ''
+    try {
+      await oapi('/captest/start', 'POST', { streamsMax: +maxS.value, step: +step.value, stepSec: +stepSec.value, srtReaders: +srt.value, rtspReaders: +rtsp.value, cpuStopPct: +cpuStop.value, allowLive: allowLive.checked, ack: ack.checked })
+      flash(err, 'Requested. It starts within a few seconds.', true); draw()
+    } catch (e) { flash(err, e.message) }
+  }
+  const lab = (t, input) => el('label', { style: 'color:var(--text);flex-direction:column;gap:3px' }, el('span', { class: 'hint', style: 'margin:0' }, t), input)
+  box.replaceChildren(
+    el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Capacity test'),
+      el('div', { class: 'hint', style: 'margin:0' }, 'Finds how many 10 Mbps streams this server carries. It publishes synthetic streams to the relay from the server itself, reads each back like a decoder PC and like a browser viewer, and ramps up until something strains. It measures real CPU, memory, network and which process is busiest. It does not use your internet connection, and stops by itself on strain.'),
+      el('div', { class: 'row', style: 'flex-wrap:wrap;align-items:flex-end;gap:14px' }, lab('Up to streams', maxS), lab('Add per step', step), lab('Seconds per step', stepSec), lab('Decoder readers / stream', srt), lab('Browser-style readers / stream', rtsp), lab('Stop above CPU %', cpuStop)),
+      el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, allowLive, el('span', {}, 'Run even if live streams are on air (they may suffer; the test stops if one is affected)')),
+      el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, ack, el('span', {}, 'I understand this loads the live server for several minutes')),
+      el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: start }, 'Start the test'), err)),
+    live, results)
+  await draw()
+  capTimer = setInterval(() => { if (adminSub === 'capacity' && tab === 'admin' && !document.hidden) draw().catch(() => {}) }, 2000)
 }
 
 async function refresh() {
