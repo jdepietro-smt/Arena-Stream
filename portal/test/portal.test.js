@@ -558,3 +558,97 @@ test('reset-owner.js: the new owner password works and shared sign-in comes back
   assert.equal(b.settings().sharedLogin, true)
   assert.ok(b.epoch >= 2)
 })
+
+// ── roles: an admin account needs no second password ──────────────────────────
+test('roles: an admin account opens the Admin area straight away; users and the shared password still need the owner password', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'boss.one', password: 'boss-password-1', role: 'admin' })).status, 200)
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'plain.one', password: 'plain-password-1' })).status, 200)   // default role: user
+    assert.equal((await post(t, '/portal/api/owner/users', { username: 'odd.one', password: 'odd-password-123', role: 'root' })).status, 400)
+
+    t.resetCookie()
+    await signIn(t, 'boss.one', 'boss-password-1')
+    const st = (await t.call('/portal/api/owner/status')).body
+    assert.deepEqual([st.unlocked, st.viaAccount, st.reauth], [true, true, 'account'])
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 200)                       // no owner password asked
+    assert.equal((await t.call('/portal/api/owner/health')).status, 200)
+    assert.equal((await t.call('/portal/api/me')).body.role, 'admin')
+
+    t.resetCookie()
+    await signIn(t, 'plain.one', 'plain-password-1')
+    assert.equal((await t.call('/portal/api/owner/status')).body.unlocked, false)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)
+    assert.equal((await ownerLogin(t)).status, 200)                                              // the owner password still opens it
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 200)
+
+    t.resetCookie()
+    await adminLogin(t)                                                                          // shared password
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403)
+  } finally { await t.close() }
+})
+
+test('roles: changing a role takes effect at once; legacy accounts without a role count as admin', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await post(t, '/portal/api/owner/users', { username: 'swap.me', password: 'swap-password-1', role: 'admin' })
+    const ownerJar = { ...t.jar() }
+    t.resetCookie()
+    await signIn(t, 'swap.me', 'swap-password-1')
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 200)
+    const cookieOf = jar => Object.entries(jar).map(([k, v]) => k + '=' + v).join('; ')
+    const asOwner = (p, body) => fetch(t.base + p, { method: 'POST', headers: { Cookie: cookieOf(ownerJar), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    assert.equal((await asOwner('/portal/api/owner/users/swap.me/role', { role: 'nope' })).status, 400)
+    assert.equal((await asOwner('/portal/api/owner/users/ghost/role', { role: 'user' })).status, 404)
+    assert.equal((await asOwner('/portal/api/owner/users/swap.me/role', { role: 'user' })).status, 200)
+    assert.equal((await t.call('/portal/api/owner/settings')).status, 403, 'demoted: the same session loses the Admin area')
+
+  } finally { await t.close() }
+})
+
+test('roles: an admin account changes passwords with its own password, not the owner password', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await post(t, '/portal/api/owner/users', { username: 'self.admin', password: 'self-password-1', role: 'admin' })
+    t.resetCookie()
+    await signIn(t, 'self.admin', 'self-password-1')
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'admin', current: 'ownerpass1234', next: 'brand-new-password' })).status, 401)   // the owner password is not what is asked
+    assert.equal((await post(t, '/portal/api/owner/password', { which: 'admin', current: 'self-password-1', next: 'brand-new-password' })).status, 200)
+  } finally { await t.close() }
+})
+
+test('add-user.js: an account made from the server is an admin unless told otherwise', async () => {
+  const { execFileSync } = require('node:child_process')
+  const { openAdmin } = require('../lib/admin')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'addrole-'))
+  const script = path.join(__dirname, '..', 'add-user.js')
+  assert.ok(execFileSync(process.execPath, [script, 'srv.admin', dir], { encoding: 'utf8' }).includes('(admin)'))
+  assert.ok(execFileSync(process.execPath, [script, 'srv.user', '--role', 'user', dir], { encoding: 'utf8' }).includes('(user)'))
+  const a = openAdmin(dir)
+  assert.equal(a.users().find(u => u.username === 'srv.admin').role, 'admin')
+  assert.equal(a.users().find(u => u.username === 'srv.user').role, 'user')
+})
+
+test('roles: an account saved before roles existed counts as admin', async () => {
+  const { openAdmin } = require('../lib/admin')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-'))
+  const a = openAdmin(dir)
+  a.setUser('old.acct', auth.hashPassword('old-password-123'), 'user'); a.flush()
+  const file = path.join(dir, 'admin.json')
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+  delete raw.users['old.acct'].role                      // the shape written before roles existed
+  fs.writeFileSync(file, JSON.stringify(raw))
+  assert.equal(openAdmin(dir).users()[0].role, 'admin')
+  const { server, store, admin } = createPortal({ port: 0, adminPassword: 'x'.repeat(8), secret: 'c'.repeat(32), dataDir: dir, thumbDir: path.join(dir, 'th'), directoryUrl: 'http://127.0.0.1:1', directoryKey: 'k', mediamtxApi: 'http://127.0.0.1:1', mediamtxWebrtc: 'http://127.0.0.1:1', relaySrt: '127.0.0.1:1', relayLatencyMs: 100 })
+  const port = await listen(server)
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/portal/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'old.acct', password: 'old-password-123' }) })
+    assert.equal(r.status, 200)
+    const cookie = r.headers.getSetCookie().map(c => c.split(';')[0]).join('; ')
+    const st = await (await fetch(`http://127.0.0.1:${port}/portal/api/owner/status`, { headers: { Cookie: cookie } })).json()
+    assert.deepEqual([st.unlocked, st.viaAccount], [true, true])
+  } finally { await new Promise(r => { store.flush(); admin.flush(); server.close(r) }) }
+})

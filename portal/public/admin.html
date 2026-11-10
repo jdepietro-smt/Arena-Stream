@@ -242,11 +242,11 @@ async function adminRender() {
     el('div', { class: 'row', style: 'margin-bottom:14px;flex-wrap:wrap' },
       SUBS.map(([k, t]) => el('button', { class: 'b' + (adminSub === k ? ' pri' : ''), onclick: () => { adminSub = k; adminRender() } }, t)),
       el('div', { class: 'sp' }),
-      el('span', { class: 'hint', id: 'ownerLeft' }, 'Owner unlocked, locks in ' + mmss(owner.remainingSec)),
-      el('button', { class: 'b', onclick: async () => { await oapi('/logout', 'POST'); adminRender() } }, 'Lock now')),
+      owner.viaAccount ? el('span', { class: 'hint' }, 'Signed in as an admin account') : el('span', { class: 'hint', id: 'ownerLeft' }, 'Owner unlocked, locks in ' + mmss(owner.remainingSec)),
+      owner.viaAccount ? null : el('button', { class: 'b', onclick: async () => { await oapi('/logout', 'POST'); adminRender() } }, 'Lock now')),
     content)
   let left = owner.remainingSec
-  ownerTimer = setInterval(() => { left = Math.max(0, left - 1); const n = document.getElementById('ownerLeft'); if (n) n.textContent = 'Owner unlocked, locks in ' + mmss(left); if (left === 0) adminRender() }, 1000)
+  if (!owner.viaAccount) ownerTimer = setInterval(() => { left = Math.max(0, left - 1); const n = document.getElementById('ownerLeft'); if (n) n.textContent = 'Owner unlocked, locks in ' + mmss(left); if (left === 0) adminRender() }, 1000)
   try {
     if (adminSub === 'account') await accountSection(content)
     else if (adminSub === 'settings') await settingsSection(content)
@@ -273,15 +273,16 @@ async function usersCard() {
     const { users, sharedLogin } = await oapi('/users')
     const name = el('input', { type: 'text', placeholder: 'Username', autocomplete: 'off' })
     const pw = el('input', { type: 'password', placeholder: 'Password (10+ characters)', autocomplete: 'new-password' })
-    const add = async () => { try { await oapi('/users', 'POST', { username: name.value, password: pw.value }); flash(m, 'Account created.', true); draw() } catch (e) { flash(m, e.message) } }
+    const role = el('select', {}, el('option', { value: 'user' }, 'User'), el('option', { value: 'admin' }, 'Admin (opens this area without a second password)'))
+    const add = async () => { try { await oapi('/users', 'POST', { username: name.value, password: pw.value, role: role.value }); flash(m, 'Account created.', true); draw() } catch (e) { flash(m, e.message) } }
     card.replaceChildren(el('h2', {}, 'Portal users'),
-      el('div', { class: 'hint' }, 'Named logins for the portal. Each person signs in with their own username and password; the Admin area still needs the owner password.'),
+      el('div', { class: 'hint' }, 'Named logins for the portal. An Admin account opens this Admin area straight away; a User account (or the shared password) needs the owner password for it.'),
       users.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, users.map(u => el('tr', {},
-        el('td', {}, u.username), el('td', { class: 'hint' }, 'since ' + new Date(u.createdAt).toLocaleDateString()),
+        el('td', {}, u.username), el('td', {}, (() => { const r = el('select', {}, el('option', { value: 'user', selected: u.role === 'user' }, 'User'), el('option', { value: 'admin', selected: u.role === 'admin' }, 'Admin')); r.addEventListener('change', async () => { try { await oapi('/users/' + encodeURIComponent(u.username) + '/role', 'POST', { role: r.value }); flash(m, u.username + ' is now ' + r.value + '.', true) } catch (e) { flash(m, e.message); draw() } }); return r })()),
         el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' },
           el('button', { class: 'b', onclick: async () => { const n = prompt('New password for ' + u.username + ' (10+ characters)'); if (!n) return; try { await oapi('/users/' + encodeURIComponent(u.username) + '/password', 'POST', { password: n }); flash(m, 'Password changed; ' + u.username + ' is signed out.', true) } catch (e) { flash(m, e.message) } } }, 'Set password'),
           el('button', { class: 'b', onclick: async () => { if (confirm('Delete the account ' + u.username + '?')) { try { await oapi('/users/' + encodeURIComponent(u.username), 'DELETE'); draw() } catch (e) { flash(m, e.message) } } } }, 'Delete'))))))) : el('div', { class: 'hint' }, 'No accounts yet. Only the shared portal password signs in.'),
-      el('div', { class: 'row' }, name, pw), el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: add }, 'Add account'), m),
+      el('div', { class: 'row' }, name, pw), el('div', { class: 'row' }, role), el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: add }, 'Add account'), m),
       el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, el('input', { type: 'checkbox', checked: sharedLogin, onchange: async e => { try { await oapi('/settings', 'POST', { settings: { sharedLogin: e.target.checked } }); flash(m, 'Saved.', true) } catch (err) { flash(m, err.message) } } }),
         el('span', {}, 'The shared portal password can still sign in (turn off once everyone has an account)')))
   }
@@ -291,7 +292,7 @@ async function usersCard() {
 
 async function accountSection(box) {
   const mkForm = (which, title, hint) => {
-    const cur = el('input', { type: 'password', placeholder: 'Current owner password', autocomplete: 'off' })
+    const cur = el('input', { type: 'password', placeholder: owner.reauth === 'account' ? 'Your current password' : 'Current owner password', autocomplete: 'off' })
     const n1 = el('input', { type: 'password', placeholder: 'New password (10+ characters)', autocomplete: 'new-password' })
     const n2 = el('input', { type: 'password', placeholder: 'New password again', autocomplete: 'new-password' })
     const m = msgBox()
@@ -308,7 +309,7 @@ async function accountSection(box) {
     el('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap;gap:16px' },
       await usersCard(),
       mkForm('admin', 'Shared portal password', 'The one password everyone can use if shared sign-in is on. Changing it signs everyone out, this browser included.'),
-      mkForm('owner', 'Owner password', 'Protects this Admin area. Changing it signs everyone out.'),
+      mkForm('owner', 'Owner password', owner.viaAccount ? 'Only needed to open this area from the shared password or a plain user account. Changing it signs everyone out.' : 'Protects this Admin area. Changing it signs everyone out.'),
       el('div', { class: 'card', style: 'max-width:420px;margin:0' }, el('h2', {}, 'Sessions'), el('div', { class: 'hint' }, 'Signs out every browser that is logged in to the portal, including this one.'),
         el('button', { class: 'b', onclick: async () => { if (confirm('Sign out everywhere?')) { await oapi('/signout-all', 'POST'); showLogin() } } }, 'Sign out everywhere'), sm)),
     el('h2', { style: 'margin-top:22px' }, 'Recent sign-ins and account changes'),

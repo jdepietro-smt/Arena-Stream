@@ -71,14 +71,21 @@ function openAdmin(dir) {
       return changed
     },
     // Named portal accounts. `ver` changes with the password, which ends that user's sessions.
-    users: () => Object.values(data.users).map(u => ({ username: u.username, createdAt: u.createdAt, ver: u.ver })),
+    users: () => Object.values(data.users).map(u => ({ username: u.username, role: u.role || 'admin', createdAt: u.createdAt, ver: u.ver })),
     user: name => data.users[String(name).toLowerCase()] || null,
-    setUser(name, pwHash) {
+    // role: 'admin' (the Admin area opens without a second password) or 'user'. An account made before
+    // roles existed has none, and counts as admin. A password change keeps the role.
+    setUser(name, pwHash, role) {
       const key = String(name).toLowerCase()
       const old = data.users[key]
-      data.users[key] = { username: old ? old.username : String(name), pwHash, createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
+      data.users[key] = { username: old ? old.username : String(name), pwHash, role: role || (old ? old.role : 'user'), createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
       flush()
       return data.users[key]
+    },
+    setRole(name, role) {
+      const u = data.users[String(name).toLowerCase()]
+      if (!u) return false
+      u.role = role; flush(); return true
     },
     deleteUser(name) { const k = String(name).toLowerCase(); const had = !!data.users[k]; delete data.users[k]; if (had) flush(); return had },
     audit(who, action, detail = '', ip = '') {
@@ -93,5 +100,6 @@ function openAdmin(dir) {
   }
 }
 
+const ROLES = ['admin', 'user']
 const USERNAME = /^[A-Za-z0-9._@-]{2,40}$/
-module.exports = { openAdmin, SETTINGS, cleanSetting, USERNAME }
+module.exports = { openAdmin, SETTINGS, cleanSetting, USERNAME, ROLES }

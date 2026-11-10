@@ -17,7 +17,7 @@ const auth = require('./lib/auth')
 const os = require('node:os')
 const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
-const { openAdmin, SETTINGS, USERNAME } = require('./lib/admin')
+const { openAdmin, SETTINGS, USERNAME, ROLES } = require('./lib/admin')
 const { createThumbs } = require('./lib/thumbs')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
@@ -102,6 +102,10 @@ function createPortal(cfg) {
     const v = auth.unsign(auth.parseCookies(req.headers.cookie).arena_portal, cfg.secret)
     return v ? (v.split('|')[3] || '') : ''
   }
+  // An account with the admin role gets the Admin area with no second password. Anyone else (a plain
+  // user, or the shared password) has to unlock it with the owner password.
+  const roleOf = u => (u ? u.role || 'admin' : '')
+  const accountAdmin = req => { const n = sessionUser(req); return !!n && roleOf(admin.user(n)) === 'admin' }
   const ownerCookieValid = req => {
     const v = auth.unsign(auth.parseCookies(req.headers.cookie).arena_owner, cfg.secret)
     if (!v) return 0
@@ -237,7 +241,7 @@ function createPortal(cfg) {
   async function adminApi(req, res, p, m) {
     if (p === '/portal/api/me') {
       const s = S()
-      return send(res, 200, { ok: true, user: sessionUser(req), publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
+      return send(res, 200, { ok: true, user: sessionUser(req), role: roleOf(admin.user(sessionUser(req))), publicBase: publicBase(), defaultExpiryMin: s.defaultLinkExpiryMin, requireLinkPassword: s.requireLinkPassword })
     }
     if (p.startsWith('/portal/api/owner/')) return ownerApi(req, res, p, m)
 
@@ -367,8 +371,9 @@ function createPortal(cfg) {
     const sub = p.slice('/portal/api/owner/'.length)
 
     if (sub === 'status' && m === 'GET') {
+      if (accountAdmin(req)) return send(res, 200, { configured: !!admin.ownerPwHash, unlocked: true, viaAccount: true, remainingSec: 0, reauth: 'account' })
       const exp = ownerCookieValid(req)
-      return send(res, 200, { configured: !!admin.ownerPwHash, unlocked: !!exp, remainingSec: exp ? Math.max(0, Math.round((exp - Date.now()) / 1000)) : 0 })
+      return send(res, 200, { configured: !!admin.ownerPwHash, unlocked: !!exp, viaAccount: false, remainingSec: exp ? Math.max(0, Math.round((exp - Date.now()) / 1000)) : 0, reauth: 'owner' })
     }
     if (sub === 'login' && m === 'POST') {
       if (!admin.ownerPwHash) return send(res, 503, { error: 'no owner password is set; see the portal README' })
@@ -385,8 +390,9 @@ function createPortal(cfg) {
     }
 
     // Everything below needs the owner unlock; each call keeps it alive for another 15 minutes.
-    if (!ownerCookieValid(req)) return send(res, 403, { error: 'owner password needed', locked: true })
-    res.setHeader('Set-Cookie', ownerCookie(req))
+    const viaAccount = accountAdmin(req)
+    if (!viaAccount && !ownerCookieValid(req)) return send(res, 403, { error: 'owner password needed', locked: true })
+    if (!viaAccount) res.setHeader('Set-Cookie', ownerCookie(req))   // the owner-password unlock slides; an admin account stays signed in
 
     if (sub === 'settings' && m === 'GET') return send(res, 200, { settings: S(), defs: SETTINGS, installed: { relayLatencyMs: cfg.relayLatencyMs, publicBase: cfg.publicBase } })
     if (sub === 'settings' && m === 'POST') {
@@ -402,7 +408,8 @@ function createPortal(cfg) {
     if (sub === 'password' && m === 'POST') {
       const b = await readJson(req)
       if (!b || !['admin', 'owner'].includes(b.which)) return send(res, 400, { error: 'say which password' })
-      if (!auth.checkPassword(String(b.current || ''), admin.ownerPwHash)) { admin.audit('owner', 'account.password.fail', b.which, ip); return send(res, 401, { error: 'the current owner password is wrong' }) }
+      const me = viaAccount ? admin.user(sessionUser(req)) : null
+      if (!auth.checkPassword(String(b.current || ''), me ? me.pwHash : admin.ownerPwHash)) { admin.audit(me ? me.username : 'owner', 'account.password.fail', b.which, ip); return send(res, 401, { error: me ? 'your current password is wrong' : 'the current owner password is wrong' }) }
       const next = String(b.next || '')
       if (next.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
       if (b.which === 'owner') admin.ownerPwHash = auth.hashPassword(next); else admin.adminPwHash = auth.hashPassword(next)
@@ -418,8 +425,10 @@ function createPortal(cfg) {
       if (admin.user(name)) return send(res, 409, { error: 'that username already exists' })
       const pw = String(b.password || '')
       if (pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
-      admin.setUser(name, auth.hashPassword(pw))
-      admin.audit('owner', 'account.user.create', name, ip)
+      const role = b.role === undefined ? 'user' : b.role
+      if (!ROLES.includes(role)) return send(res, 400, { error: 'role must be admin or user' })
+      admin.setUser(name, auth.hashPassword(pw), role)
+      admin.audit('owner', 'account.user.create', `${name} (${role})`, ip)
       return send(res, 200, { ok: true, users: admin.users() })
     }
     let um
@@ -428,6 +437,15 @@ function createPortal(cfg) {
       if (!S().sharedLogin && admin.users().length <= 1 && admin.user(name)) return send(res, 400, { error: 'this is the last account and shared sign-in is off; turn shared sign-in on first' })
       if (!admin.deleteUser(name)) return send(res, 404, { error: 'no such user' })
       admin.audit('owner', 'account.user.delete', name, ip)
+      return send(res, 200, { ok: true, users: admin.users() })
+    }
+    if ((um = sub.match(/^users\/([^/]+)\/role$/)) && m === 'POST') {
+      const name = decodeURIComponent(um[1])
+      const b = await readJson(req)
+      if (!b || !ROLES.includes(b.role)) return send(res, 400, { error: 'role must be admin or user' })
+      if (!admin.user(name)) return send(res, 404, { error: 'no such user' })
+      admin.setRole(name, b.role)
+      admin.audit('owner', 'account.user.role', `${name} -> ${b.role}`, ip)
       return send(res, 200, { ok: true, users: admin.users() })
     }
     if ((um = sub.match(/^users\/([^/]+)\/password$/)) && m === 'POST') {

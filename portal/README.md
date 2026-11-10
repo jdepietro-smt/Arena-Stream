@@ -9,7 +9,7 @@ Web side of Arena Link, added next to the existing server services (nothing is r
 
 ## Admin section (owner only)
 
-The Admin tab asks for a second, owner-only password on top of the normal login, and locks again after 15 idle minutes (the unlock cookie slides while you work). It holds:
+The Admin tab is for Admin accounts. Anyone else (a User account, or the shared password) has to give a second, owner-only password, and that unlock lasts 15 idle minutes (it slides while you work). It holds:
 
 - **Account and security.** Change the everyday portal password and the owner password (both need the current owner password; either change, and "Sign out everywhere", signs every browser out). Recent sign-ins and failed attempts.
 - **Settings.** Link address, relay delay for web viewers, live previews at once, thumbnails on or off and how often, default link expiry, and whether every link needs a password. They apply at once, no restart; a new relay delay is pushed to the mediamtx paths already in use.
@@ -18,9 +18,9 @@ The Admin tab asks for a second, owner-only password on top of the normal login,
 
 Restarts: the portal runs as an unprivileged user, so it leaves the service name in `/var/lib/arena-portal/ctl/request`; `arena-portal-ctl.path` runs `ctl.sh` as root, which restarts it only if the name is on a fixed list. Settings, the passwords (hashed with scrypt), the session epoch and the activity log live in `/var/lib/arena-portal/admin.json`.
 
-- **Portal users.** Named accounts, each with its own username and password (letters in any case; at least 10 characters), added, re-passworded and deleted from Account and security. Changing a password or deleting an account signs that person out. The shared portal password keeps working until you turn it off (it cannot be turned off while there are no accounts, or when it would remove the last one). Sign-ins and opens in the activity log carry the username.
+- **Portal users.** Named accounts, each with its own username and password (letters in any case; at least 10 characters), added, re-passworded, given a role and deleted from Account and security. A role is **Admin** or **User**. An Admin account opens this Admin area straight away, with no second password. A User account, and anyone using the shared portal password, can use the rest of the portal and must give the owner password to open this area. Accounts saved before roles existed count as Admin. Changing a password or deleting an account signs that person out; an Admin account changes passwords with its own password. The shared portal password keeps working until you turn it off (it cannot be turned off while there are no accounts, or when it would remove the last one). Sign-ins and opens in the activity log carry the username.
 
-Accounts from the server, with no typing of passwords: `node /opt/arena-portal/add-user.js <username>` creates one with a generated lowercase password it prints once (an existing account is left alone; `--reset` gives a new password). `bash portal/deploy/install.sh <username>` does the same as part of an install or update. Both stop the portal for a moment, because it holds its data in memory.
+Accounts from the server, with no typing of passwords: `node /opt/arena-portal/add-user.js <username>` creates an Admin account (`--role user` for a plain user) with a generated lowercase password it prints once (an existing account is left alone; `--reset` gives a new password). `bash portal/deploy/install.sh <username>` does the same as part of an install or update. Both stop the portal for a moment, because it holds its data in memory.
 
 Lost the owner password? On the server: `node /opt/arena-portal/reset-owner.js` prints a new one, signs everyone out and turns shared sign-in back on.
 
@@ -66,7 +66,7 @@ Settings live in `/etc/arena-portal/env`; links and the view log in `/var/lib/ar
 ## Development
 
 ```
-cd portal; node --test          # 25 tests with stand-ins for the directory and mediamtx
+cd portal; node --test          # 30 tests with stand-ins for the directory and mediamtx
 ```
 
 Standard library only (Node 18+), no `npm install`.
