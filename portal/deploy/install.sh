@@ -93,6 +93,10 @@ Group=nogroup
 Restart=always
 RestartSec=1
 NoNewPrivileges=true
+# The portal (and the ffmpeg it starts for thumbnails) must never take CPU from the relay or mediamtx.
+Nice=15
+CPUQuota=60%
+IOSchedulingClass=idle
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

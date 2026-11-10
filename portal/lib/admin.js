@@ -12,7 +12,7 @@ const SETTINGS = {
   relayLatencyMs:       { type: 'int', min: 40, max: 1500, def: 0 },   // 0 = use the installed default
   maxPreviews:          { type: 'int', min: 1, max: 10, def: 3 },
   thumbnailsEnabled:    { type: 'bool', def: true },
-  thumbEverySec:        { type: 'int', min: 2, max: 30, def: 3 },
+  thumbEverySec:        { type: 'int', min: 2, max: 30, def: 5 },
   defaultLinkExpiryMin: { type: 'int', min: 0, max: 525600, def: 1440 },
   requireLinkPassword:  { type: 'bool', def: false },
   sharedLogin:          { type: 'bool', def: true },                   // the one shared portal password still works at sign-in

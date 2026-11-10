@@ -6,7 +6,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { spawn: realSpawn } = require('node:child_process')
 
-function createThumbs({ ffmpeg = 'ffmpeg', dir, relaySrt, latencyMs = 150, everySec = 3, idleMs = 25000, maxWorkers = 8, spawn = realSpawn, log = () => {} }) {
+function createThumbs({ ffmpeg = 'ffmpeg', dir, relaySrt, latencyMs = 150, everySec = 3, idleMs = 25000, maxWorkers = 4, spawn = realSpawn, log = () => {} }) {
   fs.mkdirSync(dir, { recursive: true })
   const val = v => (typeof v === 'function' ? v() : v)   // latency and interval may follow a setting
   const workers = new Map()   // relay name -> { proc, file, wantedAt, restart }
@@ -14,7 +14,7 @@ function createThumbs({ ffmpeg = 'ffmpeg', dir, relaySrt, latencyMs = 150, every
   const fileFor = name => path.join(dir, String(name).replace(/[^A-Za-z0-9_.-]/g, '_') + '.jpg')
 
   function args(name, file) {
-    return ['-hide_banner', '-loglevel', 'error', '-skip_frame', 'nokey',
+    return ['-hide_banner', '-loglevel', 'error', '-threads', '1', '-probesize', '1000000', '-analyzeduration', '500000', '-skip_frame', 'nokey',
       '-i', `srt://${relaySrt}?streamid=read:${name}&mode=caller&latency=${val(latencyMs)}`,
       '-an', '-vf', `scale=480:-2:flags=area,fps=1/${val(everySec)}`, '-q:v', '6',
       '-f', 'image2', '-update', '1', '-atomic_writing', '1', '-y', file]

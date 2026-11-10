@@ -239,6 +239,7 @@ test('thumbnails: the picture worker starts on request, serves the picture, and 
     const a = t.calls.ffmpeg[0].args
     assert.equal(t.calls.ffmpeg[0].bin, 'ffmpeg-test')
     assert.ok(a.includes('nokey'), 'decodes key frames only')
+    assert.ok(a.includes('-threads') && a[a.indexOf('-threads') + 1] === '1', 'one decoder thread')
     assert.ok(a.some(x => /^srt:\/\/127\.0\.0\.1:8895\?streamid=read:ESPN-1&mode=caller/.test(x)))
     await new Promise(r => setTimeout(r, 80))
     const got = await t.call('/portal/api/thumb/e1')
