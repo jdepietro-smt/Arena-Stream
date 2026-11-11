@@ -31,8 +31,9 @@ function unseal(secret, blob) {
 const pemOf = der => '-----BEGIN CERTIFICATE-----\n' + der.toString('base64').replace(/(.{64})/g, '$1\n').trim() + '\n-----END CERTIFICATE-----\n'
 
 function parseUrl(url) {
-  let u
-  try { u = new URL(String(url).trim()) } catch { throw new Error('that does not look like a web address') }
+  let u, s = String(url || '').trim()
+  if (s && !/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = 'https://' + s.replace(/^\/+/, '')   // "5.161.235.143/comms" means https
+  try { u = new URL(s) } catch { throw new Error('that does not look like a web address; try https://5.161.235.143/comms') }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error('the address must start with https:// (or http://)')
   return u
 }
