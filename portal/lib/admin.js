@@ -40,7 +40,7 @@ function cleanSetting(key, v) {
 function openAdmin(dir) {
   fs.mkdirSync(dir, { recursive: true })
   const file = path.join(dir, 'admin.json')
-  let data = { ownerPwHash: '', adminPwHash: '', epoch: 1, settings: {}, audit: [], users: {} }
+  let data = { ownerPwHash: '', adminPwHash: '', epoch: 1, settings: {}, audit: [], users: {}, comms: null }
   try { data = { ...data, ...JSON.parse(fs.readFileSync(file, 'utf8')) } } catch { /* first run */ }
 
   let timer = null
@@ -71,14 +71,14 @@ function openAdmin(dir) {
       return changed
     },
     // Named portal accounts. `ver` changes with the password, which ends that user's sessions.
-    users: () => Object.values(data.users).map(u => ({ username: u.username, role: u.role || 'admin', name: u.name || '', email: u.email || '', createdAt: u.createdAt, ver: u.ver })),
+    users: () => Object.values(data.users).map(u => ({ username: u.username, role: u.role || 'admin', name: u.name || '', email: u.email || '', createdAt: u.createdAt, ver: u.ver, commsLinked: !!u.comms })),
     user: name => data.users[String(name).toLowerCase()] || null,
     // role: 'admin' (the Admin area opens without a second password) or 'user'. An account made before
     // roles existed has none, and counts as admin. A password change keeps the role.
     setUser(name, pwHash, role) {
       const key = String(name).toLowerCase()
       const old = data.users[key]
-      data.users[key] = { username: old ? old.username : String(name), pwHash, role: role || (old ? old.role : 'user'), createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
+      data.users[key] = { ...(old || {}), username: old ? old.username : String(name), pwHash, role: role || (old ? old.role : 'user'), createdAt: old ? old.createdAt : Date.now(), ver: old ? old.ver + 1 : 1 }
       flush()
       return data.users[key]
     },
@@ -91,6 +91,17 @@ function openAdmin(dir) {
       const u = data.users[String(name).toLowerCase()]
       if (!u) return false
       u.role = role; flush(); return true
+    },
+    // The Comms connection (address, admin sign-in with the password sealed, pinned certificate), or null.
+    get comms() { return data.comms },
+    setComms(c) { data.comms = c || null; flush() },
+    // A portal account linked to a Comms account (by Comms user id), or null.
+    commsLink: name => { const u = data.users[String(name).toLowerCase()]; return u && u.comms ? u.comms : null },
+    setCommsLink(name, link) {
+      const u = data.users[String(name).toLowerCase()]
+      if (!u) return false
+      if (link) u.comms = { id: String(link.id) }; else delete u.comms
+      flush(); return true
     },
     deleteUser(name) { const k = String(name).toLowerCase(); const had = !!data.users[k]; delete data.users[k]; if (had) flush(); return had },
     audit(who, action, detail = '', ip = '') {

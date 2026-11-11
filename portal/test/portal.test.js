@@ -761,3 +761,169 @@ test('capacity test: a plain user cannot reach it', async () => {
     assert.equal((await post(t, '/portal/api/owner/captest/start', { ack: true, allowLive: true })).status, 403)
   } finally { await t.close() }
 })
+
+
+// ── Comms (the intercom server) ───────────────────────────────────────────────
+// A stand-in for the Comms admin API: in-memory users and groups, a Bearer token, and a log of what was asked.
+function fakeComms(opts = {}) {
+  const st = { users: [{ id: 'u_admin', username: 'admin', name: 'Admin', admin: true, groups: [], overrides: {}, disabled: false }], groups: [{ id: 'cam', name: 'Camera', selfJoin: false, grants: { prod: { talk: true, listen: true } } }],
+    channels: [{ id: 'prod', name: 'PRODUCTION' }], online: [{ id: 'u_admin', name: 'Admin' }], log: [], kicked: [], seq: 0 }
+  const handler = (req, res) => {
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      const body = b ? JSON.parse(b) : {}
+      const send = (code, j) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(j)) }
+      const m = /^\/comms\/admin\/api\/(.*)$/.exec(req.url)
+      if (!m) return send(404, { error: 'nope' })
+      const [kind, id] = m[1].split('/')
+      st.log.push(req.method + ' ' + m[1] + (kind === 'login' ? '' : ' ' + JSON.stringify(body)))
+      if (kind === 'login') return body.username === 'admin' && body.password === 'commspass1' ? send(200, { token: opts.token || 'tok1', name: 'Admin' }) : send(401, { error: 'Wrong username or password' })
+      if (req.headers.authorization !== 'Bearer ' + (opts.token || 'tok1')) return send(401, { error: 'Sign in again' })
+      if (kind === 'logout') return send(200, { ok: true })
+      if (kind === 'state') return send(200, { channels: st.channels, groups: st.groups, users: st.users, online: st.online, gateways: [], serverPlayer: false, players: {} })
+      if (kind === 'kick') { st.kicked.push(id); return send(200, { ok: true }) }
+      if (kind === 'users' && req.method === 'POST') {
+        if (st.users.some(u => u.username === body.username)) return send(409, { error: 'That username is taken' })
+        const u = { id: 'u_' + (++st.seq), username: body.username, name: body.name || body.username, admin: false, groups: body.groups || [], overrides: {}, disabled: false, password: body.password }
+        st.users.push(u); return send(201, u)
+      }
+      if (kind === 'users' && req.method === 'PUT') { const u = st.users.find(x => x.id === id); if (!u) return send(404, { error: 'No such user' }); Object.assign(u, body); return send(200, u) }
+      if (kind === 'groups' && req.method === 'POST') { const g = { id: String(body.name).toLowerCase(), name: body.name, selfJoin: !!body.selfJoin, grants: body.grants || {} }; st.groups.push(g); return send(201, g) }
+      if (kind === 'groups' && req.method === 'PUT') { const g = st.groups.find(x => x.id === id); if (!g) return send(404, { error: 'No such group' }); Object.assign(g, body); return send(200, g) }
+      if (kind === 'groups' && req.method === 'DELETE') { st.groups = st.groups.filter(x => x.id !== id); return send(200, { ok: true }) }
+      send(404, { error: 'Not found' })
+    })
+  }
+  return { st, handler }
+}
+
+async function connectComms(t, url, extra = {}) {
+  return post(t, '/portal/api/owner/comms/connect', { url, user: 'admin', password: 'commspass1', ...extra })
+}
+
+test('comms: connect checks the sign-in, keeps the password sealed, and never shows it back', async () => {
+  const t = await setup(), fc = fakeComms(), srv = http.createServer(fc.handler), port = await listen(srv)
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    assert.deepEqual((await t.call('/portal/api/owner/comms')).body, { configured: false, url: '', user: '', fingerprint: '', linked: 0 })
+    assert.equal((await t.call('/portal/api/owner/comms/state')).status, 409)                      // not connected yet
+
+    const bad = await connectComms(t, `http://127.0.0.1:${port}/comms`, { password: 'wrong' })
+    assert.equal(bad.status, 400); assert.match(bad.body.error, /Wrong username or password/)
+    assert.equal((await t.call('/portal/api/owner/comms')).body.configured, false)
+
+    const ok = await connectComms(t, `http://127.0.0.1:${port}/comms/`)
+    assert.equal(ok.status, 200)
+    const s = (await t.call('/portal/api/owner/comms')).body
+    assert.equal(s.configured, true); assert.equal(s.url, `http://127.0.0.1:${port}/comms`); assert.equal(s.user, 'admin')
+    assert.ok(!JSON.stringify(s).includes('commspass1'))
+    const file = fs.readFileSync(path.join(t.dataDir, 'admin.json'), 'utf8')
+    assert.ok(!file.includes('commspass1'), 'the Comms password is not stored in plain text')
+    assert.ok(t.admin.auditList().some(e => e.action === 'comms.connect'))
+
+    const st = (await t.call('/portal/api/owner/comms/state')).body
+    assert.equal(st.groups[0].id, 'cam'); assert.equal(st.online[0].name, 'Admin')
+    assert.equal((await post(t, '/portal/api/owner/comms/disconnect')).status, 200)
+    assert.equal((await t.call('/portal/api/owner/comms/state')).status, 409)
+  } finally { await t.close(); srv.close() }
+})
+
+test('comms: kick, group and permission changes pass through, and only the allowed user fields', async () => {
+  const t = await setup(), fc = fakeComms(), srv = http.createServer(fc.handler), port = await listen(srv)
+  try {
+    await adminLogin(t); await ownerLogin(t); await connectComms(t, `http://127.0.0.1:${port}/comms`)
+    assert.equal((await post(t, '/portal/api/owner/comms/kick/u_admin')).status, 200); assert.deepEqual(fc.st.kicked, ['u_admin'])
+    const g = (await post(t, '/portal/api/owner/comms/groups', { name: 'Audio', grants: { prod: { talk: true, listen: true, music: true } } })).body
+    assert.equal(g.name, 'Audio')
+    assert.equal((await t.call('/portal/api/owner/comms/groups/audio', { method: 'PUT', body: { grants: { prod: { listen: true } } } })).body.grants.prod.talk, undefined)
+    assert.equal((await t.call('/portal/api/owner/comms/groups/audio', { method: 'DELETE' })).status, 200)
+    assert.ok(!fc.st.groups.some(x => x.id === 'audio'))
+
+    // only groups, overrides, disabled and title: a request for the admin flag or a password is dropped
+    const u = await t.call('/portal/api/owner/comms/users/u_admin', { method: 'PUT', body: { groups: ['cam'], admin: false, password: 'hackedpass1', title: 'TD' } })
+    assert.equal(u.status, 200); assert.deepEqual(fc.st.users[0].groups, ['cam']); assert.equal(fc.st.users[0].admin, true); assert.equal(fc.st.users[0].password, undefined)
+    assert.ok(t.admin.auditList().some(e => e.action === 'comms.kick'))
+    assert.equal((await t.call('/portal/api/owner/comms/users/nobody', { method: 'PUT', body: { title: 'x' } })).status, 404)
+  } finally { await t.close(); srv.close() }
+})
+
+test('comms: a portal account is linked, kept in step, and disabled when removed', async () => {
+  const t = await setup(), fc = fakeComms(), srv = http.createServer(fc.handler), port = await listen(srv)
+  try {
+    await adminLogin(t); await ownerLogin(t); await connectComms(t, `http://127.0.0.1:${port}/comms`)
+    // created with the link ticked: the Comms login is made with the same username, display name and password
+    const made = await post(t, '/portal/api/owner/users', { username: 'mia', password: 'miapassword1', name: 'Mia Cole', comms: { link: true, groups: ['cam'] } })
+    assert.equal(made.status, 200); assert.equal(made.body.commsNote, '')
+    const cu = fc.st.users.find(u => u.username === 'mia')
+    assert.deepEqual([cu.name, cu.groups, cu.password, cu.disabled], ['Mia Cole', ['cam'], 'miapassword1', false])
+    assert.equal(made.body.users.find(u => u.username === 'mia').commsLinked, true)
+    assert.equal((await t.call('/portal/api/owner/comms/state')).body.links[cu.id], 'mia')
+
+    // a new password and a new name follow to Comms
+    await post(t, '/portal/api/owner/users/mia/password', { password: 'newpassword22' }); assert.equal(cu.password, 'newpassword22')
+    await post(t, '/portal/api/owner/users/mia/profile', { name: 'Mia C', email: '' }); assert.equal(cu.name, 'Mia C')
+
+    // the profile survives a password change (setUser used to rebuild the record)
+    assert.equal(t.admin.users().find(u => u.username === 'mia').name, 'Mia C')
+
+    // an existing account is linked later: a Comms password is needed only if the Comms account does not exist
+    await post(t, '/portal/api/owner/users', { username: 'ben', password: 'benpassword12' })
+    const noPw = await post(t, '/portal/api/owner/users/ben/comms', { groups: [] })
+    assert.equal(noPw.status, 400); assert.match(noPw.body.error, /enter a password/)
+    assert.equal((await post(t, '/portal/api/owner/users/ben/comms', { groups: ['cam'], password: 'benpassword12' })).status, 200)
+    assert.equal(fc.st.users.find(u => u.username === 'ben').groups[0], 'cam')
+
+    // unlink and delete disable the Comms account, never delete it
+    assert.equal((await t.call('/portal/api/owner/users/ben/comms', { method: 'DELETE' })).status, 200)
+    assert.equal(fc.st.users.find(u => u.username === 'ben').disabled, true)
+    assert.equal(t.admin.users().find(u => u.username === 'ben').commsLinked, false)
+    const del = await t.call('/portal/api/owner/users/mia', { method: 'DELETE' })
+    assert.equal(del.status, 200); assert.equal(del.body.commsNote, '')
+    assert.equal(cu.disabled, true); assert.ok(fc.st.users.includes(cu), 'the Comms account is kept, only disabled')
+  } finally { await t.close(); srv.close() }
+})
+
+test('comms: if Comms is unreachable the portal change still happens, with a note', async () => {
+  const t = await setup(), fc = fakeComms(), srv = http.createServer(fc.handler), port = await listen(srv)
+  try {
+    await adminLogin(t); await ownerLogin(t); await connectComms(t, `http://127.0.0.1:${port}/comms`)
+    await post(t, '/portal/api/owner/users', { username: 'kim', password: 'kimpassword12', comms: { link: true } })
+    await new Promise(r => srv.close(r))                                                            // Comms goes away
+    const pw = await post(t, '/portal/api/owner/users/kim/password', { password: 'another-pass-3' })
+    assert.equal(pw.status, 200); assert.match(pw.body.commsNote, /Comms side was not updated/)
+    assert.equal((await t.call('/portal/api/owner/comms/state')).status, 502)
+    const del = await t.call('/portal/api/owner/users/kim', { method: 'DELETE' })
+    assert.equal(del.status, 200); assert.match(del.body.commsNote, /not updated/)
+  } finally { await t.close(); srv.close() }
+})
+
+test('comms: the certificate is pinned to the one the owner confirmed', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-'))
+  const mk = name => {
+    const r = require('node:child_process').spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(tmp, name + '.key'), '-out', path.join(tmp, name + '.crt'), '-days', '2', '-subj', '/CN=comms-test', '-addext', 'subjectAltName=IP:127.0.0.1'], { encoding: 'utf8' })
+    return r.status === 0 ? { key: fs.readFileSync(path.join(tmp, name + '.key')), cert: fs.readFileSync(path.join(tmp, name + '.crt')) } : null
+  }
+  const a = mk('a'), b = mk('b')
+  if (!a || !b) return                                                                                // openssl is not available here
+  const https = require('node:https')
+  const fc = fakeComms(), srv = https.createServer(a, fc.handler), port = await listen(srv)
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const url = `https://127.0.0.1:${port}/comms`
+    const probe = await post(t, '/portal/api/owner/comms/probe', { url })
+    assert.equal(probe.status, 200); assert.match(probe.body.fingerprint, /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/)
+
+    assert.equal((await connectComms(t, url)).status, 409)                                          // no fingerprint confirmed
+    assert.equal((await connectComms(t, url, { fingerprint: 'AA:BB' })).status, 409)               // not the one it presented
+    assert.equal((await connectComms(t, url, { fingerprint: probe.body.fingerprint })).status, 200)
+    assert.equal((await t.call('/portal/api/owner/comms/state')).status, 200)
+
+    // the server's certificate is replaced by a different one: refused, not trusted
+    await new Promise(r => srv.close(r))
+    const srv2 = https.createServer(b, fc.handler); await new Promise(r => srv2.listen(port, '127.0.0.1', r))
+    try {
+      const r = await t.call('/portal/api/owner/comms/state')
+      assert.equal(r.status, 502); assert.match(r.body.error, /different certificate/)
+    } finally { srv2.close() }
+  } finally { await t.close(); srv.close() }
+})

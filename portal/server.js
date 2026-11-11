@@ -18,6 +18,7 @@ const os = require('node:os')
 const { execFile } = require('node:child_process')
 const { openStore } = require('./lib/store')
 const { openAdmin, SETTINGS, USERNAME, ROLES, cleanProfile } = require('./lib/admin')
+const commsLib = require('./lib/comms')
 const { createThumbs } = require('./lib/thumbs')
 const captest = require('./lib/captest-core')
 
@@ -388,6 +389,43 @@ function createPortal(cfg) {
     return { running: unfinished && fresh, stalled: unfinished && !fresh && !requested, starting: !status && requested, status, history: readJsonFile('history.json') || [] }
   }
 
+  // ── Comms (the intercom server): controls and permissions only, never audio ────────────────────────────
+  const commsConn = () => {
+    const c = admin.comms
+    if (!c) return null
+    const pass = commsLib.unseal(cfg.secret, c.pass)
+    return pass ? { url: c.url, user: c.user, pass, pem: c.pem } : null
+  }
+  const comms = commsLib.createComms(commsConn)
+  const commsOf = res => async fn => {
+    try { return await fn() } catch (e) { return send(res, e.status && e.status < 600 ? e.status : 502, { error: e.message }) }
+  }
+  // Makes (or updates) the Comms account that goes with a portal account: same username, display name from the profile.
+  // `password` is only known when it is being set; a new Comms account needs one.
+  async function commsSync(name, { password, groups } = {}) {
+    const u = admin.users().find(x => x.username.toLowerCase() === String(name).toLowerCase())
+    if (!u) throw Object.assign(new Error('no such user'), { status: 404 })
+    const display = (u.name || u.username).slice(0, 32)
+    const link = admin.commsLink(u.username)
+    const st = await comms.call('GET', 'state')
+    const cu = (link && st.users.find(x => x.id === link.id)) || st.users.find(x => x.username.toLowerCase() === u.username.toLowerCase())
+    let out
+    if (cu) out = await comms.call('PUT', 'users/' + encodeURIComponent(cu.id), { name: display, disabled: false, ...(Array.isArray(groups) ? { groups } : {}), ...(password ? { password } : {}) })
+    else {
+      if (!password) throw Object.assign(new Error('enter a password for their Comms login (the same one as the portal is fine)'), { status: 400 })
+      out = await comms.call('POST', 'users', { username: u.username, name: display, password, groups: Array.isArray(groups) ? groups : [] })
+    }
+    admin.setCommsLink(u.username, { id: out.id })
+    return out
+  }
+  // Best effort, for changes that must not fail just because Comms is away: returns a note for the page.
+  async function commsTry(fn) { try { await fn(); return '' } catch (e) { return 'The Comms side was not updated: ' + e.message } }
+  async function commsDisable(name) {
+    const link = admin.commsLink(name)
+    if (!link) return
+    await comms.call('PUT', 'users/' + encodeURIComponent(link.id), { disabled: true })
+  }
+
   const MIN_PW = 10
   async function ownerApi(req, res, p, m) {
     const ip = clientIp(req)
@@ -455,15 +493,18 @@ function createPortal(cfg) {
       admin.setUser(name, auth.hashPassword(pw), role)
       admin.setProfile(name, prof)
       admin.audit('owner', 'account.user.create', `${name} (${role})`, ip)
-      return send(res, 200, { ok: true, users: admin.users() })
+      let commsNote = ''
+      if (b.comms && b.comms.link) { commsNote = await commsTry(() => commsSync(name, { password: pw, groups: b.comms.groups })); admin.audit('owner', 'comms.link', name + (commsNote ? ' (failed)' : ''), ip) }
+      return send(res, 200, { ok: true, users: admin.users(), commsNote })
     }
     let um
     if ((um = sub.match(/^users\/([^/]+)$/)) && m === 'DELETE') {
       const name = decodeURIComponent(um[1])
       if (!S().sharedLogin && admin.users().length <= 1 && admin.user(name)) return send(res, 400, { error: 'this is the last account and shared sign-in is off; turn shared sign-in on first' })
+      const commsNote = admin.commsLink(name) ? await commsTry(() => commsDisable(name)) : ''
       if (!admin.deleteUser(name)) return send(res, 404, { error: 'no such user' })
       admin.audit('owner', 'account.user.delete', name, ip)
-      return send(res, 200, { ok: true, users: admin.users() })
+      return send(res, 200, { ok: true, users: admin.users(), commsNote })
     }
     if ((um = sub.match(/^users\/([^/]+)\/profile$/)) && m === 'POST') {
       const name = decodeURIComponent(um[1])
@@ -473,7 +514,8 @@ function createPortal(cfg) {
       try { prof = cleanProfile(b) } catch (e) { return send(res, 400, { error: e.message }) }
       admin.setProfile(name, prof)
       admin.audit('owner', 'account.user.profile', name, ip)
-      return send(res, 200, { ok: true, users: admin.users() })
+      const commsNote = admin.commsLink(name) ? await commsTry(() => commsSync(name)) : ''
+      return send(res, 200, { ok: true, users: admin.users(), commsNote })
     }
     if ((um = sub.match(/^users\/([^/]+)\/role$/)) && m === 'POST') {
       const name = decodeURIComponent(um[1])
@@ -493,8 +535,92 @@ function createPortal(cfg) {
       if (pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
       admin.setUser(u.username, auth.hashPassword(pw))
       admin.audit('owner', 'account.user.password', u.username, ip)
+      const commsNote = admin.commsLink(u.username) ? await commsTry(() => commsSync(u.username, { password: pw })) : ''
+      return send(res, 200, { ok: true, commsNote })
+    }
+    // Comms: connect, look, and change controls and permissions. The Comms admin password never reaches the browser.
+    if (sub === 'comms' && m === 'GET') {
+      const c = admin.comms
+      return send(res, 200, { configured: !!commsConn(), url: c ? c.url : '', user: c ? c.user : '', fingerprint: c ? c.fingerprint : '', linked: admin.users().filter(u => u.commsLinked).length })
+    }
+    if (sub === 'comms/probe' && m === 'POST') return commsOf(res)(async () => {
+      const b = await readJson(req)
+      const r = await commsLib.probeCert(b && b.url)
+      return send(res, 200, { https: r.https, fingerprint: r.fingerprint || '', subject: r.subject || '', validTo: r.validTo || '' })
+    })
+    if (sub === 'comms/connect' && m === 'POST') return commsOf(res)(async () => {
+      const b = await readJson(req) || {}
+      const u = commsLib.parseUrl(b.url)
+      const url = u.origin + u.pathname.replace(/\/$/, '')
+      const user = String(b.user || '').trim(), password = String(b.password || '')
+      if (!user || !password) return send(res, 400, { error: 'the Comms admin username and password are required' })
+      let pem = '', fingerprint = ''
+      if (u.protocol === 'https:') {
+        const pr = await commsLib.probeCert(url)
+        if (!b.fingerprint || pr.fingerprint !== b.fingerprint) return send(res, 409, { error: 'the certificate is not the one you confirmed; check it again' })
+        pem = pr.pem; fingerprint = pr.fingerprint
+      }
+      await commsLib.createComms(() => null).test({ url, user, pass: password, pem })
+      admin.setComms({ url, user, pass: commsLib.seal(cfg.secret, password), pem, fingerprint })
+      comms.forget()
+      admin.audit('owner', 'comms.connect', url, ip)
+      return send(res, 200, { ok: true })
+    })
+    if (sub === 'comms/disconnect' && m === 'POST') {
+      admin.setComms(null); comms.forget(); admin.audit('owner', 'comms.disconnect', '', ip)
       return send(res, 200, { ok: true })
     }
+    if (sub === 'comms/state' && m === 'GET') return commsOf(res)(async () => {
+      const st = await comms.call('GET', 'state')
+      const links = {}
+      for (const pu of admin.users()) { const l = admin.commsLink(pu.username); if (l) links[l.id] = pu.username }
+      return send(res, 200, { ...st, links })
+    })
+    let cm
+    if ((cm = sub.match(/^comms\/kick\/([^/]+)$/)) && m === 'POST') return commsOf(res)(async () => {
+      await comms.call('POST', 'kick/' + encodeURIComponent(decodeURIComponent(cm[1])))
+      admin.audit('owner', 'comms.kick', decodeURIComponent(cm[1]), ip)
+      return send(res, 200, { ok: true })
+    })
+    if (sub === 'comms/groups' && m === 'POST') return commsOf(res)(async () => {
+      const b = await readJson(req) || {}
+      const g = await comms.call('POST', 'groups', { name: b.name, selfJoin: b.selfJoin, grants: b.grants })
+      admin.audit('owner', 'comms.group.create', g.name, ip)
+      return send(res, 200, g)
+    })
+    if ((cm = sub.match(/^comms\/groups\/([^/]+)$/)) && (m === 'PUT' || m === 'DELETE')) return commsOf(res)(async () => {
+      const id = encodeURIComponent(decodeURIComponent(cm[1]))
+      if (m === 'DELETE') { await comms.call('DELETE', 'groups/' + id); admin.audit('owner', 'comms.group.delete', decodeURIComponent(cm[1]), ip); return send(res, 200, { ok: true }) }
+      const b = await readJson(req) || {}
+      const g = await comms.call('PUT', 'groups/' + id, { ...(b.name !== undefined ? { name: b.name } : {}), ...(b.selfJoin !== undefined ? { selfJoin: b.selfJoin } : {}), ...(b.grants !== undefined ? { grants: b.grants } : {}) })
+      admin.audit('owner', 'comms.group.update', g.name, ip)
+      return send(res, 200, g)
+    })
+    // Who may do what for one Comms user. Only these fields: no password and no administrator flag from here.
+    if ((cm = sub.match(/^comms\/users\/([^/]+)$/)) && m === 'PUT') return commsOf(res)(async () => {
+      const b = await readJson(req) || {}
+      const patch = {}
+      for (const k of ['groups', 'overrides', 'disabled', 'title']) if (b[k] !== undefined) patch[k] = b[k]
+      const u = await comms.call('PUT', 'users/' + encodeURIComponent(decodeURIComponent(cm[1])), patch)
+      admin.audit('owner', 'comms.user.update', u.username + ' ' + Object.keys(patch).join(','), ip)
+      return send(res, 200, u)
+    })
+    // Link a portal account to a Comms account (creating it if needed), or unlink (the Comms account is disabled).
+    if ((um = sub.match(/^users\/([^/]+)\/comms$/)) && (m === 'POST' || m === 'DELETE')) return commsOf(res)(async () => {
+      const name = decodeURIComponent(um[1])
+      if (!admin.user(name)) return send(res, 404, { error: 'no such user' })
+      if (m === 'DELETE') {
+        await commsDisable(name); admin.setCommsLink(name, null)
+        admin.audit('owner', 'comms.unlink', name, ip)
+        return send(res, 200, { ok: true, users: admin.users() })
+      }
+      const b = await readJson(req) || {}
+      const pw = String(b.password || '')
+      if (pw && pw.length < MIN_PW) return send(res, 400, { error: `use at least ${MIN_PW} characters` })
+      await commsSync(name, { password: pw || undefined, groups: b.groups })
+      admin.audit('owner', 'comms.link', name, ip)
+      return send(res, 200, { ok: true, users: admin.users() })
+    })
     if (sub === 'signout-all' && m === 'POST') {
       admin.bumpEpoch(); admin.audit('owner', 'account.signout-all', '', ip)
       return send(res, 200, { ok: true, signedOut: true })
