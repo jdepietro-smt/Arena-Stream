@@ -75,14 +75,23 @@ function showLogin() {
   user.focus()
 }
 
+// Four sections. Video holds Streams, Web links and Decoders as a second row; the others are one page each.
+const VIDEO_TABS = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders']]
+const isVideo = t => VIDEO_TABS.some(v => v[0] === t)
+let lastVideoTab = 'streams'
+function stopSectionTimers() { clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer); clearInterval(commsTimer) }
 function shell(content) {
-  const tabs = [['streams', 'Streams'], ['links', 'Web links'], ['decoders', 'Decoders'], ['admin', 'Admin']]
+  const sections = [['video', 'Video'], ['comms', 'Comms'], ['remote', 'Remote access'], ['admin', 'Admin']]
+  const cur = isVideo(tab) ? 'video' : tab
+  const go = k => { tab = k === 'video' ? lastVideoTab : k; stopSectionTimers(); refresh() }
+  const subnav = isVideo(tab) ? el('div', { class: 'row', style: 'margin-bottom:14px' }, VIDEO_TABS.map(([k, t]) => el('button', { class: 'b' + (tab === k ? ' pri' : ''), onclick: () => { tab = lastVideoTab = k; refresh() } }, t))) : null
+  content = [].concat(subnav ? [subnav] : [], content)
   return [
     el('header', {}, el('h1', {}, 'Arena Portal'),
-      el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer); clearInterval(commsTimer); refresh() } }, t))),
+      el('nav', {}, sections.map(([k, t]) => el('button', { class: cur === k ? 'on' : '', onclick: () => go(k) }, t))),
       el('div', { class: 'sp' }), me.user ? el('button', { class: 'b', title: 'Signed in as ' + me.user + '. Click to edit your name and email.', onclick: myProfile }, me.name || me.user) : null,
       el('button', { class: 'b', onclick: async () => { await api('/logout', 'POST'); showLogin() } }, 'Sign out')),
-    el('main', {}, content),
+    el('main', {}, ...content),
   ]
 }
 
@@ -219,13 +228,13 @@ function newLinkDialog(stream) {
 // ── Admin (owner-only) ─────────────────────────────────────────────────────────
 // Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
 let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
-const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['comms', 'Comms'], ['activity', 'Activity and links']]
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
 
 async function oapi(path, method = 'GET', body) {
   const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
   const j = await r.json().catch(() => ({}))
   if (r.status === 401 && path !== '/login') { showLogin(); throw new Error('signed out') }
-  if (r.status === 403 && j.locked) { owner.unlocked = false; adminRender(); throw new Error('locked') }
+  if (r.status === 403 && j.locked) { owner.unlocked = false; ownerAreaRender(); throw new Error('locked') }
   if (!r.ok) throw new Error(j.error || r.statusText)
   return j
 }
@@ -257,19 +266,18 @@ async function adminRender() {
     else if (adminSub === 'settings') await settingsSection(content)
     else if (adminSub === 'health') await healthSection(content)
     else if (adminSub === 'capacity') await capacitySection(content)
-    else if (adminSub === 'comms') await commsSection(content)
     else await activitySection(content)
   } catch (e) { if (e.message !== 'locked' && e.message !== 'signed out') content.replaceChildren(el('div', { class: 'err' }, e.message)) }
 }
 
-function lockCard() {
+function lockCard(then) {
   const err = msgBox()
   const pw = el('input', { type: 'password', placeholder: 'Owner password', autocomplete: 'off' })
-  const go = async () => { try { await oapi('/login', 'POST', { password: pw.value }); adminRender() } catch (e) { flash(err, e.message) } }
+  const go = async () => { try { await oapi('/login', 'POST', { password: pw.value }); (then || adminRender)() } catch (e) { flash(err, e.message) } }
   pw.addEventListener('keydown', e => e.key === 'Enter' && go())
   setTimeout(() => pw.focus(), 50)
   return el('div', { class: 'card', style: 'margin:6vh auto' }, el('h2', {}, 'Owner area'),
-    el('div', { class: 'hint' }, owner.configured ? 'Settings, passwords, server health and the activity log need the owner password. It locks again after 15 minutes.' : 'No owner password is set yet. See the portal README to set one.'),
+    el('div', { class: 'hint' }, owner.configured ? 'Admin and Comms need the owner password. It locks again after 15 minutes.' : 'No owner password is set yet. See the portal README to set one.'),
     pw, el('button', { class: 'b pri', onclick: go, disabled: !owner.configured }, 'Unlock'), err)
 }
 
@@ -324,18 +332,16 @@ async function usersCard() {
     const pname = el('input', { type: 'text', placeholder: 'Full name (optional)', autocomplete: 'off' })
     const pemail = el('input', { type: 'text', placeholder: 'Email address (optional)', autocomplete: 'off' })
     const role = el('select', {}, el('option', { value: 'user' }, 'User'), el('option', { value: 'admin' }, 'Admin (opens this area without a second password)'))
-    const withComms = el('input', { type: 'checkbox' })
-    const add = async () => { try { const r = await oapi('/users', 'POST', { username: name.value, password: pw.value, role: role.value, name: pname.value, email: pemail.value, comms: withComms.checked ? { link: true } : undefined }); flash(m, 'Account created.' + (r.commsNote ? ' ' + r.commsNote : ''), !r.commsNote); draw() } catch (e) { flash(m, e.message) } }
+    const add = async () => { try { const r = await oapi('/users', 'POST', { username: name.value, password: pw.value, role: role.value, name: pname.value, email: pemail.value }); flash(m, 'Account created.', true); draw() } catch (e) { flash(m, e.message) } }
     card.replaceChildren(el('h2', {}, 'Portal users'),
       el('div', { class: 'hint' }, 'Named logins for the portal. An Admin account opens this Admin area straight away; a User account (or the shared password) needs the owner password for it.'),
       users.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, users.map(u => el('tr', {},
         el('td', {}, el('div', {}, u.username), u.name || u.email ? el('div', { class: 'hint', style: 'margin:0' }, [u.name, u.email].filter(Boolean).join('  ·  ')) : null), el('td', {}, (() => { const r = el('select', {}, el('option', { value: 'user', selected: u.role === 'user' }, 'User'), el('option', { value: 'admin', selected: u.role === 'admin' }, 'Admin')); r.addEventListener('change', async () => { try { await oapi('/users/' + encodeURIComponent(u.username) + '/role', 'POST', { role: r.value }); flash(m, u.username + ' is now ' + r.value + '.', true) } catch (e) { flash(m, e.message); draw() } }); return r })()),
         el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' },
-          el('button', { class: 'b', onclick: () => commsDialog(u, draw) }, u.commsLinked ? 'Comms: linked' : 'Comms'),
           el('button', { class: 'b', onclick: () => profileDialog('Profile: ' + u.username, u, async p => { await oapi('/users/' + encodeURIComponent(u.username) + '/profile', 'POST', p); draw() }) }, 'Edit profile'),
           el('button', { class: 'b', onclick: async () => { const n = prompt('New password for ' + u.username + ' (10+ characters)'); if (!n) return; try { const r = await oapi('/users/' + encodeURIComponent(u.username) + '/password', 'POST', { password: n }); flash(m, 'Password changed; ' + u.username + ' is signed out.' + (r.commsNote ? ' ' + r.commsNote : (u.commsLinked ? ' Their Comms password changed too.' : '')), !r.commsNote) } catch (e) { flash(m, e.message) } } }, 'Set password'),
           el('button', { class: 'b', onclick: async () => { if (confirm('Delete the account ' + u.username + '?' + (u.commsLinked ? ' Their Comms login will be disabled (not deleted).' : ''))) { try { const r = await oapi('/users/' + encodeURIComponent(u.username), 'DELETE'); if (r.commsNote) alert(r.commsNote); draw() } catch (e) { flash(m, e.message) } } } }, 'Delete'))))))) : el('div', { class: 'hint' }, 'No accounts yet. Only the shared portal password signs in.'),
-      el('div', { class: 'row' }, name, pw), el('div', { class: 'row' }, pname, pemail), el('div', { class: 'row' }, role), el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, withComms, el('span', {}, 'Also create a Comms login for them (same username and password)')), el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: add }, 'Add account'), m),
+      el('div', { class: 'row' }, name, pw), el('div', { class: 'row' }, pname, pemail), el('div', { class: 'row' }, role), el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: add }, 'Add account'), m),
       el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, el('input', { type: 'checkbox', checked: sharedLogin, onchange: async e => { try { await oapi('/settings', 'POST', { settings: { sharedLogin: e.target.checked } }); flash(m, 'Saved.', true) } catch (err) { flash(m, err.message) } } }),
         el('span', {}, 'The shared portal password can still sign in (turn off once everyone has an account)')))
   }
@@ -484,7 +490,7 @@ async function commsSection(box) {
       } catch (e) { flash(err, e.message) }
     }
     const showConnect = () => step2.replaceChildren(el('div', { class: 'hint' }, 'An administrator account on the Comms server. The portal keeps its password sealed on the portal server and never shows it again.'), el('div', { class: 'row' }, user, pw),
-      el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { err.textContent = ''; try { await oapi('/comms/connect', 'POST', { url: url.value, user: user.value, password: pw.value, fingerprint: fp }); adminRender() } catch (e) { flash(err, e.message) } } }, 'Connect')))
+      el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { err.textContent = ''; try { await oapi('/comms/connect', 'POST', { url: url.value, user: user.value, password: pw.value, fingerprint: fp }); refresh() } catch (e) { flash(err, e.message) } } }, 'Connect')))
     box.replaceChildren(el('div', { class: 'card', style: 'max-width:620px;margin:0' }, el('h2', {}, 'Connect to Comms'),
       el('div', { class: 'hint' }, 'Manage the intercom from here: who is online, groups, and who may talk, listen or play music on each channel. Audio never passes through the portal; only these controls do.'),
       el('div', { class: 'row' }, url, el('button', { class: 'b', onclick: check }, 'Check the server')), certBox, step2, err))
@@ -494,7 +500,7 @@ async function commsSection(box) {
   const live = el('div')
   box.replaceChildren(el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('div', { class: 'row', style: 'flex-wrap:wrap' },
     el('div', {}, el('h2', { style: 'margin:0' }, 'Comms'), el('div', { class: 'hint', style: 'margin:0' }, info.url + '  ·  signed in as ' + info.user + '  ·  ' + info.linked + ' linked portal account' + (info.linked === 1 ? '' : 's'))),
-    el('div', { class: 'sp' }), el('button', { class: 'b', onclick: async () => { if (confirm('Disconnect the portal from Comms? Nothing is deleted on the Comms server.')) { await oapi('/comms/disconnect', 'POST'); adminRender() } } }, 'Disconnect portal from Comms')), err), live)
+    el('div', { class: 'sp' }), el('button', { class: 'b', onclick: async () => { if (confirm('Disconnect the portal from Comms? Nothing is deleted on the Comms server.')) { await oapi('/comms/disconnect', 'POST'); refresh() } } }, 'Disconnect portal from Comms')), err), live)
 
   let st = null, busy = false
   const draw = async () => {
@@ -538,13 +544,19 @@ async function commsSection(box) {
         el('div', { class: 'hint', style: 'margin:0' }, [u.name !== u.username ? u.name : '', st.links[u.id] ? 'portal account: ' + st.links[u.id] : 'not linked to a portal account'].filter(Boolean).join('  ·  '))),
         el('td', {}, st.groups.length ? el('div', { style: 'display:flex;flex-wrap:wrap' }, boxes) : el('span', { class: 'hint' }, 'no groups yet')), el('td', {}, el('label', { class: 'check', style: 'flex-direction:row;gap:5px;color:var(--text)' }, dis, el('span', {}, 'Disabled'))))
     }
+    const portalUsers = (await oapi('/users')).users
+    const accounts = el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Portal accounts and Comms logins'),
+      el('div', { class: 'hint' }, 'Link a portal account to a Comms login with the same username, name and password, so one place manages both. Unlinking only disables the Comms login.'),
+      portalUsers.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, portalUsers.map(u => el('tr', {}, el('td', {}, el('div', {}, u.username), u.name ? el('div', { class: 'hint', style: 'margin:0' }, u.name) : null),
+        el('td', {}, u.commsLinked ? el('span', { class: 'chip ok' }, 'linked') : el('span', { class: 'hint' }, 'not linked')),
+        el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' }, el('button', { class: 'b', onclick: () => commsDialog(u, draw) }, u.commsLinked ? 'Edit link' : 'Give a Comms login'))))))) : el('div', { class: 'hint' }, 'No portal accounts yet. Portal accounts are created in Admin.'))
     const people = el('div', { class: 'card', style: 'max-width:none;margin:0' }, el('h2', {}, 'People'),
-      el('div', { class: 'hint' }, 'Create a Comms login for a portal user from Account and security (the "Comms" button on their row), so one place manages both. Changes here take effect for people who are connected right away.'),
+      el('div', { class: 'hint' }, 'Everyone with a Comms login. Changes here take effect for people who are connected right away.'),
       st.users.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, st.users.map(userRow))) : el('div', { class: 'hint' }, 'No Comms users.'))
-    live.replaceChildren(online, groups, people)
+    live.replaceChildren(online, groups, accounts, people)
   }
   await draw()
-  commsTimer = setInterval(() => { if (adminSub === 'comms' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && !live.querySelector('details[open]') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 5000)
+  commsTimer = setInterval(() => { if (tab === 'comms' && !document.hidden && !document.querySelector('.modal') && !live.querySelector('details[open]') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 5000)
 }
 
 // ── Capacity test ───────────────────────────────────────────────────────────────
@@ -609,8 +621,24 @@ async function capacitySection(box) {
   capTimer = setInterval(() => { if (adminSub === 'capacity' && tab === 'admin' && !document.hidden) draw().catch(() => {}) }, 2000)
 }
 
+// Comms is its own section. It needs the same owner access as Admin (an Admin account has it already).
+async function commsPage() {
+  const content = el('div')
+  $app.replaceChildren(...shell(content))
+  try { owner = await oapi('/status') } catch (e) { return }
+  if (!owner.unlocked) return content.replaceChildren(lockCard(refresh))
+  try { await commsSection(content) } catch (e) { if (e.message !== 'locked' && e.message !== 'signed out') content.replaceChildren(el('div', { class: 'err' }, e.message)) }
+}
+function remotePage() {
+  $app.replaceChildren(...shell(el('div', { class: 'card', style: 'max-width:620px;margin:0' }, el('h2', {}, 'Remote access'),
+    el('div', { class: 'hint' }, 'Reserved for remote access features. Nothing is here yet.'))))
+}
+// Used when the owner area locks while one of its pages is open.
+const ownerAreaRender = () => tab === 'admin' ? adminRender() : refresh()
 async function refresh() {
   if (tab === 'admin') { $app.replaceChildren(...shell(el('div'))); return adminRender() }
+  if (tab === 'comms') return commsPage()
+  if (tab === 'remote') return remotePage()
   try {
     const [s, l, d] = await Promise.all([api('/streams'), api('/links'), tab === 'decoders' ? api('/decoders').catch(() => ({ decoders: [] })) : Promise.resolve({ decoders })])
     streams = s.streams; links = l.links; decoders = d.decoders
@@ -619,6 +647,6 @@ async function refresh() {
   if (document.activeElement && document.activeElement.tagName === 'SELECT') return   // do not close an open dropdown
   $app.replaceChildren(...shell(tab === 'streams' ? streamsView() : tab === 'links' ? linksView() : decodersView()))
 }
-function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal') && tab !== 'admin') refresh() }, 2500) }
+function start() { refresh(); clearInterval(timer); clearInterval(thumbTimer); thumbTimer = setInterval(fetchThumbs, 4000); setTimeout(fetchThumbs, 600); timer = setInterval(() => { if (!document.hidden && !document.querySelector('.modal') && isVideo(tab)) refresh() }, 2500) }
 api('/me').then(m => { publicBase = m.publicBase || ''; me = m; start() }).catch(() => showLogin())
 </script></body></html>
