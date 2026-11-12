@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; gainDb?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' } | { kind: 'node'; node: AudioNode }
@@ -404,6 +404,9 @@ export class CommsEngine {
     this.emit()
   }
 
+  /** The admin's per-channel trim (dB set on the server), as a linear factor. */
+  channelTrim(ch: string): number { return 10 ** ((this.channels.find(c => c.id === ch)?.gainDb ?? 0) / 20) }
+
   channelLevel(ch: string): number { return this.chLevels.get(ch) ?? (this.isMusic(ch) ? 0.6 : 1) }
 
   setChannelLevel(ch: string, v: number) {
@@ -422,7 +425,7 @@ export class CommsEngine {
    */
   private peerLevel(info: PeerInfo): number {
     if (info.talk.includes(`u:${this.myId}`)) return 1
-    const levels = info.talk.filter(t => !isUser(t) && this.listen.has(t)).map(t => this.channelLevel(t))
+    const levels = info.talk.filter(t => !isUser(t) && this.listen.has(t)).map(t => this.channelLevel(t) * this.channelTrim(t))
     return levels.length ? Math.max(...levels) : 1
   }
 
@@ -436,7 +439,7 @@ export class CommsEngine {
         p.voice.pan.pan.setTargetAtTime(this.peerPan(p.info), t, 0.02)
       }
       for (const v of this.sfuVoices.values()) {
-        v.gain.gain.setTargetAtTime(this.masterVolume * (v.ch ? this.channelLevel(v.ch) : 1), t, 0.02)
+        v.gain.gain.setTargetAtTime(this.masterVolume * (v.ch ? this.channelLevel(v.ch) * this.channelTrim(v.ch) : 1), t, 0.02)
         v.pan.pan.setTargetAtTime(v.ch ? this.channelPan(v.ch) : 0, t, 0.02)
       }
     }
@@ -661,6 +664,7 @@ export class CommsEngine {
           for (const t of [...set]) if (!isUser(t) && !this.channels.find(c => c.id === t)?.canTalk) set.delete(t)
         }
         this.applyRouting()
+        this.applyVolumes()   // an admin may have changed a channel's gain
         if (this.media === 'sfu') void this.syncSfuTracks()
         this.emit()
         break
@@ -1192,7 +1196,7 @@ export class CommsEngine {
       const c = this.channels.find(x => x.id === ch)
       // Music ducks under IFB talkers unless the channel opts out, to its own depth if set (else the IFB's).
       const ducking = this.ducked && !c?.noDuck
-      const target = this.listen.has(ch) ? this.channelLevel(ch) * this.masterVolume * (ducking ? (c?.duck ?? this.duckLevel) : 1) : 0
+      const target = this.listen.has(ch) ? this.channelLevel(ch) * this.channelTrim(ch) * this.masterVolume * (ducking ? (c?.duck ?? this.duckLevel) : 1) : 0
       gain.gain.setTargetAtTime(target, ctx.currentTime, ducking ? 0.03 : 0.2)
     }
   }

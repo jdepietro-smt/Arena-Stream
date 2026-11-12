@@ -51,6 +51,10 @@ table.grid tbody tr:hover td{background:#1a1f27}
 .gcol{text-align:center!important;min-width:84px}
 .gbs{display:inline-flex;gap:4px}.gb{width:22px;height:22px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:#1b2028;color:#3b4350}
 .gb.on{background:rgba(255,185,56,.18);color:var(--acc)}
+.gain{display:inline-flex;align-items:center;gap:4px}
+.gstep,.gval{background:#1d222b;border:1px solid var(--edge);color:var(--text);border-radius:6px;font:inherit;cursor:pointer;height:26px}
+.gstep{width:26px;font-size:15px;line-height:1;padding:0}.gstep:hover,.gval:hover{border-color:var(--acc)}
+.gval{min-width:70px;font-family:Consolas,monospace;font-size:12px;color:var(--mut)}.gval.on{color:var(--acc);border-color:rgba(255,185,56,.5)}
 .swatch{width:14px;height:34px;border-radius:5px;flex:none}
 .gwline{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
 .pills{display:flex;flex-wrap:wrap;gap:6px}
@@ -577,16 +581,31 @@ async function commsSection(box) {
     const channelsView = () => {
       const kind = c => c.music ? 'Music' : c.ifb ? 'IFB' : c.withMusic ? 'Party + music' : 'Party line'
       const badge = (on, t) => el('span', { class: 'gb' + (on ? ' on' : '') }, t)
-      const head = ['Channel', 'Type', 'Gateway'].map(h => el('th', {}, h)).concat(st.groups.map(g => el('th', { class: 'gcol', title: plural(st.users.filter(u => (u.groups || []).includes(g.id)).length, 'member') }, g.name)))
+      const head = ['Channel', 'Type', 'Gateway', 'Gain'].map(h => el('th', {}, h)).concat(st.groups.map(g => el('th', { class: 'gcol', title: plural(st.users.filter(u => (u.groups || []).includes(g.id)).length, 'member') }, g.name)))
+      // Gain trim in dB, applied by every app that listens to the channel. Clicks are batched into one save.
+      const gainTimers = {}
+      const fmtDb = v => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1) + ' dB'
+      const gainCell = c => {
+        const val = el('button', { class: 'gval', title: 'Click to reset to 0 dB' }, '')
+        const show = () => { const v = c.gainDb || 0; val.textContent = fmtDb(v); val.classList.toggle('on', v !== 0) }
+        const set = v => {
+          c.gainDb = Math.max(-24, Math.min(12, Math.round(v * 2) / 2)); show(); busy = true
+          clearTimeout(gainTimers[c.id])
+          gainTimers[c.id] = setTimeout(async () => { try { await oapi('/comms/channels/' + encodeURIComponent(c.id), 'PUT', { gainDb: c.gainDb || 0 }); flash(err, c.name + ' set to ' + fmtDb(c.gainDb || 0) + '.', true) } catch (e) { flash(err, e.message) } busy = false; load() }, 450)
+        }
+        val.onclick = () => set(0); show()
+        return el('div', { class: 'gain' }, el('button', { class: 'gstep', title: 'Quieter (1 dB)', onclick: () => set((c.gainDb || 0) - 1) }, '−'), val, el('button', { class: 'gstep', title: 'Louder (1 dB)', onclick: () => set((c.gainDb || 0) + 1) }, '+'))
+      }
       const row = c => {
         const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
         return el('tr', {},
           el('td', {}, el('div', { class: 'row', style: 'gap:10px' }, el('span', { class: 'swatch', style: 'height:26px;width:8px;background:' + (c.color || '#6366f1') }), el('div', {}, el('div', { class: 'nm' }, c.name), el('div', { class: 'hint', style: 'margin:0' }, c.id)))),
           el('td', {}, el('span', { class: 'chip' }, kind(c))),
           el('td', {}, gws.length ? el('div', { class: 'pills' }, gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name))) : el('span', { class: 'hint', style: 'margin:0' }, 'none')),
+          el('td', {}, gainCell(c)),
           ...st.groups.map(g => { const p = (g.grants || {})[c.id] || {}; return el('td', { class: 'gcol' }, el('div', { class: 'gbs' }, badge(p.talk, 'T'), badge(p.listen, 'L'), musicCh.has(c.id) ? badge(p.music, 'M') : null)) }))
       }
-      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab.'),
+      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab. Gain is a level trim in dB that every app applies when listening to that channel.'),
         st.channels.length ? el('div', { class: 'gridwrap' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, head)), el('tbody', {}, st.channels.map(row)))) : empty('The Comms server has no channels.'))
     }
 

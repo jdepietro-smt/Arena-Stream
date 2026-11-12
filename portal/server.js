@@ -582,6 +582,14 @@ function createPortal(cfg) {
       admin.audit('owner', 'comms.kick', decodeURIComponent(cm[1]), ip)
       return send(res, 200, { ok: true })
     })
+    // A channel's gain trim (dB) is the one channel setting the portal changes; everything else about a channel stays on Comms.
+    if ((cm = sub.match(/^comms\/channels\/([^/]+)$/)) && m === 'PUT') return commsOf(res)(async () => {
+      const b = await readJson(req) || {}
+      const id = decodeURIComponent(cm[1])
+      const c = await comms.call('PUT', 'channels/' + encodeURIComponent(id), { gainDb: b.gainDb })
+      admin.audit('owner', 'comms.channel.gain', id + ' ' + (c.gainDb || 0) + ' dB', ip)
+      return send(res, 200, c)
+    })
     if (sub === 'comms/groups' && m === 'POST') return commsOf(res)(async () => {
       const b = await readJson(req) || {}
       const g = await comms.call('POST', 'groups', { name: b.name, selfJoin: b.selfJoin, grants: b.grants })

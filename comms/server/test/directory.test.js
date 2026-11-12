@@ -190,3 +190,14 @@ test('session tokens: rejoin without the password; revoked by password change, d
     await srv.close()
   }
 })
+
+test('a channel can carry a gain trim in dB, kept to half-dB steps and a sane range', () => {
+  const d = freshDir()
+  assert.equal(d.channel('prod').gainDb, undefined)
+  assert.equal(d.updateChannel('prod', { gainDb: 3.3 }).gainDb, 3.5)
+  assert.equal(d.updateChannel('prod', { name: 'Production' }).gainDb, 3.5)   // other edits keep it
+  assert.equal(d.updateChannel('prod', { gainDb: 0 }).gainDb, undefined)       // 0 dB is stored as nothing
+  assert.throws(() => d.updateChannel('prod', { gainDb: 20 }), DirectoryError)
+  assert.throws(() => d.updateChannel('prod', { gainDb: -40 }), DirectoryError)
+  assert.throws(() => d.updateChannel('prod', { gainDb: 'loud' }), DirectoryError)
+})
