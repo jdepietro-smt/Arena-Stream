@@ -394,7 +394,7 @@ function createPortal(cfg) {
     const c = admin.comms
     if (!c) return null
     const pass = commsLib.unseal(cfg.secret, c.pass)
-    return pass ? { url: c.url, user: c.user, pass, pem: c.pem } : null
+    return pass ? { url: c.url, user: c.user, pass, fingerprint: c.fingerprint } : null
   }
   const comms = commsLib.createComms(commsConn)
   const commsOf = res => async fn => {
@@ -560,7 +560,7 @@ function createPortal(cfg) {
         if (!b.fingerprint || pr.fingerprint !== b.fingerprint) return send(res, 409, { error: 'the certificate is not the one you confirmed; check it again' })
         pem = pr.pem; fingerprint = pr.fingerprint
       }
-      await commsLib.createComms(() => null).test({ url, user, pass: password, pem })
+      await commsLib.createComms(() => null).test({ url, user, pass: password, fingerprint })
       admin.setComms({ url, user, pass: commsLib.seal(cfg.secret, password), pem, fingerprint })
       comms.forget()
       admin.audit('owner', 'comms.connect', url, ip)

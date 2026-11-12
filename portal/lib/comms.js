@@ -3,8 +3,8 @@
 // permissions there; audio never touches it.
 //
 // Trust: the Comms server usually has a self-signed certificate. The connection is pinned to the exact certificate the
-// owner confirmed (by its SHA-256 fingerprint): the certificate must be that one, so a different or forged certificate is
-// refused. The hostname is not checked, because the certificate belongs to an IP address.
+// owner confirmed (by its SHA-256 fingerprint): the server's certificate must have that fingerprint, checked before anything
+// is sent, so a different or forged certificate is refused. The hostname is not checked, because the certificate belongs to an IP address.
 const http = require('node:http')
 const https = require('node:https')
 const tls = require('node:tls')
@@ -61,15 +61,32 @@ class CommsError extends Error { constructor(message, status = 502) { super(mess
 function createComms(get) {
   let token = '', tokenFor = ''
 
-  function raw(conn, method, route, body, bearer) {
+  // Opens the TLS connection ourselves and accepts it only if the server's certificate has exactly the confirmed fingerprint.
+  // Nothing is sent before that check, and the certificate does not have to be (or be signed by) a certificate authority.
+  function pinnedSocket(u, fingerprint) {
     return new Promise((resolve, reject) => {
-      const u = parseUrl(conn.url), isHttps = u.protocol === 'https:'
+      const s = tls.connect({ host: u.hostname, port: Number(u.port) || 443, rejectUnauthorized: false, servername: net.isIP(u.hostname) ? undefined : u.hostname, timeout: 10000 }, () => {
+        const c = s.getPeerCertificate()
+        if (!fingerprint || !c || c.fingerprint256 !== fingerprint) { s.destroy(); return reject(new CommsError('the Comms server presented a different certificate than the one you confirmed')) }
+        s.setTimeout(0); resolve(s)
+      })
+      s.on('timeout', () => { s.destroy(); reject(new CommsError('could not reach the Comms server: timed out')) })
+      s.on('error', e => reject(new CommsError('could not reach the Comms server: ' + (e.code || e.message))))
+    })
+  }
+
+  async function raw(conn, method, route, body, bearer) {
+    const u0 = parseUrl(conn.url)
+    const sock = u0.protocol === 'https:' ? await pinnedSocket(u0, conn.fingerprint) : null
+    return new Promise((resolve, reject) => {
+      const u = u0, isHttps = u.protocol === 'https:'
       const data = body === undefined ? null : Buffer.from(JSON.stringify(body))
       const headers = { Accept: 'application/json' }
       if (data) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = data.length }
       if (bearer) headers.Authorization = 'Bearer ' + bearer
-      const opts = { hostname: u.hostname, port: Number(u.port) || (isHttps ? 443 : 80), path: u.pathname.replace(/\/$/, '') + '/admin/api/' + route, method, headers, timeout: 10000, agent: false }
-      if (isHttps) Object.assign(opts, { ca: [conn.pem], rejectUnauthorized: true, checkServerIdentity: () => undefined, servername: net.isIP(u.hostname) ? undefined : u.hostname })
+      const opts = { hostname: u.hostname, port: Number(u.port) || (isHttps ? 443 : 80), path: u.pathname.replace(/\/$/, '') + '/admin/api/' + route, method, headers, timeout: 10000 }
+      if (!isHttps) opts.agent = false
+      if (isHttps) opts.createConnection = () => sock   // the already-checked, pinned connection
       const req = (isHttps ? https : http).request(opts, res => {
         const chunks = []
         res.on('data', c => { chunks.push(c); if (chunks.length > 2000) req.destroy() })
@@ -80,9 +97,7 @@ function createComms(get) {
         })
       })
       req.on('timeout', () => req.destroy(new Error('timed out')))
-      req.on('error', e => reject(new CommsError(/CERT|self.signed|unable to verify|certificate/i.test(String(e.code) + e.message)
-        ? 'the Comms server presented a different certificate than the one you confirmed'
-        : 'could not reach the Comms server: ' + (e.code || e.message))))
+      req.on('error', e => reject(new CommsError('could not reach the Comms server: ' + (e.code || e.message))))
       if (data) req.write(data)
       req.end()
     })

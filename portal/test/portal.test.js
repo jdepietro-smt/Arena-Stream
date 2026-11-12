@@ -898,8 +898,9 @@ test('comms: if Comms is unreachable the portal change still happens, with a not
 
 test('comms: the certificate is pinned to the one the owner confirmed', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cert-'))
+  // like a real server certificate: self-signed, but not marked as a certificate authority
   const mk = name => {
-    const r = require('node:child_process').spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(tmp, name + '.key'), '-out', path.join(tmp, name + '.crt'), '-days', '2', '-subj', '/CN=comms-test', '-addext', 'subjectAltName=IP:127.0.0.1'], { encoding: 'utf8' })
+    const r = require('node:child_process').spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(tmp, name + '.key'), '-out', path.join(tmp, name + '.crt'), '-days', '2', '-subj', '/CN=comms-test', '-addext', 'subjectAltName=IP:127.0.0.1', '-addext', 'basicConstraints=critical,CA:FALSE'], { encoding: 'utf8' })
     return r.status === 0 ? { key: fs.readFileSync(path.join(tmp, name + '.key')), cert: fs.readFileSync(path.join(tmp, name + '.crt')) } : null
   }
   const a = mk('a'), b = mk('b')
