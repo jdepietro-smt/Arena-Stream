@@ -30,6 +30,29 @@ button.b:disabled{opacity:.45;cursor:default}
 .tlabel{font-size:10px;letter-spacing:.12em;color:var(--mut);text-transform:uppercase}
 .tvalue{font-family:Consolas,monospace;color:var(--acc);margin-top:2px;white-space:nowrap}
 .tile.ok .tvalue{color:var(--ok)}.tile.bad .tvalue{color:var(--bad)}
+.chead{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:linear-gradient(135deg,#1c222c,#151921);border:1px solid var(--edge);border-radius:12px;padding:14px 18px;margin-bottom:14px}
+.ctitle{font-size:18px;font-weight:600}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px rgba(52,208,88,.16);flex:none}.dot.down{background:var(--bad);box-shadow:0 0 0 4px rgba(255,91,80,.16)}
+button.b.ghost{background:none;color:var(--mut)}button.b.ghost:hover{color:var(--text)}button.b.ghost.danger:hover{color:var(--bad);border-color:var(--bad)}
+.subtabs{display:flex;gap:2px;border-bottom:1px solid var(--edge);margin-bottom:16px;flex-wrap:wrap}
+.subtabs button{background:none;border:0;border-bottom:2px solid transparent;color:var(--mut);padding:9px 16px;font:inherit;cursor:pointer;margin-bottom:-1px;white-space:nowrap}.subtabs button:hover{color:var(--text)}.subtabs button.on{color:var(--text);font-weight:600;border-color:var(--acc)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:14px}
+.stat{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:14px 16px}.stat b{display:block;font-size:30px;font-weight:600;line-height:1.1}.stat span{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)}.stat.up b{color:var(--ok)}
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:12px;padding:16px 18px}.panel h2{margin-bottom:6px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px;align-items:start}
+.li{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--edge);flex-wrap:wrap}.li:last-child{border-bottom:0}
+.grow{flex:1;min-width:120px}.nm{font-weight:600}
+.av{width:38px;height:38px;border-radius:50%;background:#262c37;color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;position:relative}
+.av.on{background:rgba(52,208,88,.15);color:var(--ok)}.av.on::after{content:"";position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--ok);border:2px solid var(--panel)}
+.chn{width:28px;height:28px;border-radius:8px;background:#232832;color:var(--acc);display:flex;align-items:center;justify-content:center;font-weight:700;flex:none}
+.pills{display:flex;flex-wrap:wrap;gap:6px}
+.pill{position:relative;display:inline-flex;flex-direction:row;cursor:pointer;color:inherit;font-size:12px}.pill input{position:absolute;opacity:0;pointer-events:none}
+.pill span{padding:4px 12px;border-radius:999px;border:1px solid var(--edge);color:var(--mut);background:#1b2028;user-select:none;transition:background .12s,color .12s}
+.pill:hover span{border-color:var(--acc)}.pill input:checked+span{background:rgba(255,185,56,.16);border-color:var(--acc);color:var(--acc);font-weight:600}
+.pill.warn:hover span{border-color:var(--bad)}.pill.warn input:checked+span{background:rgba(255,91,80,.15);border-color:var(--bad);color:var(--bad)}
+.pill input:focus-visible+span{outline:2px solid var(--acc);outline-offset:1px}
+.gc{display:flex;flex-direction:column;gap:10px}.gc .ch{display:flex;align-items:center;gap:10px}
+.prow.off .nm,.prow.off .av{opacity:.5}
 .err{color:var(--bad);font-size:13px;min-height:1.2em}.hint{color:var(--mut);font-size:12px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.1em;color:var(--mut);text-transform:uppercase;font-weight:600}
 </style></head><body>
 <div id="app"></div>
@@ -464,7 +487,7 @@ async function activitySection(box) {
 
 // ── Comms (the intercom server) ─────────────────────────────────────────────────
 // Controls and permissions only; the audio stays on the Comms server. The Comms admin password lives on the portal server.
-let commsTimer = null
+let commsTimer = null, commsTab = 'overview'
 async function commsSection(box) {
   const info = await oapi('/comms')
   const err = msgBox()
@@ -497,66 +520,109 @@ async function commsSection(box) {
     return
   }
 
-  const live = el('div')
-  box.replaceChildren(el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('div', { class: 'row', style: 'flex-wrap:wrap' },
-    el('div', {}, el('h2', { style: 'margin:0' }, 'Comms'), el('div', { class: 'hint', style: 'margin:0' }, info.url + '  ·  signed in as ' + info.user + '  ·  ' + info.linked + ' linked portal account' + (info.linked === 1 ? '' : 's'))),
-    el('div', { class: 'sp' }), el('button', { class: 'b', onclick: async () => { if (confirm('Disconnect the portal from Comms? Nothing is deleted on the Comms server.')) { await oapi('/comms/disconnect', 'POST'); refresh() } } }, 'Disconnect portal from Comms')), err), live)
+  const initials = n => String(n || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?'
+  const avatar = (n, on) => el('span', { class: 'av' + (on ? ' on' : '') }, initials(n))
+  // A clickable pill that is really a checkbox (keyboard and screen readers still work).
+  const pill = (checked, label, onchange, cls) => { const c = el('input', { type: 'checkbox', checked: !!checked }); c.addEventListener('change', () => onchange(c.checked)); return el('label', { class: 'pill' + (cls ? ' ' + cls : '') }, c, el('span', {}, label)) }
+  const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's')
 
-  let st = null, busy = false
-  const draw = async () => {
-    if (busy) return
-    try { st = await oapi('/comms/state') } catch (e) { live.replaceChildren(el('div', { class: 'card', style: 'max-width:none' }, el('div', { class: 'err' }, e.message), el('div', { class: 'hint' }, 'The portal cannot reach the Comms server right now. It will keep trying.'))); return }
+  const dot = el('span', { class: 'dot', title: 'Connection to the Comms server' })
+  const live = el('div'), tabsBar = el('div', { class: 'subtabs' })
+  box.replaceChildren(
+    el('div', { class: 'chead' }, dot, el('div', {}, el('div', { class: 'ctitle' }, 'Arena Comms'), el('div', { class: 'hint', style: 'margin:0' }, info.url + '  ·  signed in as ' + info.user)),
+      el('div', { class: 'sp' }), el('button', { class: 'b ghost', onclick: async () => { if (confirm('Disconnect the portal from Comms? Nothing is deleted on the Comms server.')) { await oapi('/comms/disconnect', 'POST'); refresh() } } }, 'Disconnect')),
+    err, tabsBar, live)
+
+  let st = null, portalUsers = [], busy = false
+  const TABS = [['overview', 'Overview'], ['groups', 'Groups'], ['people', 'People'], ['accounts', 'Portal accounts']]
+
+  const paint = () => {
+    if (!st) return
     const musicCh = new Set(st.channels.filter(c => c.music || c.withMusic).map(c => c.id))
-    const chName = id => (st.channels.find(c => c.id === id) || {}).name || id
-    const groupName = id => (st.groups.find(g => g.id === id) || {}).name || id
+    const onlineIds = new Set(st.online.map(o => o.id))
+    tabsBar.replaceChildren(...TABS.map(([k, t]) => el('button', { class: commsTab === k ? 'on' : '', onclick: () => { commsTab = k; paint() } }, t)))
+    const empty = t => el('div', { class: 'hint', style: 'padding:8px 0' }, t)
 
-    // who is online
-    const online = el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Online now (' + st.online.length + ')'),
-      st.online.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, st.online.map(o => el('tr', {}, el('td', {}, o.name || o.username || o.id), el('td', { class: 'hint' }, o.title || ''),
-        el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' }, el('button', { class: 'b', onclick: async () => { if (!confirm('Disconnect ' + (o.name || o.id) + ' from the intercom? They can rejoin.')) return; try { await oapi('/comms/kick/' + encodeURIComponent(o.id), 'POST'); draw() } catch (e) { flash(err, e.message) } } }, 'Kick'))))))) : el('div', { class: 'hint' }, 'Nobody is connected.'))
+    // ── Overview: numbers, who is online, and who can use which channel
+    const overview = () => {
+      const stat = (n, label, cls) => el('div', { class: 'stat ' + (cls || '') }, el('b', {}, String(n)), el('span', {}, label))
+      const kick = o => el('button', { class: 'b ghost', onclick: async () => { if (!confirm('Disconnect ' + (o.name || o.id) + ' from the intercom? They can rejoin.')) return; try { await oapi('/comms/kick/' + encodeURIComponent(o.id), 'POST'); await load() } catch (e) { flash(err, e.message) } } }, 'Kick')
+      const onlineList = el('div', { class: 'panel' }, el('h2', {}, 'Online now'),
+        st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id), el('div', { class: 'hint', style: 'margin:0' }, o.title || 'No role set')), kick(o))) : empty('Nobody is connected.'))
+      const channelList = el('div', { class: 'panel' }, el('h2', {}, 'Channels'),
+        st.channels.length ? st.channels.map(c => {
+          const who = st.groups.filter(g => g.grants && g.grants[c.id] && (g.grants[c.id].talk || g.grants[c.id].listen || g.grants[c.id].music))
+          return el('div', { class: 'li' }, el('span', { class: 'chn' }, musicCh.has(c.id) ? '♪' : '#'), el('div', { class: 'grow' }, el('div', { class: 'nm' }, c.name, musicCh.has(c.id) ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'music') : null)),
+            el('div', { class: 'pills', style: 'justify-content:flex-end' }, who.length ? who.map(g => el('span', { class: 'chip' }, g.name)) : el('span', { class: 'hint' }, 'no group yet')))
+        }) : empty('The Comms server has no channels.'))
+      return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
+        el('div', { class: 'two' }, onlineList, channelList))
+    }
 
-    // groups and what each may do per channel
+    // ── Groups: which channels each group may talk on, listen to, or play music on
     const groupCard = g => {
       const grants = JSON.parse(JSON.stringify(g.grants || {}))
-      const name = el('input', { type: 'text', value: g.name, style: 'width:160px' })
-      const self = el('input', { type: 'checkbox', checked: !!g.selfJoin })
-      const cell = (ch, k) => { const c = el('input', { type: 'checkbox', checked: !!(grants[ch] && grants[ch][k]) }); c.addEventListener('change', () => { (grants[ch] = grants[ch] || {})[k] = c.checked }); return c }
-      const save = async () => { busy = true; try { await oapi('/comms/groups/' + encodeURIComponent(g.id), 'PUT', { name: name.value, selfJoin: self.checked, grants }); flash(err, 'Saved ' + name.value + '.', true) } catch (e) { flash(err, e.message) } busy = false; draw() }
-      return el('details', { class: 'adv', style: 'margin:6px 0' }, el('summary', {}, g.name + '  ', el('span', { class: 'hint', style: 'margin:0' }, Object.keys(g.grants || {}).length + ' channel' + (Object.keys(g.grants || {}).length === 1 ? '' : 's'))),
-        el('div', { class: 'row', style: 'margin:8px 0;flex-wrap:wrap' }, name, el('label', { class: 'check', style: 'flex-direction:row;gap:6px;color:var(--text)' }, self, el('span', {}, 'People can join this group themselves'))),
-        el('table', { style: 'min-width:0' }, el('thead', {}, el('tr', {}, ['Channel', 'Talk', 'Listen', 'Music'].map(h => el('th', {}, h)))),
-          el('tbody', {}, st.channels.map(c => el('tr', {}, el('td', {}, c.name), el('td', {}, cell(c.id, 'talk')), el('td', {}, cell(c.id, 'listen')), el('td', {}, musicCh.has(c.id) ? cell(c.id, 'music') : el('span', { class: 'hint' }, '-')))))),
-        el('div', { class: 'row', style: 'margin-top:8px' }, el('button', { class: 'b pri', onclick: save }, 'Save group'),
-          el('button', { class: 'b', onclick: async () => { if (!confirm('Delete the group ' + g.name + '? Members lose what it gave them.')) return; try { await oapi('/comms/groups/' + encodeURIComponent(g.id), 'DELETE'); draw() } catch (e) { flash(err, e.message) } } }, 'Delete')))
+      const name = el('input', { type: 'text', value: g.name, style: 'width:100%' })
+      const members = st.users.filter(u => (u.groups || []).includes(g.id)).length
+      const self = pill(g.selfJoin, 'People can join this group themselves', v => { g.selfJoin = v })
+      const perm = (ch, k, label) => pill(grants[ch] && grants[ch][k], label, v => { (grants[ch] = grants[ch] || {})[k] = v })
+      const save = async () => { busy = true; try { await oapi('/comms/groups/' + encodeURIComponent(g.id), 'PUT', { name: name.value, selfJoin: !!g.selfJoin, grants }); flash(err, 'Saved ' + name.value + '.', true) } catch (e) { flash(err, e.message) } busy = false; load() }
+      return el('div', { class: 'panel gc' },
+        el('div', { class: 'ch' }, el('div', { class: 'grow' }, name), el('span', { class: 'chip' }, plural(members, 'member'))),
+        el('div', {}, self),
+        el('div', {}, st.channels.map(c => el('div', { class: 'li', style: 'padding:7px 0' }, el('span', { class: 'chn' }, musicCh.has(c.id) ? '♪' : '#'), el('div', { class: 'grow nm', style: 'font-weight:500' }, c.name),
+          el('div', { class: 'pills' }, perm(c.id, 'talk', 'Talk'), perm(c.id, 'listen', 'Listen'), musicCh.has(c.id) ? perm(c.id, 'music', 'Music') : null)))),
+        el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: save }, 'Save group'), el('div', { class: 'sp' }),
+          el('button', { class: 'b ghost danger', onclick: async () => { if (!confirm('Delete the group ' + g.name + '? Members lose what it gave them.')) return; try { await oapi('/comms/groups/' + encodeURIComponent(g.id), 'DELETE'); await load() } catch (e) { flash(err, e.message) } } }, 'Delete')))
     }
-    const newName = el('input', { type: 'text', placeholder: 'New group name', style: 'width:180px' })
-    const groups = el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Groups and permissions'),
-      el('div', { class: 'hint' }, 'A group says which channels its members may talk on, listen to, or start music on. People get permissions through the groups they are in.'),
-      ...st.groups.map(groupCard), el('div', { class: 'row', style: 'margin-top:10px' }, newName, el('button', { class: 'b', onclick: async () => { try { await oapi('/comms/groups', 'POST', { name: newName.value, grants: {} }); draw() } catch (e) { flash(err, e.message) } } }, 'Add group')))
+    const groupsView = () => {
+      const newName = el('input', { type: 'text', placeholder: 'New group name', style: 'flex:1' })
+      const add = async () => { try { await oapi('/comms/groups', 'POST', { name: newName.value, grants: {} }); await load() } catch (e) { flash(err, e.message) } }
+      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'A group says which channels its members may talk on, listen to, or start music on. People get permissions through the groups they are in.'),
+        el('div', { class: 'panel row', style: 'margin-bottom:14px' }, newName, el('button', { class: 'b pri', onclick: add }, 'Add group')),
+        st.groups.length ? el('div', { class: 'two' }, st.groups.map(groupCard)) : empty('No groups yet. Add one above.'))
+    }
 
-    // people
-    const onlineIds = new Set(st.online.map(o => o.id))
-    const userRow = u => {
+    // ── People: group membership as pills, saved as you click
+    const personRow = u => {
       const sel = new Set(u.groups || [])
-      const boxes = st.groups.map(g => { const c = el('input', { type: 'checkbox', checked: sel.has(g.id) }); c.addEventListener('change', async () => { c.checked ? sel.add(g.id) : sel.delete(g.id); try { await oapi('/comms/users/' + encodeURIComponent(u.id), 'PUT', { groups: [...sel] }); flash(err, 'Saved ' + u.username + '.', true) } catch (e) { flash(err, e.message); draw() } }); return el('label', { class: 'check', style: 'flex-direction:row;gap:5px;color:var(--text);margin-right:10px' }, c, el('span', {}, g.name)) })
-      const dis = el('input', { type: 'checkbox', checked: !!u.disabled }); dis.addEventListener('change', async () => { try { await oapi('/comms/users/' + encodeURIComponent(u.id), 'PUT', { disabled: dis.checked }); flash(err, (dis.checked ? 'Disabled ' : 'Enabled ') + u.username + '.', true) } catch (e) { flash(err, e.message); draw() } })
-      return el('tr', {}, el('td', {}, el('div', {}, u.username, onlineIds.has(u.id) ? el('span', { class: 'chip ok', style: 'margin-left:6px' }, 'online') : null, u.admin ? el('span', { class: 'chip', style: 'margin-left:6px' }, 'Comms admin') : null),
-        el('div', { class: 'hint', style: 'margin:0' }, [u.name !== u.username ? u.name : '', st.links[u.id] ? 'portal account: ' + st.links[u.id] : 'not linked to a portal account'].filter(Boolean).join('  ·  '))),
-        el('td', {}, st.groups.length ? el('div', { style: 'display:flex;flex-wrap:wrap' }, boxes) : el('span', { class: 'hint' }, 'no groups yet')), el('td', {}, el('label', { class: 'check', style: 'flex-direction:row;gap:5px;color:var(--text)' }, dis, el('span', {}, 'Disabled'))))
+      const put = async (body, msg) => { try { await oapi('/comms/users/' + encodeURIComponent(u.id), 'PUT', body); flash(err, msg, true) } catch (e) { flash(err, e.message); load() } }
+      const gp = st.groups.map(g => pill(sel.has(g.id), g.name, v => { v ? sel.add(g.id) : sel.delete(g.id); put({ groups: [...sel] }, 'Saved ' + u.username + '.') }))
+      const link = st.links[u.id]
+      return el('div', { class: 'li prow' + (u.disabled ? ' off' : '') }, avatar(u.name || u.username, onlineIds.has(u.id)),
+        el('div', { class: 'grow' }, el('div', { class: 'nm' }, u.name && u.name !== u.username ? u.name : u.username,
+          onlineIds.has(u.id) ? el('span', { class: 'chip ok', style: 'margin-left:8px' }, 'online') : null, u.admin ? el('span', { class: 'chip', style: 'margin-left:6px' }, 'Comms admin') : null),
+          el('div', { class: 'hint', style: 'margin:0' }, u.username + '  ·  ' + (link ? 'portal account: ' + link : 'not linked to a portal account'))),
+        el('div', { class: 'pills', style: 'flex:2;justify-content:flex-end' }, st.groups.length ? gp : el('span', { class: 'hint' }, 'no groups yet')),
+        pill(u.disabled, 'Disabled', v => put({ disabled: v }, (v ? 'Disabled ' : 'Enabled ') + u.username + '.'), 'warn'))
     }
-    const portalUsers = (await oapi('/users')).users
-    const accounts = el('div', { class: 'card', style: 'max-width:none;margin:0 0 14px' }, el('h2', {}, 'Portal accounts and Comms logins'),
-      el('div', { class: 'hint' }, 'Link a portal account to a Comms login with the same username, name and password, so one place manages both. Unlinking only disables the Comms login.'),
-      portalUsers.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, portalUsers.map(u => el('tr', {}, el('td', {}, el('div', {}, u.username), u.name ? el('div', { class: 'hint', style: 'margin:0' }, u.name) : null),
-        el('td', {}, u.commsLinked ? el('span', { class: 'chip ok' }, 'linked') : el('span', { class: 'hint' }, 'not linked')),
-        el('td', {}, el('div', { class: 'row', style: 'justify-content:flex-end' }, el('button', { class: 'b', onclick: () => commsDialog(u, draw) }, u.commsLinked ? 'Edit link' : 'Give a Comms login'))))))) : el('div', { class: 'hint' }, 'No portal accounts yet. Portal accounts are created in Admin.'))
-    const people = el('div', { class: 'card', style: 'max-width:none;margin:0' }, el('h2', {}, 'People'),
-      el('div', { class: 'hint' }, 'Everyone with a Comms login. Changes here take effect for people who are connected right away.'),
-      st.users.length ? el('table', { style: 'min-width:0' }, el('tbody', {}, st.users.map(userRow))) : el('div', { class: 'hint' }, 'No Comms users.'))
-    live.replaceChildren(online, groups, accounts, people)
+    const peopleView = () => el('div', { class: 'panel' }, el('h2', {}, plural(st.users.length, 'person').replace('persons', 'people')),
+      el('div', { class: 'hint', style: 'margin:0 0 6px' }, 'Click a group to add or remove someone. It saves straight away and applies to people who are connected right now.'),
+      st.users.length ? st.users.map(personRow) : empty('No Comms users.'))
+
+    // ── Portal accounts that have (or could have) a Comms login
+    const accountsView = () => el('div', { class: 'panel' }, el('h2', {}, 'Portal accounts and Comms logins'),
+      el('div', { class: 'hint', style: 'margin:0 0 6px' }, 'Link a portal account to a Comms login with the same username, name and password, so one place manages both. Unlinking only disables the Comms login.'),
+      portalUsers.length ? portalUsers.map(u => el('div', { class: 'li' }, avatar(u.name || u.username, false), el('div', { class: 'grow' }, el('div', { class: 'nm' }, u.username), u.name ? el('div', { class: 'hint', style: 'margin:0' }, u.name) : null),
+        u.commsLinked ? el('span', { class: 'chip ok' }, 'linked') : el('span', { class: 'chip' }, 'not linked'),
+        el('button', { class: 'b', onclick: () => commsDialog(u, load) }, u.commsLinked ? 'Edit link' : 'Give a Comms login'))) : empty('No portal accounts yet. Portal accounts are created in Admin.'))
+
+    live.replaceChildren(({ overview, groups: groupsView, people: peopleView, accounts: accountsView })[commsTab]())
   }
-  await draw()
-  commsTimer = setInterval(() => { if (tab === 'comms' && !document.hidden && !document.querySelector('.modal') && !live.querySelector('details[open]') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 5000)
+
+  const load = async () => {
+    if (busy) return
+    try { st = await oapi('/comms/state'); portalUsers = (await oapi('/users')).users; dot.className = 'dot' }
+    catch (e) {
+      if (e.message === 'locked' || e.message === 'signed out') throw e
+      dot.className = 'dot down'
+      live.replaceChildren(el('div', { class: 'panel' }, el('div', { class: 'err' }, e.message), el('div', { class: 'hint' }, 'The portal cannot reach the Comms server right now. It will keep trying.')))
+      return
+    }
+    paint()
+  }
+  await load()
+  commsTimer = setInterval(() => { if (tab === 'comms' && !document.hidden && !document.querySelector('.modal') && !document.activeElement?.matches?.('input[type=text],input[type=password]')) load().catch(() => {}) }, 5000)
 }
 
 // ── Capacity test ───────────────────────────────────────────────────────────────
