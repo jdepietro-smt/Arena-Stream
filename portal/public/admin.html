@@ -551,7 +551,10 @@ async function commsSection(box) {
       const kick = o => el('button', { class: 'b ghost', onclick: async () => { if (!confirm('Disconnect ' + (o.name || o.id) + ' from the intercom? They can rejoin.')) return; try { await oapi('/comms/kick/' + encodeURIComponent(o.id), 'POST'); await load() } catch (e) { flash(err, e.message) } } }, 'Kick')
       const onlineList = el('div', { class: 'panel' }, el('h2', {}, 'Online now'),
         st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id, o.gateway ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'gateway') : null), el('div', { class: 'hint', style: 'margin:0' }, o.gateway ? (o.channels && o.channels.length ? 'Carries ' + o.channels.map(chName).join(', ') : 'Not carrying any channel') : (o.title || 'No role set'))), kick(o))) : empty('Nobody is connected.'))
+      const gwOnline = (st.gateways || []).filter(g => g.online)
+      const oldComms = gwOnline.length && !st.online.some(o => o.gateway)
       const channelList = el('div', { class: 'panel' }, el('h2', {}, 'Channels'),
+        oldComms ? el('div', { class: 'hint', style: 'color:var(--acc);margin:0 0 6px' }, gwOnline.length + ' gateway' + (gwOnline.length === 1 ? ' is' : 's are') + ' online (' + gwOnline.map(g => g.name).join(', ') + '), but the Comms server is too old to say which channels they carry. Update the Comms server itself (a separate update from the portal).') : null,
         st.channels.length ? st.channels.map(c => {
           const who = st.groups.filter(g => g.grants && g.grants[c.id] && (g.grants[c.id].talk || g.grants[c.id].listen || g.grants[c.id].music))
           const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
