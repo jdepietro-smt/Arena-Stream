@@ -45,6 +45,7 @@ button.b.ghost{background:none;color:var(--mut)}button.b.ghost:hover{color:var(-
 .av{width:38px;height:38px;border-radius:50%;background:#262c37;color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;position:relative}
 .av.on{background:rgba(52,208,88,.15);color:var(--ok)}.av.on::after{content:"";position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--ok);border:2px solid var(--panel)}
 .chn{width:28px;height:28px;border-radius:8px;background:#232832;color:var(--acc);display:flex;align-items:center;justify-content:center;font-weight:700;flex:none}
+.swatch{width:14px;height:34px;border-radius:5px;flex:none}
 .gwline{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
 .pills{display:flex;flex-wrap:wrap;gap:6px}
 .pill{position:relative;display:inline-flex;flex-direction:row;cursor:pointer;color:inherit;font-size:12px}.pill input{position:absolute;opacity:0;pointer-events:none}
@@ -535,7 +536,7 @@ async function commsSection(box) {
     err, tabsBar, live)
 
   let st = null, portalUsers = [], busy = false
-  const TABS = [['overview', 'Overview'], ['groups', 'Groups'], ['people', 'People'], ['accounts', 'Portal accounts']]
+  const TABS = [['overview', 'Overview'], ['channels', 'Channels'], ['groups', 'Groups'], ['people', 'People'], ['accounts', 'Portal accounts']]
 
   const paint = () => {
     if (!st) return
@@ -564,6 +565,26 @@ async function commsSection(box) {
         }) : empty('The Comms server has no channels.'))
       return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
         el('div', { class: 'two' }, onlineList, channelList))
+    }
+
+    // ── Channels: every channel, what kind it is, which gateway carries it, and which groups may use it
+    const channelsView = () => {
+      const kind = c => c.music ? ['Music channel', 'one-way stereo music'] : c.ifb ? ['IFB', 'program feed with talk-over ducking'] : c.withMusic ? ['Party line + music', 'talk as usual, plus a music source'] : ['Party line', 'everyone with access can talk and listen']
+      const card = c => {
+        const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
+        const rows = st.groups.map(g => ({ g, p: (g.grants || {})[c.id] || {} })).filter(r => r.p.talk || r.p.listen || r.p.music)
+        const people = k => st.users.filter(u => !u.disabled && rows.some(r => r.p[k] && (u.groups || []).includes(r.g.id))).length
+        const [label, note] = kind(c)
+        return el('div', { class: 'panel gc' },
+          el('div', { class: 'ch' }, el('span', { class: 'swatch', style: 'background:' + (c.color || '#6366f1') }), el('div', { class: 'grow' }, el('div', { class: 'nm' }, c.name), el('div', { class: 'hint', style: 'margin:0' }, label + '  ·  ' + note)),
+            el('span', { class: 'chip', title: 'Channel id' }, c.id)),
+          el('div', {}, el('div', { class: 'tlabel' }, 'Gateway'), el('div', { class: 'gwline' }, gws.length ? gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name)) : el('span', { class: 'hint', style: 'margin:0' }, 'no gateway on this channel'))),
+          el('div', {}, el('div', { class: 'tlabel' }, 'Groups with access'), rows.length ? rows.map(r => el('div', { class: 'li', style: 'padding:6px 0' }, el('div', { class: 'grow nm', style: 'font-weight:500' }, r.g.name),
+            el('div', { class: 'pills' }, r.p.talk ? el('span', { class: 'chip warn' }, 'Talk') : null, r.p.listen ? el('span', { class: 'chip warn' }, 'Listen') : null, r.p.music ? el('span', { class: 'chip warn' }, 'Music') : null))) : el('div', { class: 'hint', style: 'margin:3px 0 0' }, 'No group can use this channel yet.')),
+          el('div', { class: 'hint', style: 'margin:0' }, plural(people('talk'), 'person').replace('persons', 'people') + ' can talk  ·  ' + plural(people('listen'), 'person').replace('persons', 'people') + ' can listen' + (c.duck != null ? '  ·  duck level ' + c.duck : '')))
+      }
+      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel on the Comms server. To change who can use one, edit its groups on the Groups tab.'),
+        st.channels.length ? el('div', { class: 'two' }, st.channels.map(card)) : empty('The Comms server has no channels.'))
     }
 
     // ── Groups: which channels each group may talk on, listen to, or play music on
@@ -614,7 +635,7 @@ async function commsSection(box) {
         u.commsLinked ? el('span', { class: 'chip ok' }, 'linked') : el('span', { class: 'chip' }, 'not linked'),
         el('button', { class: 'b', onclick: () => commsDialog(u, load) }, u.commsLinked ? 'Edit link' : 'Give a Comms login'))) : empty('No portal accounts yet. Portal accounts are created in Admin.'))
 
-    live.replaceChildren(({ overview, groups: groupsView, people: peopleView, accounts: accountsView })[commsTab]())
+    live.replaceChildren(({ overview, channels: channelsView, groups: groupsView, people: peopleView, accounts: accountsView })[commsTab]())
   }
 
   const load = async () => {
