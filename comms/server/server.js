@@ -284,6 +284,7 @@ export function createServer(
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
+      ...(p.user.gateway ? { gateway: true, gwKey: p.user.gwKey || null, channels: [...new Set([...p.talk, ...p.listen])].filter(id => !id.startsWith('u:')) } : {}),
       link: p.link && Date.now() - p.link.at < 15_000 ? p.link : null, linkWorst: p.linkWorst ?? null,
     })),
   })

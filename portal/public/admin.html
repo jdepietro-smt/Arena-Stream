@@ -45,6 +45,7 @@ button.b.ghost{background:none;color:var(--mut)}button.b.ghost:hover{color:var(-
 .av{width:38px;height:38px;border-radius:50%;background:#262c37;color:var(--mut);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:13px;flex:none;position:relative}
 .av.on{background:rgba(52,208,88,.15);color:var(--ok)}.av.on::after{content:"";position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:var(--ok);border:2px solid var(--panel)}
 .chn{width:28px;height:28px;border-radius:8px;background:#232832;color:var(--acc);display:flex;align-items:center;justify-content:center;font-weight:700;flex:none}
+.gwline{display:flex;flex-wrap:wrap;gap:5px;margin-top:3px}
 .pills{display:flex;flex-wrap:wrap;gap:6px}
 .pill{position:relative;display:inline-flex;flex-direction:row;cursor:pointer;color:inherit;font-size:12px}.pill input{position:absolute;opacity:0;pointer-events:none}
 .pill span{padding:4px 12px;border-radius:999px;border:1px solid var(--edge);color:var(--mut);background:#1b2028;user-select:none;transition:background .12s,color .12s}
@@ -538,8 +539,9 @@ async function commsSection(box) {
 
   const paint = () => {
     if (!st) return
+    const chName = id => (st.channels.find(c => c.id === id) || {}).name || id
     const musicCh = new Set(st.channels.filter(c => c.music || c.withMusic).map(c => c.id))
-    const onlineIds = new Set(st.online.map(o => o.id))
+    const onlineIds = new Set(st.online.map(o => o.userId || o.id))
     tabsBar.replaceChildren(...TABS.map(([k, t]) => el('button', { class: commsTab === k ? 'on' : '', onclick: () => { commsTab = k; paint() } }, t)))
     const empty = t => el('div', { class: 'hint', style: 'padding:8px 0' }, t)
 
@@ -548,11 +550,13 @@ async function commsSection(box) {
       const stat = (n, label, cls) => el('div', { class: 'stat ' + (cls || '') }, el('b', {}, String(n)), el('span', {}, label))
       const kick = o => el('button', { class: 'b ghost', onclick: async () => { if (!confirm('Disconnect ' + (o.name || o.id) + ' from the intercom? They can rejoin.')) return; try { await oapi('/comms/kick/' + encodeURIComponent(o.id), 'POST'); await load() } catch (e) { flash(err, e.message) } } }, 'Kick')
       const onlineList = el('div', { class: 'panel' }, el('h2', {}, 'Online now'),
-        st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id), el('div', { class: 'hint', style: 'margin:0' }, o.title || 'No role set')), kick(o))) : empty('Nobody is connected.'))
+        st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id, o.gateway ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'gateway') : null), el('div', { class: 'hint', style: 'margin:0' }, o.gateway ? (o.channels && o.channels.length ? 'Carries ' + o.channels.map(chName).join(', ') : 'Not carrying any channel') : (o.title || 'No role set'))), kick(o))) : empty('Nobody is connected.'))
       const channelList = el('div', { class: 'panel' }, el('h2', {}, 'Channels'),
         st.channels.length ? st.channels.map(c => {
           const who = st.groups.filter(g => g.grants && g.grants[c.id] && (g.grants[c.id].talk || g.grants[c.id].listen || g.grants[c.id].music))
-          return el('div', { class: 'li' }, el('span', { class: 'chn' }, musicCh.has(c.id) ? '♪' : '#'), el('div', { class: 'grow' }, el('div', { class: 'nm' }, c.name, musicCh.has(c.id) ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'music') : null)),
+          const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
+          return el('div', { class: 'li' }, el('span', { class: 'chn' }, musicCh.has(c.id) ? '♪' : '#'), el('div', { class: 'grow' }, el('div', { class: 'nm' }, c.name, musicCh.has(c.id) ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'music') : null),
+            el('div', { class: 'gwline' }, gws.length ? gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name)) : el('span', { class: 'hint', style: 'margin:0' }, 'no gateway'))),
             el('div', { class: 'pills', style: 'justify-content:flex-end' }, who.length ? who.map(g => el('span', { class: 'chip' }, g.name)) : el('span', { class: 'hint' }, 'no group yet')))
         }) : empty('The Comms server has no channels.'))
       return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
