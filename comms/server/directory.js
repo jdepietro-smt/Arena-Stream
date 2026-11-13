@@ -88,6 +88,14 @@ export class Directory {
     if (g) { g.name = name; g.lastSeen = Date.now() } else this.gateways.push({ id, name, lastSeen: Date.now() })
     this.save() // not a directory change: nobody's permissions move
   }
+  /** Remember which channels a gateway bridges, so the admin still sees where a channel comes from while that gateway is offline. */
+  noteGatewayChannels(id, channels) {
+    const g = this.gateways.find(x => x.id === id)
+    const next = [...new Set(channels)].sort()
+    if (!g || !next.length || JSON.stringify(g.channels ?? []) === JSON.stringify(next)) return
+    g.channels = next
+    this.save()
+  }
   deleteGateway(id) {
     if (!this.gateways.some(g => g.id === id)) throw new DirectoryError('No such gateway', 404)
     this.data.gateways = this.gateways.filter(g => g.id !== id)

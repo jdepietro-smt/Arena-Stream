@@ -551,6 +551,19 @@ async function commsSection(box) {
   const paint = () => {
     if (!st) return
     const chName = id => (st.channels.find(c => c.id === id) || {}).name || id
+    // Which gateway each channel comes from. A gateway that is closed keeps its last known channels (the server remembers them) and shows in red.
+    const gwsFor = c => {
+      const out = [], seen = new Set()
+      for (const g of st.gateways || []) {
+        const o = st.online.find(x => x.gateway && x.gwKey === g.id)
+        const chans = o && (o.channels || []).length ? o.channels : (g.channels || [])
+        seen.add(g.id)
+        if (chans.includes(c.id)) out.push({ name: g.name, on: !!o, lastSeen: g.lastSeen })
+      }
+      for (const o of st.online) if (o.gateway && !seen.has(o.gwKey) && (o.channels || []).includes(c.id)) out.push({ name: o.name, on: true })
+      return out
+    }
+    const gwChip = g => el('span', { class: 'chip ' + (g.on ? 'ok' : 'bad'), title: g.on ? 'Online' : 'Offline. Showing the channels it carried when last connected.' }, '⇄ ' + g.name + (g.on ? '' : ' (offline)'))
     const musicCh = new Set(st.channels.filter(c => c.music || c.withMusic).map(c => c.id))
     const onlineIds = new Set(st.online.map(o => o.userId || o.id))
     tabsBar.replaceChildren(...TABS.map(([k, t]) => el('button', { class: commsTab === k ? 'on' : '', onclick: () => { commsTab = k; paint() } }, t)))
@@ -570,7 +583,7 @@ async function commsSection(box) {
         const ago = t => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 2880 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago' }
         const onRow = ({ g, o }) => el('tr', {}, el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, el('span', { class: 'dot' }), el('span', { class: 'nm' }, g.name))), el('td', {}, rttChip(o)), el('td', {}, lossChip(o)),
           el('td', {}, o.link ? Math.round(o.link.jitter) + ' ms' : '-'), el('td', {}, String((o.channels || []).length)))
-        const offRow = ({ g }) => el('tr', {}, el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, el('span', { class: 'dot', style: 'background:#3b4350;box-shadow:none' }), el('span', { style: 'color:var(--mut)' }, g.name))), el('td', { colspan: 4, class: 'hint' }, 'offline' + (g.lastSeen ? ', last seen ' + ago(g.lastSeen) : '')))
+        const offRow = ({ g }) => el('tr', {}, el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, el('span', { class: 'dot', style: 'background:#3b4350;box-shadow:none' }), el('span', { style: 'color:var(--bad)' }, g.name))), el('td', { colspan: 4, class: 'hint' }, 'offline' + (g.lastSeen ? ', last seen ' + ago(g.lastSeen) : '') + ((g.channels || []).length ? '. Carried ' + g.channels.map(chName).join(', ') : '')))
         return el('div', { class: 'panel', style: 'margin-bottom:14px' }, el('div', { class: 'row', style: 'margin-bottom:6px' }, el('h2', { style: 'margin:0' }, 'Gateways'), el('span', { class: 'chip ' + (nOn ? 'ok' : '') }, nOn + ' of ' + known.length + ' online')),
           el('div', { class: 'gridwrap', style: 'border:0;border-radius:0;background:none' }, el('table', { class: 'grid', style: 'min-width:520px;background:none;border:0' },
             el('thead', {}, el('tr', {}, ['Gateway', 'Latency', 'Loss (send / hear)', 'Jitter', 'Channels'].map(h => el('th', {}, h)))),
@@ -585,9 +598,9 @@ async function commsSection(box) {
         oldComms ? el('div', { class: 'hint', style: 'color:var(--acc);margin:0 0 6px' }, gwOnline.length + ' gateway' + (gwOnline.length === 1 ? ' is' : 's are') + ' online (' + gwOnline.map(g => g.name).join(', ') + '), but the Comms server is too old to say which channels they carry. Update the Comms server itself (a separate update from the portal).') : null,
         st.channels.length ? st.channels.map(c => {
           const who = st.groups.filter(g => g.grants && g.grants[c.id] && (g.grants[c.id].talk || g.grants[c.id].listen || g.grants[c.id].music))
-          const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
+          const gws = gwsFor(c)
           return el('div', { class: 'li' }, el('span', { class: 'chn' }, musicCh.has(c.id) ? '♪' : '#'), el('div', { class: 'grow' }, el('div', { class: 'nm' }, c.name, musicCh.has(c.id) ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'music') : null),
-            el('div', { class: 'gwline' }, gws.length ? gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name)) : el('span', { class: 'hint', style: 'margin:0' }, 'no gateway'))),
+            el('div', { class: 'gwline' }, gws.length ? gws.map(gwChip) : el('span', { class: 'hint', style: 'margin:0' }, 'no gateway'))),
             el('div', { class: 'pills', style: 'justify-content:flex-end' }, who.length ? who.map(g => el('span', { class: 'chip' }, g.name)) : el('span', { class: 'hint' }, 'no group yet')))
         }) : empty('The Comms server has no channels.'))
       return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
@@ -614,16 +627,16 @@ async function commsSection(box) {
         return el('div', { class: 'gain' }, el('button', { class: 'gstep', title: 'Quieter (1 dB)', onclick: () => set((c[f] || 0) - 1) }, '−'), val, el('button', { class: 'gstep', title: 'Louder (1 dB)', onclick: () => set((c[f] || 0) + 1) }, '+'))
       }
       const row = c => {
-        const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
+        const gws = gwsFor(c)
         return el('tr', {},
           el('td', {}, el('div', { class: 'row', style: 'gap:10px' }, el('span', { class: 'swatch', style: 'height:26px;width:8px;background:' + (c.color || '#6366f1') }), el('div', {}, el('div', { class: 'nm' }, c.name), el('div', { class: 'hint', style: 'margin:0' }, c.id)))),
           el('td', {}, el('span', { class: 'chip' }, kind(c))),
-          el('td', {}, gws.length ? el('div', { class: 'pills' }, gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name))) : el('span', { class: 'hint', style: 'margin:0' }, 'none')),
+          el('td', {}, gws.length ? el('div', { class: 'pills' }, gws.map(gwChip)) : el('span', { class: 'hint', style: 'margin:0' }, 'none')),
           el('td', {}, gainCell(c)),
           el('td', {}, c.music ? el('span', { class: 'hint', style: 'margin:0' }, 'n/a') : gainCell(c, 'talkGainDb')),
           ...st.groups.map(g => { const p = (g.grants || {})[c.id] || {}; return el('td', { class: 'gcol' }, el('div', { class: 'gbs' }, badge(p.talk, 'T'), badge(p.listen, 'L'), musicCh.has(c.id) ? badge(p.music, 'M') : null)) }))
       }
-      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab. Listen gain is a level trim every app applies when hearing that channel. Talk gain is applied to people's voices as they speak on it, before it is sent.'),
+      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab. Listen gain is a level trim every app applies when hearing that channel. Talk gain is applied to voices as people speak on it, before it is sent.'),
         st.channels.length ? el('div', { class: 'gridwrap' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, head)), el('tbody', {}, st.channels.map(row)))) : empty('The Comms server has no channels.'))
     }
 

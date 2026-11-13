@@ -217,6 +217,7 @@ export function createServer(
   const refreshTracks = async P => {
     try {
       P.tracks = new Map((await sfu.listTracks(P.id)).map(t => [t.name, t.sid]))
+      if (P.user.gateway && P.user.gwKey) dir.noteGatewayChannels(P.user.gwKey, [...P.tracks.keys()].filter(n => n.startsWith('ch:') || n.startsWith('music:')).map(n => n.slice(n.indexOf(':') + 1)))
       // P announces its tracks only once it is connected to the SFU. Whatever was subscribed for it before that
       // point never took effect (it was not in the room yet), so forget it and subscribe from scratch.
       P.subs = new Set()

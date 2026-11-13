@@ -205,3 +205,13 @@ test('a channel can carry a gain trim in dB, kept to half-dB steps and a sane ra
   assert.equal(d.updateChannel('prod', { talkGainDb: 0 }).talkGainDb, undefined)
   assert.throws(() => d.updateChannel('prod', { talkGainDb: 13 }), DirectoryError)
 })
+
+test('a gateway remembers the channels it bridged', () => {
+  const d = freshDir()
+  d.noteGateway('gw-aaaaaaaa', 'Arena A')
+  d.noteGatewayChannels('gw-aaaaaaaa', ['b', 'a', 'a'])
+  assert.deepEqual(d.gateways[0].channels, ['a', 'b'])
+  d.noteGatewayChannels('gw-aaaaaaaa', [])               // an empty list (just joined, nothing published yet) keeps the last known
+  assert.deepEqual(d.gateways[0].channels, ['a', 'b'])
+  d.noteGatewayChannels('nope', ['x'])                   // unknown gateway: ignored
+})
