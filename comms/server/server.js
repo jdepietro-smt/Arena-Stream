@@ -540,7 +540,11 @@ export function createServer(
             void alerter.notify(`gateway ${gname} is offline`, `off:${key}`, 60_000)
           }, cfg.gatewayOfflineMs ?? 45_000).unref?.()
         }
-        if (me.user.gwKey) dir.noteGateway(me.user.gwKey, me.user.name)
+        if (me.user.gwKey) {
+          dir.noteGateway(me.user.gwKey, me.user.name)
+          // Last chance to remember what it carried, in case it left before any earlier note was saved.
+          dir.noteGatewayChannels(me.user.gwKey, [...(me.tracks?.keys() ?? [])].filter(n => n.startsWith('ch:') || n.startsWith('music:')).map(n => n.slice(n.indexOf(':') + 1)))
+        }
         for (const ch of me.musicOn) announceMusic(me, ch, false)
         broadcast({ type: 'peer-leave', id: me.id })
       }
