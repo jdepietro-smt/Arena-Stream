@@ -284,7 +284,9 @@ export function createServer(
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
-      ...(p.user.gateway ? { gateway: true, gwKey: p.user.gwKey || null, channels: [...new Set([...p.talk, ...p.listen])].filter(id => !id.startsWith('u:')) } : {}),
+      ...(p.user.gateway ? { gateway: true, gwKey: p.user.gwKey || null, // A gateway publishes one track per channel it actually bridges (a port is routed to it), so those tracks say which
+      // channels it carries. Its listen list is not used: a gateway listens to every channel it may, bridged or not.
+      channels: [...new Set([...p.tracks.keys()].filter(n => n.startsWith('ch:') || n.startsWith('music:')).map(n => n.slice(n.indexOf(':') + 1)))] } : {}),
       link: p.link && Date.now() - p.link.at < 15_000 ? p.link : null, linkWorst: p.linkWorst ?? null, rttMs: p.rttMs ?? null, rttMax: p.rttMax ?? null,
     })),
   })
