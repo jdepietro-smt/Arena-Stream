@@ -200,4 +200,8 @@ test('a channel can carry a gain trim in dB, kept to half-dB steps and a sane ra
   assert.throws(() => d.updateChannel('prod', { gainDb: 20 }), DirectoryError)
   assert.throws(() => d.updateChannel('prod', { gainDb: -40 }), DirectoryError)
   assert.throws(() => d.updateChannel('prod', { gainDb: 'loud' }), DirectoryError)
+  assert.equal(d.updateChannel('prod', { talkGainDb: 6.2 }).talkGainDb, 6)
+  assert.equal(d.updateChannel('prod', { name: 'Prod' }).talkGainDb, 6)
+  assert.equal(d.updateChannel('prod', { talkGainDb: 0 }).talkGainDb, undefined)
+  assert.throws(() => d.updateChannel('prod', { talkGainDb: 13 }), DirectoryError)
 })

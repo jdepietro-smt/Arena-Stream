@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; gainDb?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; gainDb?: number; talkGainDb?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' } | { kind: 'node'; node: AudioNode }
@@ -405,6 +405,8 @@ export class CommsEngine {
   }
 
   /** The admin's per-channel trim (dB set on the server), as a linear factor. */
+  /** The admin's per-channel send trim (dB), applied to my voice on that channel before it leaves this app. */
+  talkTrim(ch: string): number { return 10 ** ((this.channels.find(c => c.id === ch)?.talkGainDb ?? 0) / 20) }
   channelTrim(ch: string): number { return 10 ** ((this.channels.find(c => c.id === ch)?.gainDb ?? 0) / 20) }
 
   channelLevel(ch: string): number { return this.chLevels.get(ch) ?? (this.isMusic(ch) ? 0.6 : 1) }
@@ -655,6 +657,7 @@ export class CommsEngine {
         // An admin changed this user's channels/permissions: adopt the server's view.
         this.channels = m.channels
         this.listen = new Set(m.listen as string[])
+        this.applyRouting() // a changed talk trim takes effect now
         this.setMusicSenders(m.musicSenders)
         for (const ch of [...this.musicTx.keys()]) {
           const c = this.channels.find(x => x.id === ch)
@@ -1083,14 +1086,14 @@ export class CommsEngine {
       const t = this.ctx.currentTime
       for (const [name, g] of this.sfuGains) {
         const on = name === 'direct' ? [...talk].some(isUser) : talk.has(name.slice(3))
-        g.gain.setTargetAtTime(on ? 1 : 0, t, 0.008)
+        g.gain.setTargetAtTime(on ? (name === 'direct' ? 1 : this.talkTrim(name.slice(3))) : 0, t, 0.008)
       }
       return
     }
     for (const p of this.peers.values()) {
-      let on = talk.has(`u:${p.info.id}`)
-      if (!on) for (const t of talk) if (!isUser(t) && p.info.listen.includes(t)) { on = true; break }
-      p.gain.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.008)
+      let on = talk.has(`u:${p.info.id}`), level = 1
+      if (!on) for (const t of talk) if (!isUser(t) && p.info.listen.includes(t)) { level = on ? Math.max(level, this.talkTrim(t)) : this.talkTrim(t); on = true }
+      p.gain.gain.setTargetAtTime(on ? level : 0, this.ctx.currentTime, 0.008)
     }
   }
 

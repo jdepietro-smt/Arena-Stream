@@ -586,8 +586,8 @@ function createPortal(cfg) {
     if ((cm = sub.match(/^comms\/channels\/([^/]+)$/)) && m === 'PUT') return commsOf(res)(async () => {
       const b = await readJson(req) || {}
       const id = decodeURIComponent(cm[1])
-      const c = await comms.call('PUT', 'channels/' + encodeURIComponent(id), { gainDb: b.gainDb })
-      admin.audit('owner', 'comms.channel.gain', id + ' ' + (c.gainDb || 0) + ' dB', ip)
+      const c = await comms.call('PUT', 'channels/' + encodeURIComponent(id), { ...(b.gainDb !== undefined ? { gainDb: b.gainDb } : {}), ...(b.talkGainDb !== undefined ? { talkGainDb: b.talkGainDb } : {}) })
+      admin.audit('owner', 'comms.channel.gain', id + ' listen ' + (c.gainDb || 0) + ' dB, talk ' + (c.talkGainDb || 0) + ' dB', ip)
       return send(res, 200, c)
     })
     if (sub === 'comms/groups' && m === 'POST') return commsOf(res)(async () => {

@@ -137,6 +137,9 @@ export class Directory {
     // Per-channel trim in dB, applied by the listening apps (the gateway included). 0 means none.
     const gainDb = src.gainDb == null || src.gainDb === '' ? 0 : Math.round(Number(src.gainDb) * 2) / 2
     if (!Number.isFinite(gainDb) || gainDb < -24 || gainDb > 12) throw new DirectoryError('Gain must be between -24 and +12 dB')
+    // Same idea on the sending side: a trim applied to what people say on this channel before it leaves their app.
+    const talkGainDb = src.talkGainDb == null || src.talkGainDb === '' ? 0 : Math.round(Number(src.talkGainDb) * 2) / 2
+    if (!Number.isFinite(talkGainDb) || talkGainDb < -24 || talkGainDb > 12) throw new DirectoryError('Talk gain must be between -24 and +12 dB')
     const duck = src.duck
     if (duck != null && !(duck >= 0 && duck <= 1)) throw new DirectoryError('Duck level must be between 0 and 1')
     // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
@@ -164,7 +167,7 @@ export class Directory {
     const noDuck = hasMusic && !!src.noDuck
     return {
       id, name, color, ...(music ? { music: true } : {}), ...(withMusic ? { withMusic: true } : {}), ...(source ? { source } : {}), ...(link ? { link } : {}),
-      ...(noDuck ? { noDuck: true } : {}), ...(gainDb ? { gainDb } : {}),
+      ...(noDuck ? { noDuck: true } : {}), ...(gainDb ? { gainDb } : {}), ...(talkGainDb ? { talkGainDb } : {}),
       ...(ifb ? { ifb: true } : {}), ...((ifb || (hasMusic && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
     }
   }
@@ -183,7 +186,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'withMusic', 'noDuck', 'gainDb']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'withMusic', 'noDuck', 'gainDb', 'talkGainDb']) if (body[k] !== undefined) src[k] = body[k]
     // The stream/link field replaces whatever was stored (either kind); it is re-sorted by #cleanChannel.
     if (body.source !== undefined) { delete src.link; src.source = body.source } else if (src.link) { src.source = src.link; delete src.link }
     this.channels[i] = this.#cleanChannel(id, src)

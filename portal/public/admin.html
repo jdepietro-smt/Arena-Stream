@@ -598,20 +598,20 @@ async function commsSection(box) {
     const channelsView = () => {
       const kind = c => c.music ? 'Music' : c.ifb ? 'IFB' : c.withMusic ? 'Party + music' : 'Party line'
       const badge = (on, t) => el('span', { class: 'gb' + (on ? ' on' : '') }, t)
-      const head = ['Channel', 'Type', 'Gateway', 'Gain'].map(h => el('th', {}, h)).concat(st.groups.map(g => el('th', { class: 'gcol', title: plural(st.users.filter(u => (u.groups || []).includes(g.id)).length, 'member') }, g.name)))
+      const head = ['Channel', 'Type', 'Gateway', 'Listen gain', 'Talk gain'].map(h => el('th', {}, h)).concat(st.groups.map(g => el('th', { class: 'gcol', title: plural(st.users.filter(u => (u.groups || []).includes(g.id)).length, 'member') }, g.name)))
       // Gain trim in dB, applied by every app that listens to the channel. Clicks are batched into one save.
       const gainTimers = {}
       const fmtDb = v => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(1) + ' dB'
-      const gainCell = c => {
+      const gainCell = (c, f = 'gainDb') => {
         const val = el('button', { class: 'gval', title: 'Click to reset to 0 dB' }, '')
-        const show = () => { const v = c.gainDb || 0; val.textContent = fmtDb(v); val.classList.toggle('on', v !== 0) }
+        const show = () => { const v = c[f] || 0; val.textContent = fmtDb(v); val.classList.toggle('on', v !== 0) }
         const set = v => {
-          c.gainDb = Math.max(-24, Math.min(12, Math.round(v * 2) / 2)); show(); busy = true
-          clearTimeout(gainTimers[c.id])
-          gainTimers[c.id] = setTimeout(async () => { try { await oapi('/comms/channels/' + encodeURIComponent(c.id), 'PUT', { gainDb: c.gainDb || 0 }); flash(err, c.name + ' set to ' + fmtDb(c.gainDb || 0) + '.', true) } catch (e) { flash(err, e.message) } busy = false; load() }, 450)
+          c[f] = Math.max(-24, Math.min(12, Math.round(v * 2) / 2)); show(); busy = true
+          clearTimeout(gainTimers[c.id + f])
+          gainTimers[c.id + f] = setTimeout(async () => { try { await oapi('/comms/channels/' + encodeURIComponent(c.id), 'PUT', { [f]: c[f] || 0 }); flash(err, c.name + (f === 'gainDb' ? ' listen' : ' talk') + ' gain set to ' + fmtDb(c[f] || 0) + '.', true) } catch (e) { flash(err, e.message) } busy = false; load() }, 450)
         }
         val.onclick = () => set(0); show()
-        return el('div', { class: 'gain' }, el('button', { class: 'gstep', title: 'Quieter (1 dB)', onclick: () => set((c.gainDb || 0) - 1) }, '−'), val, el('button', { class: 'gstep', title: 'Louder (1 dB)', onclick: () => set((c.gainDb || 0) + 1) }, '+'))
+        return el('div', { class: 'gain' }, el('button', { class: 'gstep', title: 'Quieter (1 dB)', onclick: () => set((c[f] || 0) - 1) }, '−'), val, el('button', { class: 'gstep', title: 'Louder (1 dB)', onclick: () => set((c[f] || 0) + 1) }, '+'))
       }
       const row = c => {
         const gws = st.online.filter(o => o.gateway && (o.channels || []).includes(c.id))
@@ -620,9 +620,10 @@ async function commsSection(box) {
           el('td', {}, el('span', { class: 'chip' }, kind(c))),
           el('td', {}, gws.length ? el('div', { class: 'pills' }, gws.map(g => el('span', { class: 'chip ok' }, '⇄ ' + g.name))) : el('span', { class: 'hint', style: 'margin:0' }, 'none')),
           el('td', {}, gainCell(c)),
+          el('td', {}, c.music ? el('span', { class: 'hint', style: 'margin:0' }, 'n/a') : gainCell(c, 'talkGainDb')),
           ...st.groups.map(g => { const p = (g.grants || {})[c.id] || {}; return el('td', { class: 'gcol' }, el('div', { class: 'gbs' }, badge(p.talk, 'T'), badge(p.listen, 'L'), musicCh.has(c.id) ? badge(p.music, 'M') : null)) }))
       }
-      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab. Gain is a level trim in dB that every app applies when listening to that channel.'),
+      return el('div', {}, el('div', { class: 'hint', style: 'margin:0 0 12px' }, 'Every channel against every group. T = talk, L = listen, M = music. To change access, edit the group on the Groups tab. Listen gain is a level trim every app applies when hearing that channel. Talk gain is applied to people's voices as they speak on it, before it is sent.'),
         st.channels.length ? el('div', { class: 'gridwrap' }, el('table', { class: 'grid' }, el('thead', {}, el('tr', {}, head)), el('tbody', {}, st.channels.map(row)))) : empty('The Comms server has no channels.'))
     }
 

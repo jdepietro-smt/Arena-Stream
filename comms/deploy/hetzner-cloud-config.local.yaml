@@ -1,0 +1,33 @@
+#cloud-config
+package_update: true
+packages:
+  - git
+  - curl
+write_files:
+  - path: /root/install-arena-comms.sh
+    permissions: '0700'
+    content: |
+      #!/bin/bash
+      set -e
+      export COMMS_ADMIN_PW_INIT='GYtcryaUfSGkMxA3'
+      git clone https://github.com/jdepietro-smt/Arena-Stream.git /opt/arena-stream
+      cd /opt/arena-stream
+      IP="$(curl -4fsS --retry 5 --retry-delay 3 https://api.ipify.org)"
+      DOM="$(echo "$IP" | tr . -).sslip.io"   # sslip.io turns an IP into a name, so a real certificate is possible without our own domain
+      sleep 20                                  # let the name start resolving
+      if COMMS_DOMAIN="$DOM" bash comms/deploy/install.sh; then
+        echo "https://$DOM" > /root/arena-comms-url.txt
+      else
+        echo "certificate for $DOM failed: installing with a self-signed certificate instead"
+        bash comms/deploy/install.sh
+        echo "https://$IP (self-signed)" > /root/arena-comms-url.txt
+      fi
+  - path: /root/set-domain
+    permissions: '0700'
+    content: |
+      #!/bin/bash
+      # Later, when a domain points here:   /root/set-domain comms.example.com
+      cd /opt/arena-stream && git pull -q
+      COMMS_DOMAIN="$1" bash /opt/arena-stream/comms/deploy/install.sh
+runcmd:
+  - [ bash, -c, "/root/install-arena-comms.sh > /var/log/arena-comms-install.log 2>&1" ]
