@@ -559,9 +559,26 @@ async function commsSection(box) {
     // ── Overview: numbers, who is online, and who can use which channel
     const overview = () => {
       const stat = (n, label, cls) => el('div', { class: 'stat ' + (cls || '') }, el('b', {}, String(n)), el('span', {}, label))
+      const rttChip = o => o.rttMs == null ? el('span', { class: 'hint', style: 'margin:0' }, 'measuring...') : el('span', { class: 'chip ' + (o.rttMs < 80 ? 'ok' : o.rttMs < 150 ? 'warn' : 'bad'), title: 'Round trip to the Comms server (smoothed). Worst seen: ' + (o.rttMax != null ? o.rttMax : o.rttMs) + ' ms' }, o.rttMs + ' ms')
+      const lossChip = o => !o.link ? el('span', { class: 'hint', style: 'margin:0' }, '-') : el('span', { class: 'chip ' + (o.link.tx > 2 || o.link.rx > 2 ? 'bad' : 'ok'), title: 'Audio packet loss: what it sends / what it hears' }, o.link.tx.toFixed(1) + '% / ' + o.link.rx.toFixed(1) + '%')
+      const gwPanel = () => {
+        const known = st.gateways || []
+        if (!known.length) return null
+        const byKey = new Map(st.online.filter(o => o.gateway && o.gwKey).map(o => [o.gwKey, o]))
+        const rows = known.map(g => ({ g, o: byKey.get(g.id) || null })).sort((a, b) => (!!b.o - !!a.o) || String(a.g.name).localeCompare(String(b.g.name)))
+        const nOn = rows.filter(r => r.o).length
+        const ago = t => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 2880 ? Math.round(m / 60) + ' h ago' : Math.round(m / 1440) + ' days ago' }
+        const onRow = ({ g, o }) => el('tr', {}, el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, el('span', { class: 'dot' }), el('span', { class: 'nm' }, g.name))), el('td', {}, rttChip(o)), el('td', {}, lossChip(o)),
+          el('td', {}, o.link ? Math.round(o.link.jitter) + ' ms' : '-'), el('td', {}, String((o.channels || []).length)))
+        const offRow = ({ g }) => el('tr', {}, el('td', {}, el('div', { class: 'row', style: 'gap:8px' }, el('span', { class: 'dot', style: 'background:#3b4350;box-shadow:none' }), el('span', { style: 'color:var(--mut)' }, g.name))), el('td', { colspan: 4, class: 'hint' }, 'offline' + (g.lastSeen ? ', last seen ' + ago(g.lastSeen) : '')))
+        return el('div', { class: 'panel', style: 'margin-bottom:14px' }, el('div', { class: 'row', style: 'margin-bottom:6px' }, el('h2', { style: 'margin:0' }, 'Gateways'), el('span', { class: 'chip ' + (nOn ? 'ok' : '') }, nOn + ' of ' + known.length + ' online')),
+          el('div', { class: 'gridwrap', style: 'border:0;border-radius:0;background:none' }, el('table', { class: 'grid', style: 'min-width:520px;background:none;border:0' },
+            el('thead', {}, el('tr', {}, ['Gateway', 'Latency', 'Loss (send / hear)', 'Jitter', 'Channels'].map(h => el('th', {}, h)))),
+            el('tbody', {}, rows.map(r => r.o ? onRow(r) : offRow(r))))))
+      }
       const kick = o => el('button', { class: 'b ghost', onclick: async () => { if (!confirm('Disconnect ' + (o.name || o.id) + ' from the intercom? They can rejoin.')) return; try { await oapi('/comms/kick/' + encodeURIComponent(o.id), 'POST'); await load() } catch (e) { flash(err, e.message) } } }, 'Kick')
       const onlineList = el('div', { class: 'panel' }, el('h2', {}, 'Online now'),
-        st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id, o.gateway ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'gateway') : null), el('div', { class: 'hint', style: 'margin:0' }, o.gateway ? (o.channels && o.channels.length ? 'Carries ' + o.channels.map(chName).join(', ') : 'Not carrying any channel') : (o.title || 'No role set'))), kick(o))) : empty('Nobody is connected.'))
+        st.online.length ? st.online.map(o => el('div', { class: 'li' }, avatar(o.name || o.username || o.id, true), el('div', { class: 'grow' }, el('div', { class: 'nm' }, o.name || o.username || o.id, o.gateway ? el('span', { class: 'chip', style: 'margin-left:8px' }, 'gateway') : null), el('div', { class: 'hint', style: 'margin:0' }, o.gateway ? (o.channels && o.channels.length ? 'Carries ' + o.channels.map(chName).join(', ') : 'Not carrying any channel') : (o.title || 'No role set'))), rttChip(o), kick(o))) : empty('Nobody is connected.'))
       const gwOnline = (st.gateways || []).filter(g => g.online)
       const oldComms = gwOnline.length && !st.online.some(o => o.gateway)
       const channelList = el('div', { class: 'panel' }, el('h2', {}, 'Channels'),
@@ -574,7 +591,7 @@ async function commsSection(box) {
             el('div', { class: 'pills', style: 'justify-content:flex-end' }, who.length ? who.map(g => el('span', { class: 'chip' }, g.name)) : el('span', { class: 'hint' }, 'no group yet')))
         }) : empty('The Comms server has no channels.'))
       return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
-        el('div', { class: 'two' }, onlineList, channelList))
+        gwPanel(), el('div', { class: 'two' }, onlineList, channelList))
     }
 
     // ── Channels: every channel, what kind it is, which gateway carries it, and which groups may use it

@@ -285,7 +285,7 @@ export function createServer(
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
       ...(p.user.gateway ? { gateway: true, gwKey: p.user.gwKey || null, channels: [...new Set([...p.talk, ...p.listen])].filter(id => !id.startsWith('u:')) } : {}),
-      link: p.link && Date.now() - p.link.at < 15_000 ? p.link : null, linkWorst: p.linkWorst ?? null,
+      link: p.link && Date.now() - p.link.at < 15_000 ? p.link : null, linkWorst: p.linkWorst ?? null, rttMs: p.rttMs ?? null, rttMax: p.rttMax ?? null,
     })),
   })
 
@@ -348,6 +348,7 @@ export function createServer(
     for (const p of peers.values()) {
       if (!p.alive) { p.ws.terminate(); continue }
       p.alive = false
+      p.pingAt = Date.now()
       p.ws.ping()
     }
   }, 10_000)
@@ -515,7 +516,12 @@ export function createServer(
       }
     })
 
-    ws.on('pong', () => { if (me) me.alive = true })
+    ws.on('pong', () => {
+      if (!me) return
+      me.alive = true
+      // Round trip of the control connection, smoothed: the network delay between this person (or gateway) and the server.
+      if (me.pingAt) { const rtt = Date.now() - me.pingAt; me.rttMs = me.rttMs == null ? rtt : Math.round(me.rttMs * 0.7 + rtt * 0.3); me.rttMax = Math.max(me.rttMax ?? 0, rtt) }
+    })
     ws.on('close', () => {
       clearTimeout(joinTimer)
       if (me && peers.get(me.id) === me) {
