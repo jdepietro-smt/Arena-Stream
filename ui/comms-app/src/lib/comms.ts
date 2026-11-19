@@ -34,6 +34,8 @@ export type Status = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'err
 
 export interface JoinOptions {
   url: string
+  /** Other servers to fall over to, in order, when `url` cannot be reached (a standby server, or one inside the venue). */
+  backupUrls?: string[]
   name: string
   /** 'accounts': sign in with username/password. 'open': pick a name and a group. */
   auth: 'accounts' | 'open'
@@ -187,6 +189,37 @@ export class CommsEngine {
   private sfuRx = new Map<string, RTCRtpReceiver>()
   private tune = { txLost: 0, txSent: 0, lost: 0, received: 0, concealed: 0, samples: 0, cleanSince: 0, ready: false }
   private rejoinAttempts = 0
+  /** Which of [url, ...backupUrls] is in use. 0 is the main server. */
+  private urlIdx = 0
+  private failbackTimer: ReturnType<typeof setInterval> | null = null
+  private serverUrls(): string[] {
+    const o = this.opts
+    return o ? [o.url, ...(o.backupUrls ?? [])].map(u => u.trim()).filter(Boolean) : []
+  }
+  /** True while connected to a backup server because the main one cannot be reached. */
+  get usingBackup(): boolean { return this.urlIdx > 0 && this.status !== 'idle' }
+  /** The server this session is using. */
+  get activeUrl(): string { const u = this.serverUrls(); return u[this.urlIdx % Math.max(1, u.length)] ?? '' }
+  /** While on a backup, look for the main server every 30 s and move back as soon as it answers. */
+  private armFailback() {
+    if (this.failbackTimer) clearInterval(this.failbackTimer)
+    this.failbackTimer = null
+    if (this.urlIdx === 0 || this.serverUrls().length < 2) return
+    this.failbackTimer = setInterval(() => {
+      if (this.stopped || this.status !== 'connected' || this.urlIdx === 0) return
+      let probe: WebSocket
+      try { probe = new WebSocket(this.serverUrls()[0]) } catch { return }
+      const giveUp = setTimeout(() => probe.close(), 4000)
+      probe.onerror = () => {}
+      probe.onopen = () => {
+        clearTimeout(giveUp)
+        probe.close()
+        if (this.stopped || this.urlIdx === 0) return
+        this.urlIdx = 0 // the main server is back: rejoin it
+        this.ws?.close()
+      }
+    }, 30_000)
+  }
   private mediaStall: ReturnType<typeof setTimeout> | null = null
   private wantMuted = new Set<string>()
   private stopped = true
@@ -253,6 +286,7 @@ export class CommsEngine {
     this.errorCode = ''
     this.welcomed = false
     this.failedOpens = 0
+    this.urlIdx = 0
     this.emit()
     try {
       await this.initAudio(opts.micId, opts.echoCancel)
@@ -270,6 +304,8 @@ export class CommsEngine {
     this.teardownSession()
     this.ws?.close()
     this.ws = null
+    if (this.failbackTimer) clearInterval(this.failbackTimer)
+    this.failbackTimer = null
     this.stopProgram()
     this.progGain = null
     this.progAnalyser = null
@@ -572,7 +608,8 @@ export class CommsEngine {
   private openSocket() {
     const o = this.opts!
     let ws: WebSocket
-    try { ws = new WebSocket(o.url) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
+    const urls = this.serverUrls()
+    try { ws = new WebSocket(urls[this.urlIdx % urls.length]) } catch (e) { return this.fatal(`Bad server URL: ${(e as Error).message}`) }
     this.ws = ws
     ws.onopen = () => this.send(o.auth === 'accounts'
       ? (o.token ? { type: 'join', token: o.token } : { type: 'join', username: o.username, password: o.password, ...(o.gateway ? { gateway: true, name: o.name, gatewayId: o.gatewayId } : {}) })
@@ -588,7 +625,8 @@ export class CommsEngine {
       if (!this.welcomed) {
         // Never got in: say so plainly after a few tries instead of sitting on "Connecting…" or an empty intercom.
         // (A gateway never gives up: it starts unattended, possibly before the network is up.)
-        if (++this.failedOpens >= 3 && !this.opts?.gateway) {
+        if (urls.length > 1) this.urlIdx = (this.urlIdx + 1) % urls.length // try the other server next
+        if (++this.failedOpens >= 3 * urls.length && !this.opts?.gateway) {
           this.errorCode = 'unreachable'
           return this.fatal("Can't reach the intercom server. Check the address and your network. If the address starts with a number, this computer must also trust the server's certificate (install the .crt file once). Your sign-in is kept: press Join to try again.")
         }
@@ -598,6 +636,8 @@ export class CommsEngine {
         return
       }
       this.status = 'reconnecting'
+      // One quick retry of the same server (most drops are a blip); if that fails too, try the other one.
+      if (urls.length > 1 && this.rejoinAttempts >= 1) this.urlIdx = (this.urlIdx + 1) % urls.length
       this.emit()
       // First retry is quick (most drops are a blip); keep backing off to 5 s so a down server isn't hammered.
       const wait = Math.min(5000, 400 * 2 ** this.rejoinAttempts++)
@@ -645,6 +685,7 @@ export class CommsEngine {
         this.updateDuck()
         this.statsTimer = setInterval(() => this.pollStats(), 2000)
         this.rejoinAttempts = 0
+        this.armFailback()
         this.lastPong = Date.now()
         this.pingTimer = setInterval(() => {
           // A network that silently drops our packets never closes the socket: no answer for 9 s means the link is dead, so rejoin.

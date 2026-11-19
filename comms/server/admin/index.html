@@ -397,7 +397,10 @@ function render() {
   $app.append(h('header', {}, h('div', { class: 'brand' }, 'ARENA ', h('b', {}, 'COMMS'), ' · ADMIN'),
     h('nav', {}, Object.entries(TABS).map(([k, [label]]) => h('button', { class: S.tab === k ? 'on' : '', onclick: async () => { S.tab = k; if (k === 'history') { S.hist = await api('GET', 'history').catch(() => null); S.alerts = await api('GET', 'alerts').catch(() => null) } render() } }, label, k === 'online' ? ' (' + S.state.online.length + ')' : ''))),
     h('button', { class: 'btn sm', onclick: () => { api('POST', 'logout').catch(() => {}); signOut() } }, 'Sign out')),
-    h('main', {}, TABS[S.tab][1]()))
+    h('main', {}, S.state.standby && h('div', { class: 'chip warn', style: 'display:block;margin-bottom:14px;padding:10px 14px;line-height:1.5' },
+      'STANDBY SERVER: a read-only copy of ' + S.state.standby.primary + '. Change users, groups and channels there; they are copied here ' +
+      (S.state.standby.lastSync ? 'every minute (last copied ' + Math.max(0, Math.round((Date.now() - S.state.standby.lastSync) / 1000)) + ' s ago)' : 'once it can reach it') + '.' +
+      (S.state.standby.error ? ' Cannot reach the primary right now: ' + S.state.standby.error : '')), TABS[S.tab][1]()))
 }
 
 if (S.token) refresh().then(() => { S.timer = setInterval(() => refresh().catch(() => {}), 5000) }).catch(() => { S.token = null; render() })

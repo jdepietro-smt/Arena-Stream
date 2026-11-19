@@ -75,6 +75,16 @@ export class Directory {
   }
 
   onChange(fn) { this.listeners.add(fn) }
+
+  /** Standby servers: adopt another server's channels, groups and users. Gateways seen here are kept. Returns true if anything changed. */
+  replaceFrom(snap) {
+    const next = { channels: snap?.channels, groups: snap?.groups, users: snap?.users }
+    if (![next.channels, next.groups, next.users].every(Array.isArray)) throw new DirectoryError('Not a directory snapshot')
+    if (JSON.stringify(next) === JSON.stringify({ channels: this.data.channels, groups: this.data.groups, users: this.data.users })) return false
+    Object.assign(this.data, next)
+    this.#changed()
+    return true
+  }
   #changed() { this.save(); for (const fn of this.listeners) fn() }
 
   // ── reads ──────────────────────────────────────────────────────────────────

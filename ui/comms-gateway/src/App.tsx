@@ -135,7 +135,7 @@ export default function App() {
   const connect = () => {
     if (!cfg) return
     void engine.join({
-      url: serverUrl(cfg.server), auth: 'accounts', username: '', password: '',
+      url: serverUrl(cfg.server), backupUrls: cfg.backupServer?.trim() ? [serverUrl(cfg.backupServer)] : [], auth: 'accounts', username: '', password: '',
       name: cfg.name.trim() || 'Gateway', pin: '', echoCancel: false, gateway: true, gatewayId: cfg.id,
     })
   }
@@ -332,7 +332,9 @@ export default function App() {
               <div className="grid3">
                 <label>Gateway name<input value={cfg.name} onChange={e => patch({ name: e.target.value })} placeholder="Gateway" maxLength={24} /></label>
                 <label>Server address<input value={cfg.server} onChange={e => patch({ server: e.target.value })} placeholder="5.161.235.143" /></label>
+                <label>Backup server (optional)<input value={cfg.backupServer ?? ''} onChange={e => patch({ backupServer: e.target.value })} placeholder="5.78.1.2  or  ws://192.168.1.20:8900" /></label>
               </div>
+              {engine.usingBackup && <div className="warn">Using the backup server ({engine.activeUrl}) because the main one cannot be reached. It moves back by itself when the main server returns.</div>}
               <label className="check"><input type="checkbox" checked={cfg.autoConnect} onChange={e => patch({ autoConnect: e.target.checked })} />Connect automatically when the gateway starts</label>
               <p className="hint">Just the address is enough. If it stays on Reconnecting, Windows doesn't trust the server's certificate yet: install it under Trusted Root Certification Authorities.</p>
             </section>

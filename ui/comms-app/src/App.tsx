@@ -15,24 +15,26 @@ const LCD_COLORS = {
 interface ServerInfo { auth: 'accounts' | 'open'; pin: boolean; groups: { id: string; name: string }[] }
 
 /** Ask the server how to sign in, so the form matches (accounts vs. open join). */
-function useServerInfo(url: string) {
+function useServerInfo(url: string, backup = '') {
   const [info, setInfo] = useState<ServerInfo | null>(null)
   const [err, setErr] = useState('')
   useEffect(() => {
     setInfo(null); setErr('')
     const ctl = new AbortController()
     const t = setTimeout(() => {
-      fetch(`${httpBase(url)}/info`, { signal: ctl.signal })
-        .then(r => r.json()).then(setInfo)
+      const ask = (u: string) => fetch(`${httpBase(u)}/info`, { signal: ctl.signal }).then(r => r.json())
+      // The main server first; if it does not answer, the backup (so the form still works when the main one is down).
+      ask(url).catch(e => { if (!backup.trim()) throw e; return ask(backup.trim()) })
+        .then(setInfo)
         .catch(e => { if (!ctl.signal.aborted) setErr(`Can't reach the server (${(e as Error).message})`) })
     }, 350)
     return () => { clearTimeout(t); ctl.abort() }
-  }, [url])
+  }, [url, backup])
   return { info, err }
 }
 
 interface Prefs {
-  url: string; username: string; name: string; group: string; pin: string
+  url: string; backupUrl: string; username: string; name: string; group: string; pin: string
   micId: string; spkId: string; echoCancel: boolean; muted: string[]; programUrl: string
   levels: Record<string, number>; density: 'compact' | 'comfortable'
   lcdColor: keyof typeof LCD_COLORS; lcdBright: number; night: boolean
@@ -56,6 +58,7 @@ function loadPrefs(): Prefs {
     url: /^https?:$/.test(location.protocol) && !/^(localhost|127\.)/.test(location.hostname)
       ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/comms`
       : 'ws://localhost:8900',
+    backupUrl: '',
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
     levels: {}, density: 'compact', lcdColor: 'cyan', lcdBright: 1, night: false,
@@ -89,7 +92,7 @@ export default function App() {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [showSettings, setShowSettings] = useState(false)
   const [password, setPassword] = useState('')
-  const { info, err: infoErr } = useServerInfo(prefs.url)
+  const { info, err: infoErr } = useServerInfo(prefs.url, prefs.backupUrl)
 
   const patch = (p: Partial<Prefs>) => setPrefs(prev => {
     const next = { ...prev, ...p }
@@ -156,7 +159,7 @@ export default function App() {
     if (!info) return
     const group = info.groups.find(g => g.id === prefs.group)?.id ?? info.groups[0]?.id
     void engine.join(
-      { url: prefs.url.trim(), auth: info.auth, username: prefs.username, password, token, name: prefs.name, group, pin: prefs.pin,
+      { url: prefs.url.trim(), backupUrls: prefs.backupUrl.trim() ? [prefs.backupUrl.trim()] : [], auth: info.auth, username: prefs.username, password, token, name: prefs.name, group, pin: prefs.pin,
         micId: prefs.micId || undefined, echoCancel: prefs.echoCancel,
         programUrl: prefs.programUrl },
       prefs.muted, prefs.levels,
@@ -236,6 +239,7 @@ function Login({ prefs, patch, devices, info, infoErr, password, setPassword, er
     <form className="login chassis" onSubmit={e => { e.preventDefault(); if (ok) onJoin() }}>
       <h1 className="lcd">Join the intercom</h1>
       <label>Server<input value={prefs.url} onChange={e => patch({ url: e.target.value })} placeholder="ws://host:8900" /></label>
+      <label>Backup server (optional)<input value={prefs.backupUrl} onChange={e => patch({ backupUrl: e.target.value })} placeholder="wss://other-host/comms or ws://192.168.1.20:8900" title="Used automatically if the main server cannot be reached; the intercom moves back when it returns." /></label>
       {infoErr && <div className="error">{infoErr}</div>}
       {!info && !infoErr && <div className="muted">Contacting server…</div>}
       {accounts && (
@@ -351,6 +355,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
           </div>
           <div className="hl-mid">
             <span className={`hl-state ${engine.status}`}>{engine.status === 'connected' ? 'ON LINE' : engine.status.toUpperCase()}</span>
+            {engine.usingBackup && <span className="hl-state reconnecting" title={`The main server cannot be reached. Using ${engine.activeUrl}. It moves back by itself when the main server returns.`}>BACKUP SERVER</span>}
             <span>{engine.media.toUpperCase()}{engine.serverRttMs != null ? ` · ${engine.serverRttMs} ms` : ''}</span>
             <span className="dim" title="When this copy of the panel was built">v {__BUILD__}</span>
           </div>

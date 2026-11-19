@@ -20,6 +20,7 @@ import { createEventLog } from './eventlog.js'
 import { createAlerter } from './alerts.js'
 import { createArenaWatcher } from './arena.js'
 import { createPlayers } from './player.js'
+import { createStandby } from './standby.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -38,6 +39,8 @@ export function loadConfig(file = process.env.COMMS_CONFIG || path.join(here, 'c
   if (process.env.COMMS_PIN !== undefined) cfg.pin = process.env.COMMS_PIN
   if (process.env.COMMS_ICE) cfg.iceServers = JSON.parse(process.env.COMMS_ICE)
   if (process.env.COMMS_AUTH) cfg.auth = { mode: process.env.COMMS_AUTH }
+  // Run as a standby of another server: COMMS_STANDBY_URL=https://host/comms COMMS_STANDBY_USER=… COMMS_STANDBY_PASSWORD=… [COMMS_STANDBY_CA=/path/server.crt]
+  if (process.env.COMMS_STANDBY_URL) cfg.standby = { ...cfg.standby, primaryUrl: process.env.COMMS_STANDBY_URL, username: process.env.COMMS_STANDBY_USER, password: process.env.COMMS_STANDBY_PASSWORD, ...(process.env.COMMS_STANDBY_CA ? { ca: process.env.COMMS_STANDBY_CA } : {}) }
   // The directory file holds users/groups/channels once created; config channels/roles only seed it.
   cfg.dataFile = process.env.COMMS_DATA ?? cfg.dataFile ?? path.join(here, 'data', 'directory.json')
   return cfg
@@ -77,6 +80,12 @@ export function createServer(
     return secret
   })()
   const auth = createAuth(dir, { secret: sessionSecret })
+  // Standby: mirror a primary server's directory (see standby.js). Its session secret is kept next to ours.
+  const secretFile = cfg.dataFile ? path.join(path.dirname(cfg.dataFile), 'session.key') : null
+  const standby = createStandby({
+    cfg, dir,
+    setSecret: b => { auth.setSecret(b); try { if (secretFile) fs.writeFileSync(secretFile, b.toString('base64url'), { mode: 0o600 }) } catch { /* in memory until restart */ } },
+  })
 
   /** @type {Map<string, any>} connected peers by connection id */
   const peers = new Map()
@@ -284,6 +293,7 @@ export function createServer(
 
   const admin = createAdmin({
     dir, auth, kick, players, history: () => ({ events: elog.recent(300), history: elog.history(24) }), alerter,
+    readOnly: () => !!standby, standby: () => standby?.status() ?? null,
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),
     online: () => [...peers.values()].map(p => ({
       id: p.id, userId: p.user.ephemeral ? null : p.user.id, name: p.user.name, title: p.title, ephemeral: !!p.user.ephemeral,
@@ -330,7 +340,7 @@ export function createServer(
     if (music) return void serveMusicStream(music[1], url.searchParams.get('k'), res)
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, peers: peers.size }))
+      res.end(JSON.stringify({ ok: true, peers: peers.size, ...(standby ? { standby: true, lastSync: standby.status().lastSync } : {}) }))
       return
     }
     if (url.pathname === '/info') {
@@ -580,9 +590,10 @@ export function createServer(
     directory: dir,
     bootstrap,
     listen: (port = cfg.port) =>
-      new Promise(resolve => httpServer.listen(port, process.env.COMMS_HOST || undefined, () => { arena?.start(); resolve(httpServer.address().port) })),
+      new Promise(resolve => httpServer.listen(port, process.env.COMMS_HOST || undefined, () => { arena?.start(); standby?.start(); resolve(httpServer.address().port) })),
     close: () => new Promise(resolve => {
       arena?.stop()
+      standby?.stop()
       void players?.stopAll()
       for (const c of wss.clients) c.terminate()
       wss.close(() => httpServer.close(() => resolve()))

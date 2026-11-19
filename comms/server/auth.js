@@ -13,7 +13,8 @@ export class AuthError extends Error {
   constructor(code, message, status = 401) { super(message); this.code = code; this.status = status }
 }
 
-export function createAuth(dir, { secret = randomBytes(32) } = {}) {
+export function createAuth(dir, { secret: initialSecret = randomBytes(32) } = {}) {
+  let secret = initialSecret
   const fails = new Map() // key -> { n, until }
   const tokens = new Map() // token -> { userId, exp }
 
@@ -39,6 +40,9 @@ export function createAuth(dir, { secret = randomBytes(32) } = {}) {
 
   return {
     authenticate,
+    /** A standby adopts the primary's signing secret so people signed in there stay signed in here. */
+    setSecret(next) { secret = next },
+    getSecret: () => secret,
     /** A token a browser can keep to rejoin without the password. Valid 14 days, renewed at each use. */
     issueSession(user) {
       const payload = Buffer.from(JSON.stringify({ u: user.id, e: Date.now() + SESSION_TTL_MS, p: pwTag(user) })).toString('base64url')

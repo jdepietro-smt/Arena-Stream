@@ -68,6 +68,8 @@ export interface GatewayConfig {
   /** How this gateway shows up in the server's list of people. */
   name: string
   server: string; username: string; password: string; autoConnect: boolean
+  /** Another server to fall over to when the main one cannot be reached (a standby server, or one inside the venue). */
+  backupServer?: string
   /** Send and receive audio over TCP instead of UDP (for a network that drops UDP packets). Applies after a restart. */
   forceTcp?: boolean
   /** Switch to TCP by itself (with a restart) when the line keeps losing audio. Off unless turned on: TCP can add a third of a second of delay. */

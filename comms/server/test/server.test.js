@@ -674,3 +674,39 @@ test('a gateway only receives call signals once it asks for them (hardware call 
     await srv.close?.()
   }
 })
+
+test('a standby server mirrors the primary, shares sign-ins, and is read-only for admins', async () => {
+  const acfg = { ...cfg, auth: { mode: 'accounts' }, pin: '' }
+  const primary = createServer(acfg)
+  const pport = await primary.listen(0)
+  let standby
+  try {
+    const admin = primary.bootstrap
+    assert.ok(admin?.password, 'the primary made an administrator')
+    primary.directory.addChannel({ name: 'Mirror me' })
+    standby = createServer({ ...acfg, standby: { primaryUrl: `http://127.0.0.1:${pport}`, username: admin.username, password: admin.password, intervalSec: 5 } })
+    const sport = await standby.listen(0)
+    for (let i = 0; i < 100 && !standby.directory.channel('mirror-me'); i++) await new Promise(r => setTimeout(r, 50))
+    assert.ok(standby.directory.channel('mirror-me'), 'a channel made on the primary arrived')
+
+    // Signed in on the primary: the session token works on the standby too.
+    const a = await client(pport)
+    a.send({ type: 'join', username: admin.username, password: admin.password })
+    const wa = await a.next(m => m.type === 'welcome')
+    assert.ok(wa.session)
+    const b = await client(sport)
+    b.send({ type: 'join', token: wa.session })
+    assert.equal((await b.next(m => m.type === 'welcome' || m.type === 'error')).type, 'welcome', 'the same session works on the standby')
+    a.ws.close(); b.ws.close()
+
+    // Admins cannot change a standby; they are told where to go.
+    const login = await fetch(`http://127.0.0.1:${sport}/admin/api/login`, { method: 'POST', body: JSON.stringify({ username: admin.username, password: admin.password }) }).then(r => r.json())
+    const put = await fetch(`http://127.0.0.1:${sport}/admin/api/channels`, { method: 'POST', headers: { authorization: `Bearer ${login.token}` }, body: JSON.stringify({ name: 'Nope' }) })
+    assert.equal(put.status, 409)
+    const st = await fetch(`http://127.0.0.1:${sport}/admin/api/state`, { headers: { authorization: `Bearer ${login.token}` } }).then(r => r.json())
+    assert.ok(st.standby.lastSync > 0, 'the admin page can show when it last synced')
+  } finally {
+    await standby?.close()
+    await primary.close()
+  }
+})

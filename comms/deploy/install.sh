@@ -73,6 +73,29 @@ fi
 # shellcheck disable=SC1091
 . "$ETC/env"
 
+# Standby: COMMS_STANDBY_URL=https://<primary>/comms COMMS_STANDBY_USER=admin COMMS_STANDBY_PASSWORD=... bash comms/deploy/install.sh
+# makes this server a read-only mirror of the primary (accounts, groups, channels), ready for clients to fall over to.
+# A primary with a self-signed certificate is pinned: its certificate is fetched once and trusted for this link only.
+if [ -n "${COMMS_STANDBY_URL:-}" ]; then
+  step "Standby of $COMMS_STANDBY_URL"
+  case "$COMMS_STANDBY_URL" in
+    https://*)
+      SBHOST="$(printf '%s' "$COMMS_STANDBY_URL" | sed -E 's#^https://([^/:]+).*##')"
+      if [ ! -s "$ETC/standby-ca.crt" ]; then
+        openssl s_client -connect "$SBHOST:443" -servername "$SBHOST" </dev/null 2>/dev/null | openssl x509 >"$ETC/standby-ca.crt"           || { echo "Could not fetch the primary's certificate from $SBHOST:443"; exit 1; }
+      fi ;;
+  esac
+  sed -i '/^COMMS_STANDBY_/d' "$ETC/env"
+  {
+    echo "COMMS_STANDBY_URL=$COMMS_STANDBY_URL"
+    echo "COMMS_STANDBY_USER=${COMMS_STANDBY_USER:-admin}"
+    echo "COMMS_STANDBY_PASSWORD=${COMMS_STANDBY_PASSWORD:?set COMMS_STANDBY_PASSWORD to the primary admin password}"
+    [ -s "$ETC/standby-ca.crt" ] && echo "COMMS_STANDBY_CA=$ETC/standby-ca.crt"
+  } >>"$ETC/env"
+  # shellcheck disable=SC1091
+  . "$ETC/env"
+fi
+
 cat >"$ETC/livekit.yaml" <<EOF
 port: 7880
 bind_addresses: ["127.0.0.1"]
