@@ -83,6 +83,12 @@ test('join, state, signal relay, call, leave', async () => {
     a.send({ type: 'call', to: wb.id })
     const direct = await b.next(m => m.type === 'call' && m.channel === null)
     assert.equal(direct.from, wa.id)
+    await new Promise(r => setTimeout(r, 1100))
+
+    // An all-call reaches everyone who can hear me on any of my channels, as one signal.
+    a.send({ type: 'call', all: true })
+    const all = await b.next(m => m.type === 'call' && m.channel === '*')
+    assert.equal(all.from, wa.id)
 
     b.ws.close()
     assert.equal((await a.next(m => m.type === 'peer-leave')).id, wb.id)

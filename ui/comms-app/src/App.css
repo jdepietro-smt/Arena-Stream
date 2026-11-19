@@ -405,3 +405,7 @@ body { background: radial-gradient(ellipse at 50% 0%, #10203d 0%, #070d1c 55%, #
   .hl-mid { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: wrap; }
 }
 .person.calling { animation: callflash .5s steps(2) infinite; }
+.allcall { display:flex; align-items:center; gap:12px; margin:0 0 10px; padding:8px 12px }
+.allcall .ac-title { font-weight:700; letter-spacing:.12em }
+.allcall .ac-state { flex:1; font-size:12px }
+.allcall.calling { animation: callflash .5s steps(2) infinite }

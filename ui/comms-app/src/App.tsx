@@ -382,6 +382,7 @@ function Intercom({ engine, name, prefs, patch, devices, onAudio, onAdmin, onLea
             })}
           </div>
         )}
+        {engine.canAllCall && <AllCall engine={engine} />}
         <div className="keys">
           {engine.program && <ProgramKey engine={engine} />}
           {shown.map((c, i) => (c.music
@@ -445,6 +446,28 @@ function Clock() {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t) }, [])
   return <div className="hl-clock">{now.toLocaleTimeString([], { hour12: false })}</div>
+}
+
+/** ALL CALL: lights everybody's call light, and while held talks on every channel I may talk on. Also shows an all-call aimed at me. */
+function AllCall({ engine }: { engine: CommsEngine }) {
+  const calling = engine.callActive('*')
+  const out = engine.callOutState('*')
+  const talking = engine.channels.some(c => c.canTalk && !c.music) && engine.talkSet.size > 0 && engine.channels.filter(c => c.canTalk && !c.music).every(c => engine.talkSet.has(c.id))
+  return (
+    <div className={`lcd allcall ${calling ? 'calling' : ''}`}>
+      <span className="ac-title">ALL CALL</span>
+      <span className="ac-state">
+        {calling ? <span className="blink">ALL CALL ▸ {(engine.callerName('*') || 'SOMEONE').toUpperCase()}</span>
+          : out ? <span className={out.state === 'answered' ? '' : 'dim'}>{out.state === 'answered' ? `SEEN ▸ ${(out.by || '').toUpperCase()}` : 'CALL SENT'}</span>
+          : <span className="dim">HOLD TO TALK ON EVERY CHANNEL</span>}
+      </span>
+      {calling && <button className="cap sm" onClick={() => engine.ackCall('*')}><i className="led amber on blink" />ANSWER</button>}
+      <button className="cap sm direct" title="Call light to everyone, and talk on all your channels while held"
+        onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); engine.pressAll() }}
+        onPointerUp={() => engine.releaseAllCall()}
+        onPointerCancel={() => engine.releaseAllCall()}><i className={`led red ${talking ? 'on' : ''}`} />ALL</button>
+    </div>
+  )
 }
 
 /** One channel key: LCD legend, big illuminated TALK key, and LISTEN / LATCH / CALL keys with LEDs. */

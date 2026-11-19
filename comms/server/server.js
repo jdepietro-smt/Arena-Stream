@@ -502,6 +502,11 @@ export function createServer(
           const now = Date.now()
           if (now - (me.lastCall ?? 0) < 1000) break
           me.lastCall = now
+          if (msg.all === true) {                      // all-call: everyone who can hear me on any channel I may talk on, one signal each
+            const mine = [...Object.keys(me.perms)].filter(c => me.perms[c]?.talk && !isMusic(c))
+            for (const p of peers.values()) if (p !== me && !p.user.gateway && mine.some(c => p.perms[c]?.listen)) send(p, { type: 'call', from: me.id, channel: '*' })
+            break
+          }
           if (typeof msg.to === 'string') {            // a call to one person
             const to = peers.get(msg.to)
             if (to && to !== me && !to.user.gateway) send(to, { type: 'call', from: me.id, channel: null })

@@ -1586,6 +1586,26 @@ export class CommsEngine {
     this.send({ type: 'call', channel: ch })
     this.markCallOut(ch)
   }
+  /** All-call: a call light to everyone who can hear me on any channel I may talk on. */
+  callAll() {
+    this.send({ type: 'call', all: true })
+    this.markCallOut('*')
+  }
+  get canAllCall(): boolean { return this.channels.some(c => c.canTalk && !c.music) }
+  private allHeld = new Set<string>()
+  /** Hold to talk on every channel I may talk on, and light everybody's call light. */
+  pressAll() {
+    this.callAll()
+    for (const c of this.channels) if (c.canTalk && !c.music && !this.held.has(c.id)) { this.allHeld.add(c.id); this.held.add(c.id) }
+    this.pushState()
+    this.emit()
+  }
+  releaseAllCall() {
+    for (const id of this.allHeld) this.held.delete(id)
+    this.allHeld.clear()
+    this.pushState()
+    this.emit()
+  }
   callUser(peerId: string) {
     this.send({ type: 'call', to: peerId })
     this.markCallOut(`u:${peerId}`)
