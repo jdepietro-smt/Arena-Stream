@@ -61,7 +61,7 @@ function loadPrefs(): Prefs {
     backupUrl: '',
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
-    levels: {}, density: 'compact', lcdColor: 'cyan', lcdBright: 1, night: false,
+    levels: {}, density: typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches ? 'comfortable' : 'compact', lcdColor: 'cyan', lcdBright: 1, night: false,
     spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {}, hidden: [], order: [],
   }
   try {
@@ -169,6 +169,20 @@ export default function App() {
   }
 
   const inSession = engine.status === 'connected' || engine.status === 'reconnecting'
+
+  // Keep a phone's screen on while it is on the intercom (a sleeping phone drops the audio). Taken again when the page comes back to the front.
+  useEffect(() => {
+    if (!inSession) return
+    type Lock = { released: boolean; release(): Promise<void> }
+    const wl = (navigator as unknown as { wakeLock?: { request(t: 'screen'): Promise<Lock> } }).wakeLock
+    if (!wl) return
+    let lock: Lock | null = null
+    const take = () => { wl.request('screen').then(l => { lock = l }).catch(() => { /* refused: battery saver or not visible */ }) }
+    take()
+    const back = () => { if (document.visibilityState === 'visible' && (!lock || lock.released)) take() }
+    document.addEventListener('visibilitychange', back)
+    return () => { document.removeEventListener('visibilitychange', back); void lock?.release().catch(() => {}) }
+  }, [inSession])
 
   // Stay signed in across reloads: keep the session while connected, rejoin by itself on load, forget it on
   // an explicit leave or when the server says it is no longer valid.
@@ -518,7 +532,7 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
         className={`cap talkkey ${talking ? 'on' : ''}`}
         disabled={!canTalk}
         title={canTalk ? 'Hold to talk' : 'Listen only'}
-        onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); engine.press(ch.id) }}
+        onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); navigator.vibrate?.(10); engine.press(ch.id) }}
         onPointerUp={() => engine.release(ch.id)}
         onPointerCancel={() => engine.release(ch.id)}
       ><i className={`led red ${talking ? 'on' : ''}`} />TALK</button>
