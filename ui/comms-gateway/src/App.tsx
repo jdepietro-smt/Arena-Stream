@@ -5,6 +5,7 @@ import {
   SYSTEM_DEV, SYSTEM_INPUTS, defaultConfig, defaultRtp, newAsio, newPort,
 } from './ports'
 import { LineFailover } from './failover'
+import { CallLights, LightRule, newRule } from './lights'
 import './kp.css'
 import './App.css'
 
@@ -51,6 +52,10 @@ export default function App() {
   const [, bump] = useState(0)
   const runtime = useMemo(() => new GatewayRuntime(engine, () => bump(n => n + 1)), [engine])
   const failover = useMemo(() => new LineFailover(engine, () => bump(n => n + 1)), [engine])
+  const lightsRef = useRef<LightRule[]>([])
+  const lights = useMemo(() => new CallLights(() => lightsRef.current,
+    a => window.gw?.lightFire ? window.gw.lightFire(a) : Promise.resolve({ ok: false, error: 'Call lights need the desktop app' }),
+    () => bump(n => n + 1)), [])
   useSyncExternalStore(engine.subscribe, engine.getVersion)
   if (import.meta.env.DEV) Object.assign(window, { __gw: { engine, runtime } })
 
@@ -101,6 +106,14 @@ export default function App() {
   const tcpAtStart = useRef(false)
   useEffect(() => { void loadConfig().then(c => { tcpAtStart.current = !!c.forceTcp; setCfg(c) }) }, [])
   // A new name reaches the server straight away, no reconnect.
+  lightsRef.current = cfg?.lights ?? []
+  const wantLights = lightsRef.current.length > 0
+  useEffect(() => {
+    engine.onCallSignal = key => lights.handle(key)
+    return () => { engine.onCallSignal = null; lights.stop() }
+  }, [engine, lights])
+  // Only ask the server for call signals when there is a light to drive.
+  useEffect(() => { engine.setCallLights(wantLights) }, [engine, wantLights, engine.status]) // eslint-disable-line react-hooks/exhaustive-deps
   const wantName = cfg?.name.trim() || 'Gateway'
   useEffect(() => {
     if (!cfg || engine.status !== 'connected' || engine.myName === wantName) return
@@ -358,6 +371,56 @@ export default function App() {
                 {failover.error && <div className="error">{failover.error}</div>}
                 <p className="hint">The switch uses Windows' own routing: the backup adapter is given priority, and everything goes back to automatic when the gateway closes. Cellular data costs money, so the gateway returns to the main line after 10 minutes or more.</p>
               </>}
+            </section>
+            <section className="card">
+              <h2 className="lcd">Hardware call lights</h2>
+              <p className="hint">When someone calls on the intercom, this gateway can switch a light, buzzer or relay at your venue: an HTTP request (a Shelly, a Companion button, most network relays) or a raw TCP / UDP message. Each light goes on for a call and off again after the hold time.</p>
+              {(cfg.lights ?? []).map(r => {
+                const set = (p: Partial<LightRule>) => patch({ lights: (cfg.lights ?? []).map(x => x.id === r.id ? { ...x, ...p } : x) })
+                const act = (which: 'on' | 'off', label: string) => (
+                  <div className="grid3">
+                    <label>{label}: type
+                      <select value={r[which].kind} onChange={e => set({ [which]: { ...r[which], kind: e.target.value as 'http' | 'tcp' | 'udp' } })}>
+                        <option value="http">Web request (HTTP)</option><option value="tcp">TCP message</option><option value="udp">UDP message</option>
+                      </select>
+                    </label>
+                    <label>{r[which].kind === 'http' ? 'Address' : 'Host:port'}
+                      <input value={r[which].target} onChange={e => set({ [which]: { ...r[which], target: e.target.value } })}
+                        placeholder={r[which].kind === 'http' ? 'http://192.168.1.50/relay/0?turn=on' : '192.168.1.50:5000'} />
+                    </label>
+                    <label>{r[which].kind === 'http' ? 'Body (optional, makes it a POST)' : 'Message (\\r \\n \\xNN allowed)'}
+                      <input value={r[which].data} onChange={e => set({ [which]: { ...r[which], data: e.target.value } })} />
+                    </label>
+                  </div>
+                )
+                const res = lights.results.get(r.id)
+                return (
+                  <div key={r.id} className="card" style={{ margin: '10px 0' }}>
+                    <div className="grid3">
+                      <label>Name<input value={r.name} onChange={e => set({ name: e.target.value })} /></label>
+                      <label>Stays on for (seconds)<input type="number" min={0} max={600} value={r.holdSec} onChange={e => set({ holdSec: Math.max(0, Math.min(600, Number(e.target.value) || 0)) })} /></label>
+                      <label className="check"><input type="checkbox" checked={r.allCall} onChange={e => set({ allCall: e.target.checked })} />Also for an ALL CALL</label>
+                    </div>
+                    <div className="hint">Lights for calls on:</div>
+                    <div className="row" style={{ flexWrap: 'wrap' }}>
+                      <label className="check"><input type="checkbox" checked={r.channels.length === 0} onChange={e => set({ channels: e.target.checked ? [] : engine.channels.filter(c => !c.music).map(c => c.id) })} />Every channel</label>
+                      {r.channels.length > 0 && engine.channels.filter(c => !c.music).map(c => (
+                        <label key={c.id} className="check"><input type="checkbox" checked={r.channels.includes(c.id)}
+                          onChange={e => set({ channels: e.target.checked ? [...r.channels, c.id] : r.channels.filter(x => x !== c.id) })} />{c.name}</label>
+                      ))}
+                    </div>
+                    {act('on', 'Light on')}
+                    {act('off', 'Light off (leave empty if it switches itself off)')}
+                    <div className="row">
+                      <button className="btn sm" onClick={() => void lights.test(r)}>Test (on, then off)</button>
+                      <button className="btn sm" onClick={() => patch({ lights: (cfg.lights ?? []).filter(x => x.id !== r.id) })}>Remove</button>
+                      {res && <span className={res.ok ? 'hint' : 'warn'}>{res.ok ? 'Last send worked.' : `Failed: ${res.error}`}</span>}
+                    </div>
+                  </div>
+                )
+              })}
+              <div className="row"><button className="btn sm" onClick={() => patch({ lights: [...(cfg.lights ?? []), newRule((cfg.lights ?? []).length + 1)] })}>Add a call light</button></div>
+              {!window.gw?.lightFire && <p className="hint">Call lights need the desktop app.</p>}
             </section>
             <details className="card adv">
               <summary>Advanced: use a normal Windows audio device instead of ASIO</summary>

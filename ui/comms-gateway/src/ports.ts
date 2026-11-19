@@ -76,6 +76,8 @@ export interface GatewayConfig {
   tcpAutoAt?: number
   /** Backup internet line: switch to a second network adapter when the main one loses audio. Needs administrator rights. */
   backup?: { enabled: boolean; primary: string; secondary: string }
+  /** Hardware call lights: what to switch when somebody calls on the intercom. */
+  lights?: import('./lights').LightRule[]
   device: DeviceCfg
   asio: AsioCfg[]
   ports: PortCfg[]
@@ -128,6 +130,7 @@ declare global {
   interface Window {
     gw?: {
       getConfig(): Promise<GatewayConfig | null>
+      lightFire(a: { kind: 'http' | 'tcp' | 'udp'; target: string; data: string }): Promise<{ ok: boolean; error?: string }>
       relaunch(): Promise<void>
       relaunchAdmin(): Promise<{ ok: boolean; error?: string }>
       netInfo(): Promise<{ admin: boolean; adapters: NetAdapter[] }>

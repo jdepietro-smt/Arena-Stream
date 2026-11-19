@@ -21,7 +21,7 @@ async function client(port, headers = {}) {
     if (i >= 0) return Promise.resolve(inbox.splice(i, 1)[0])
     return new Promise(resolve => waiters.push({ pred, resolve }))
   }
-  return { ws, next, send: m => ws.send(JSON.stringify(m)) }
+  return { ws, next, inbox, send: m => ws.send(JSON.stringify(m)) }
 }
 
 test('join, state, signal relay, call, leave', async () => {
@@ -649,5 +649,28 @@ test('a stage-announce channel cannot be switched off by listeners', async () =>
     c.ws.close(); d.ws.close()
   } finally {
     await srv.close()
+  }
+})
+
+test('a gateway only receives call signals once it asks for them (hardware call lights)', async () => {
+  const fake = { url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  try {
+    const ch = srv.directory.addChannel({ name: 'Bench' })
+    const mk = async name => { const c = await client(port); c.send({ type: 'join', gateway: true, name }); await c.next(x => x.type === 'welcome'); return c }
+    const caller = await mk('Caller'), lit = await mk('Lit'), dark = await mk('Dark')
+    lit.send({ type: 'call-lights', on: true })
+    await new Promise(r => setTimeout(r, 80))
+    caller.send({ type: 'call', channel: ch.id })
+    assert.equal((await lit.next(m => m.type === 'call')).channel, ch.id, 'the gateway that asked is signalled')
+    await new Promise(r => setTimeout(r, 1100))
+    caller.send({ type: 'call', all: true })
+    assert.equal((await lit.next(m => m.type === 'call' && m.channel === '*')).from !== undefined, true, 'and for an all-call')
+    await new Promise(r => setTimeout(r, 150))
+    assert.ok(!dark.inbox.some(m => m.type === 'call'), 'a gateway that did not ask hears nothing')
+    for (const c of [caller, lit, dark]) c.ws.close()
+  } finally {
+    await srv.close?.()
   }
 })

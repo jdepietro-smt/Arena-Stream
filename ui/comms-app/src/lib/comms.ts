@@ -115,6 +115,14 @@ export class CommsEngine {
   calls = new Map<string, { from: string; at: number }>()
   /** Calls I have sent: key is a channel id or `u:<peer id>`; `by` is who has answered. */
   callOut = new Map<string, { at: number; by?: string; byAt?: number }>()
+  /** Gateway only: called for every call signal that reaches this gateway (key = channel id, '*' for an all-call). */
+  onCallSignal: ((key: string, from: string) => void) | null = null
+  private callLights = false
+  /** Gateway only: ask the server to send this gateway the call signals (it has hardware call lights to drive). */
+  setCallLights(on: boolean) {
+    this.callLights = on
+    if (this.welcomed) this.send({ type: 'call-lights', on })
+  }
   serverRttMs: number | null = null
   /** Session token for rejoining after a reload (accounts mode), and the code of the last error. */
   sessionToken: string | null = null
@@ -602,6 +610,7 @@ export class CommsEngine {
       case 'welcome': {
         this.myId = m.id
         this.welcomed = true
+        if (this.opts?.gateway && this.callLights) this.send({ type: 'call-lights', on: true })
         this.failedOpens = 0
         if (m.session) { this.sessionToken = m.session; if (this.opts) this.opts.token = m.session } // renewed at every join
         this.channels = m.channels
@@ -1697,6 +1706,7 @@ export class CommsEngine {
 
   private onCall(from: string, channel: string | null) {
     const key = channel ?? `u:${from}`
+    if (this.opts?.gateway) { this.onCallSignal?.(key, from); return }
     const call = { from, at: Date.now() }
     this.calls.set(key, call)
     this.beep()

@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('gw', {
   asioTx: (slot: string, planar: Float32Array, first = 0) => ipcRenderer.send('asio:tx', slot, planar, first),
   onAsioRx: (cb: ((slot: string, planar: Float32Array, peaks?: Float32Array) => void) | null) => { asioRx = cb },
   getConfig: () => ipcRenderer.invoke('config:get'),
+  lightFire: (a: unknown) => ipcRenderer.invoke('lights:fire', a),
   relaunch: () => ipcRenderer.invoke('app:relaunch'),
   relaunchAdmin: () => ipcRenderer.invoke('app:relaunchAdmin'),
   netInfo: () => ipcRenderer.invoke('net:info'),

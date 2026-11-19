@@ -506,7 +506,7 @@ export function createServer(
           me.lastCall = now
           if (msg.all === true) {                      // all-call: everyone who can hear me on any channel I may talk on, one signal each
             const mine = [...Object.keys(me.perms)].filter(c => me.perms[c]?.talk && !isMusic(c))
-            for (const p of peers.values()) if (p !== me && !p.user.gateway && mine.some(c => p.perms[c]?.listen)) send(p, { type: 'call', from: me.id, channel: '*' })
+            for (const p of peers.values()) if (p !== me && (!p.user.gateway || p.wantsCalls) && mine.some(c => p.perms[c]?.listen)) send(p, { type: 'call', from: me.id, channel: '*' })
             break
           }
           if (typeof msg.to === 'string') {            // a call to one person
@@ -517,9 +517,12 @@ export function createServer(
           const ch = String(msg.channel ?? '')
           if (!me.perms[ch]?.talk || isMusic(ch)) break
           // Everyone who may listen is called, whether or not they have the channel switched on right now.
-          for (const p of peers.values()) if (p !== me && !p.user.gateway && p.perms[ch]?.listen) send(p, { type: 'call', from: me.id, channel: ch })
+          for (const p of peers.values()) if (p !== me && (!p.user.gateway || p.wantsCalls) && p.perms[ch]?.listen) send(p, { type: 'call', from: me.id, channel: ch })
           break
         }
+        case 'call-lights':                            // a gateway with hardware call lights asks to receive calls
+          if (me.user.gateway) me.wantsCalls = !!msg.on
+          break
         case 'call-ack': {                             // "seen": tell the caller
           const to = peers.get(msg.to)
           if (to && to !== me) send(to, { type: 'call-ack', from: me.id, channel: typeof msg.channel === 'string' ? msg.channel : null })
