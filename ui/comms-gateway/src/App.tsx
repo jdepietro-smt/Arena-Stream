@@ -114,6 +114,22 @@ export default function App() {
   }, [engine, lights])
   // Only ask the server for call signals when there is a light to drive.
   useEffect(() => { engine.setCallLights(wantLights) }, [engine, wantLights, engine.status]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The local fallback server: started and stopped as the settings change (the app restarts it if it ever stops).
+  const ls = cfg?.localServer
+  const lsKey = ls ? JSON.stringify([ls.enabled, ls.port, ls.username, ls.password, cfg?.server]) : ''
+  useEffect(() => {
+    if (!cfg || !window.gw?.localStart) return
+    const t = setTimeout(() => { void (cfg.localServer?.enabled ? window.gw!.localStart({ ...cfg.localServer, primary: serverUrl(cfg.server) }) : window.gw!.localStop()) }, 800)
+    return () => clearTimeout(t)
+  }, [lsKey, !!cfg]) // eslint-disable-line react-hooks/exhaustive-deps
+  const [localSt, setLocalSt] = useState<Awaited<ReturnType<NonNullable<Window['gw']>['localStatus']>> | null>(null)
+  useEffect(() => {
+    if (page !== 'settings' || !window.gw?.localStatus) return
+    const poll = () => { void window.gw!.localStatus().then(setLocalSt).catch(() => {}) }
+    poll()
+    const t = setInterval(poll, 3000)
+    return () => clearInterval(t)
+  }, [page])
   const wantName = cfg?.name.trim() || 'Gateway'
   useEffect(() => {
     if (!cfg || engine.status !== 'connected' || engine.myName === wantName) return
@@ -373,6 +389,32 @@ export default function App() {
                 {failover.error && <div className="error">{failover.error}</div>}
                 <p className="hint">The switch uses Windows' own routing: the backup adapter is given priority, and everything goes back to automatic when the gateway closes. Cellular data costs money, so the gateway returns to the main line after 10 minutes or more.</p>
               </>}
+            </section>
+            <section className="card">
+              <h2 className="lcd">Local fallback server</h2>
+              <p className="hint">If the internet to the main server goes down, crew here can still talk to each other. This PC keeps a copy of the main server's accounts, groups and channels and runs a small intercom server on your venue network. Crew set this PC as the <b>Backup server</b> in their Arena Comms app; they switch to it by themselves when the main server is unreachable and switch back when it returns. Audio then goes straight between their computers (no internet needed). Settings are only ever changed on the main server.</p>
+              {(() => {
+                const l = cfg.localServer ?? { enabled: false, port: 8900, username: '', password: '' }
+                const setL = (p: Partial<typeof l>) => patch({ localServer: { ...l, ...p } })
+                return <>
+                  <label className="check"><input type="checkbox" checked={l.enabled} onChange={e => setL({ enabled: e.target.checked })} />Run a local intercom server on this PC</label>
+                  {l.enabled && <div className="grid3">
+                    <label>Port<input type="number" min={1024} max={65535} value={l.port} onChange={e => setL({ port: Number(e.target.value) || 8900 })} /></label>
+                    <label>Copy made with this administrator<input value={l.username} onChange={e => setL({ username: e.target.value })} placeholder="admin" autoComplete="off" /></label>
+                    <label>Administrator password<input type="password" value={l.password} onChange={e => setL({ password: e.target.value })} autoComplete="new-password" /></label>
+                  </div>}
+                  {l.enabled && localSt && (
+                    <div className={localSt.running && localSt.lastSync ? 'hint' : 'warn'}>
+                      {localSt.running
+                        ? (localSt.lastSync ? `Running. Copied from the main server ${Math.max(0, Math.round((Date.now() - localSt.lastSync) / 1000))} s ago. ${localSt.peers} connected.` : 'Running, but it has not been able to copy from the main server yet. Check the address and administrator account.')
+                        : localSt.starting ? 'Starting…' : (localSt.error || 'Not running.')}
+                      {localSt.running && localSt.lan.length > 0 && <> Crew apps: set Backup server to {localSt.lan.map(a => <code key={a} style={{ marginRight: 8 }}>ws://{a}:{localSt.port}</code>)}</>}
+                    </div>
+                  )}
+                  {l.enabled && <p className="hint">Windows asks once to allow this app through its firewall: allow it on private networks so crew computers can reach it. Use a dedicated administrator account for this, since the password is stored on this PC.</p>}
+                </>
+              })()}
+              {!window.gw?.localStart && <p className="hint">The local server needs the desktop app.</p>}
             </section>
             <section className="card">
               <h2 className="lcd">Hardware call lights</h2>

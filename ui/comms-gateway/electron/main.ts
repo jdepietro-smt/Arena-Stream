@@ -6,6 +6,7 @@ import { PcmFormat } from './rtp-codec'
 import { asioClose, registerAsio } from './asio'
 import { registerNetFail } from './netfail'
 import { fireAction, LightAction } from './lights-core'
+import { registerLocalServer } from './local-server'
 
 // An unattended gateway has no user to click before audio may start.
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
@@ -57,6 +58,7 @@ const configFile = () => path.join(app.getPath('userData'), 'gateway-config.json
 
 ipcMain.handle('app:relaunch', () => { app.relaunch(); app.exit(0) })
 registerNetFail()
+registerLocalServer()
 ipcMain.handle('lights:fire', (_e, a: LightAction) => fireAction(a))
 
 ipcMain.handle('config:get', () => {
@@ -66,6 +68,12 @@ ipcMain.handle('config:get', () => {
       cfg.password = safeStorage.decryptString(Buffer.from(cfg.passwordEnc, 'base64'))
     }
     delete cfg.passwordEnc
+    if (cfg.localServer) {
+      if (cfg.localServer.passwordEnc && safeStorage.isEncryptionAvailable()) {
+        cfg.localServer = { ...cfg.localServer, password: safeStorage.decryptString(Buffer.from(cfg.localServer.passwordEnc, 'base64')) }
+      }
+      delete cfg.localServer.passwordEnc
+    }
     return cfg
   } catch {
     return null
@@ -77,6 +85,10 @@ ipcMain.handle('config:set', (_e, cfg: Record<string, unknown>) => {
   if (typeof out.password === 'string' && out.password && safeStorage.isEncryptionAvailable()) {
     out.passwordEnc = safeStorage.encryptString(out.password).toString('base64')
     delete out.password
+  }
+  const ls = out.localServer as { password?: string } | undefined
+  if (ls && typeof ls.password === 'string' && ls.password && safeStorage.isEncryptionAvailable()) {
+    out.localServer = { ...ls, passwordEnc: safeStorage.encryptString(ls.password).toString('base64'), password: undefined }
   }
   fs.mkdirSync(path.dirname(configFile()), { recursive: true })
   fs.writeFileSync(configFile(), JSON.stringify(out, null, 2))

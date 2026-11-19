@@ -70,6 +70,8 @@ export interface GatewayConfig {
   server: string; username: string; password: string; autoConnect: boolean
   /** Another server to fall over to when the main one cannot be reached (a standby server, or one inside the venue). */
   backupServer?: string
+  /** A copy of the main server running on this PC, so crew in the venue can still talk to each other without the internet. */
+  localServer?: { enabled: boolean; port: number; username: string; password: string }
   /** Send and receive audio over TCP instead of UDP (for a network that drops UDP packets). Applies after a restart. */
   forceTcp?: boolean
   /** Switch to TCP by itself (with a restart) when the line keeps losing audio. Off unless turned on: TCP can add a third of a second of delay. */
@@ -132,6 +134,9 @@ declare global {
   interface Window {
     gw?: {
       getConfig(): Promise<GatewayConfig | null>
+      localStart(c: { enabled: boolean; port: number; username: string; password: string; primary: string }): Promise<{ ok: boolean; error?: string }>
+      localStop(): Promise<{ ok: boolean }>
+      localStatus(): Promise<{ running: boolean; starting: boolean; error: string; lan: string[]; port: number | null; lastSync: number; peers: number; standby: boolean }>
       lightFire(a: { kind: 'http' | 'tcp' | 'udp'; target: string; data: string }): Promise<{ ok: boolean; error?: string }>
       relaunch(): Promise<void>
       relaunchAdmin(): Promise<{ ok: boolean; error?: string }>

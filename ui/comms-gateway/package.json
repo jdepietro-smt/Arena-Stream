@@ -53,6 +53,20 @@
         {
           "from": "build/node.exe",
           "to": "node/node.exe"
+        },
+        {
+          "from": "../../comms/server",
+          "to": "comms-server",
+          "filter": [
+            "*.js",
+            "package.json",
+            "comms.config.example.json",
+            "admin/**",
+            "node_modules/**",
+            "!node_modules/@livekit/rtc-node/**",
+            "!node_modules/@livekit/rtc-node-*/**",
+            "!node_modules/@livekit/rtc-ffi-bindings*/**"
+          ]
         }
       ]
     },
