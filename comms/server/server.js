@@ -13,7 +13,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { pipeline, Readable } from 'node:stream'
 import { WebSocketServer } from 'ws'
 import { createLiveKit } from './sfu.js'
-import { Directory, seedFromConfig } from './directory.js'
+import { Directory, DirectoryError, seedFromConfig } from './directory.js'
 import { AuthError, createAuth } from './auth.js'
 import { createAdmin } from './admin.js'
 import { createEventLog } from './eventlog.js'
@@ -291,7 +291,24 @@ export function createServer(
   }
   dir.onChange(refreshAll)
 
+  // An all-call from the admin side (the Portal): everyone's call light, and an optional message shown and read out.
+  let lastAllCall = 0
+  const allCall = (from, message) => {
+    const now = Date.now()
+    if (now - lastAllCall < 1500) throw new DirectoryError('Wait a moment before calling everyone again', 429)
+    lastAllCall = now
+    let sent = 0
+    for (const p of peers.values()) {
+      if (p.user.gateway && !p.wantsCalls) continue    // a gateway only hears it if it drives hardware call lights
+      send(p, { type: 'call', from: `admin:${from}`, fromName: from, channel: '*' })
+      if (message && !p.user.gateway) send(p, { type: 'alert', level: 'warn', kind: 'all-call', stream: null, channel: null, text: `${from}: ${message}` })
+      sent++
+    }
+    return { sent }
+  }
+
   const admin = createAdmin({
+    allCall,
     dir, auth, kick, players, history: () => ({ events: elog.recent(300), history: elog.history(24) }), alerter,
     readOnly: () => !!standby, standby: () => standby?.status() ?? null,
     gateways: () => dir.gateways.map(g => ({ ...g, online: [...peers.values()].some(p => p.user.gwKey === g.id) })),

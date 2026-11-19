@@ -582,6 +582,13 @@ function createPortal(cfg) {
       admin.audit('owner', 'comms.kick', decodeURIComponent(cm[1]), ip)
       return send(res, 200, { ok: true })
     })
+    if (sub === 'comms/all-call' && m === 'POST') return commsOf(res)(async () => {
+      const b = await readJson(req) || {}
+      const message = String(b.message || '').trim().slice(0, 140)
+      const r = await comms.call('POST', 'all-call', { from: 'Portal', message })
+      admin.audit('owner', 'comms.all-call', message || '(call light only)', ip)
+      return send(res, 200, r)
+    })
     // A channel's gain trim (dB) is the one channel setting the portal changes; everything else about a channel stays on Comms.
     if ((cm = sub.match(/^comms\/channels\/([^/]+)$/)) && m === 'PUT') return commsOf(res)(async () => {
       const b = await readJson(req) || {}

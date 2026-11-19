@@ -710,3 +710,35 @@ test('a standby server mirrors the primary, shares sign-ins, and is read-only fo
     await primary.close()
   }
 })
+
+test('an all-call from the admin API (the Portal) reaches everyone, with its message', async () => {
+  const fake = { url: 'ws://sfu', token: async p => `tok-${p.name}`, listTracks: async () => [], updateSubscriptions: async () => {} }
+  const srv = createServer({ ...cfg, auth: { mode: 'accounts' }, pin: '' }, { sfu: fake })
+  const port = await srv.listen(0)
+  try {
+    const admin = srv.bootstrap
+    const person = await client(port)
+    person.send({ type: 'join', username: admin.username, password: admin.password })
+    await person.next(m => m.type === 'welcome')
+    const lit = await client(port), dark = await client(port)
+    lit.send({ type: 'join', gateway: true, name: 'Lit' }); await lit.next(m => m.type === 'welcome')
+    dark.send({ type: 'join', gateway: true, name: 'Dark' }); await dark.next(m => m.type === 'welcome')
+    lit.send({ type: 'call-lights', on: true })
+    await new Promise(r => setTimeout(r, 80))
+
+    const login = await fetch(`http://127.0.0.1:${port}/admin/api/login`, { method: 'POST', body: JSON.stringify({ username: admin.username, password: admin.password }) }).then(r => r.json())
+    const post = body => fetch(`http://127.0.0.1:${port}/admin/api/all-call`, { method: 'POST', headers: { authorization: `Bearer ${login.token}` }, body: JSON.stringify(body) })
+    const r = await post({ from: 'Portal', message: 'Doors open in 5' })
+    assert.equal(r.status, 200)
+    assert.equal((await r.json()).sent, 2, 'the person and the gateway that has call lights; not the other gateway')
+    const call = await person.next(m => m.type === 'call')
+    assert.deepEqual([call.channel, call.fromName], ['*', 'Portal'])
+    assert.equal((await person.next(m => m.type === 'alert')).text, 'Portal: Doors open in 5')
+    assert.equal((await lit.next(m => m.type === 'call')).channel, '*')
+    assert.ok(!dark.inbox.some(m => m.type === 'call'))
+    assert.equal((await post({ message: 'again' })).status, 429, 'repeats inside a moment are refused')
+    for (const c of [person, lit, dark]) c.ws.close()
+  } finally {
+    await srv.close?.()
+  }
+})

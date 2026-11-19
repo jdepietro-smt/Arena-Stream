@@ -32,7 +32,7 @@ function readJson(req) {
   })
 }
 
-export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [], history = () => ({ events: [], history: [] }), alerter = null, readOnly = () => false, standby = () => null }) {
+export function createAdmin({ dir, auth, online, kick, players = null, gateways = () => [], history = () => ({ events: [], history: [] }), alerter = null, readOnly = () => false, standby = () => null, allCall = null }) {
   const page = () => fs.readFileSync(path.join(here, 'admin', 'index.html'))
   const idle = { state: 'idle', error: '', since: 0 }
   const playerStates = () => Object.fromEntries(dir.channels.filter(c => c.music || c.withMusic).map(c => [c.id, players?.status(c.id) ?? idle]))
@@ -60,7 +60,7 @@ export function createAdmin({ dir, auth, online, kick, players = null, gateways 
 
       const [kind, id, sub] = route
       // A standby server mirrors its primary: settings are changed there. (Kicking someone off this server is still allowed.)
-      if (readOnly() && method !== 'GET' && kind !== 'kick' && kind !== 'logout') throw new DirectoryError('This is a standby server. Change settings on the primary server; they are copied here within a minute.', 409)
+      if (readOnly() && method !== 'GET' && kind !== 'kick' && kind !== 'logout' && kind !== 'all-call') throw new DirectoryError('This is a standby server. Change settings on the primary server; they are copied here within a minute.', 409)
       const body = ['POST', 'PUT'].includes(method) ? await readJson(req) : {}
 
       if (kind === 'state' && method === 'GET') {
@@ -71,6 +71,11 @@ export function createAdmin({ dir, auth, online, kick, players = null, gateways 
         }), true
       }
       // Everything a standby needs to take over: the directory and the secret that signs session tokens.
+      if (kind === 'all-call' && method === 'POST' && allCall) {
+        const message = String(body.message ?? '').trim().slice(0, 140)
+        const from = String(body.from ?? '').trim().slice(0, 32) || 'Portal'
+        return send(res, 200, allCall(from, message)), true
+      }
       if (kind === 'export' && method === 'GET') {
         return send(res, 200, { data: { channels: dir.channels, groups: dir.groups, users: dir.users }, sessionSecret: auth.getSecret().toString('base64url') }), true
       }

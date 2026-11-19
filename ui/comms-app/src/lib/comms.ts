@@ -114,7 +114,7 @@ export class CommsEngine {
   latched = new Set<string>()
   peers = new Map<string, Peer>()
   /** channel id -> {from, at} of the latest call signal */
-  calls = new Map<string, { from: string; at: number }>()
+  calls = new Map<string, { from: string; at: number; name?: string }>()
   /** Calls I have sent: key is a channel id or `u:<peer id>`; `by` is who has answered. */
   callOut = new Map<string, { at: number; by?: string; byAt?: number }>()
   /** Gateway only: called for every call signal that reaches this gateway (key = channel id, '*' for an all-call). */
@@ -762,7 +762,7 @@ export class CommsEngine {
         void this.onSignal(m.from, m.data)
         break
       case 'call':
-        this.onCall(m.from, m.channel)
+        this.onCall(m.from, m.channel, m.fromName)
         break
       case 'call-ack':
         this.onCallAck(m.from, m.channel)
@@ -1681,7 +1681,7 @@ export class CommsEngine {
     return !!c && Date.now() - c.at < 120_000
   }
   /** Who is calling on this key, for the legend. */
-  callerName(key: string): string { const c = this.calls.get(key); return c ? this.roster().find(p => p.id === c.from)?.name ?? '' : '' }
+  callerName(key: string): string { const c = this.calls.get(key); return c ? (this.roster().find(p => p.id === c.from)?.name ?? c.name ?? '') : '' }
   /** What my own call on this key is doing: 'sent' for 10 s, or 'answered' (with the name) for 6 s after someone saw it. */
   callOutState(key: string): { state: 'sent' | 'answered'; by?: string } | null {
     const o = this.callOut.get(key)
@@ -1745,10 +1745,10 @@ export class CommsEngine {
     })
   }
 
-  private onCall(from: string, channel: string | null) {
+  private onCall(from: string, channel: string | null, fromName?: string) {
     const key = channel ?? `u:${from}`
     if (this.opts?.gateway) { this.onCallSignal?.(key, from); return }
-    const call = { from, at: Date.now() }
+    const call = { from, at: Date.now(), name: fromName }
     this.calls.set(key, call)
     this.beep()
     // Nobody has answered: remind twice more, 6 s apart.

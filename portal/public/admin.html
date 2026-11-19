@@ -603,7 +603,18 @@ async function commsSection(box) {
             el('div', { class: 'gwline' }, gws.length ? gws.map(gwChip) : el('span', { class: 'hint', style: 'margin:0' }, 'no gateway'))),
             el('div', { class: 'pills', style: 'justify-content:flex-end' }, who.length ? who.map(g => el('span', { class: 'chip' }, g.name)) : el('span', { class: 'hint' }, 'no group yet')))
         }) : empty('The Comms server has no channels.'))
-      return el('div', {}, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
+      // All call: lights everyone's call light on the intercom, and an optional message is shown on their panel (and read out if they have spoken alerts on).
+      const callMsg = el('input', { type: 'text', maxlength: 140, placeholder: 'Message to show everyone (optional)', style: 'flex:1;min-width:200px' })
+      const callBtn = el('button', { class: 'b pri' }, 'All call')
+      callBtn.onclick = async () => {
+        const text = callMsg.value.trim()
+        if (!confirm(text ? 'Light everyone\u2019s call light and show this message?\n\n' + text : 'Light everyone\u2019s call light?')) return
+        callBtn.disabled = true
+        try { const r = await oapi('/comms/all-call', 'POST', { message: text }); callMsg.value = ''; flash(err, 'All call sent to ' + plural(r.sent, 'person').replace('persons', 'people') + '.', true) } catch (e) { flash(err, e.message) }
+        setTimeout(() => { callBtn.disabled = false }, 1500)
+      }
+      const allCallPanel = el('div', { class: 'panel row', style: 'margin-bottom:14px;flex-wrap:wrap;gap:10px' }, el('div', {}, el('div', { class: 'nm' }, 'All call'), el('div', { class: 'hint', style: 'margin:0' }, 'Calls everyone on the intercom, including venue call lights.')), callMsg, callBtn)
+      return el('div', {}, allCallPanel, el('div', { class: 'stats' }, stat(st.online.length, 'Online now', 'up'), stat(st.users.length, 'People'), stat(st.groups.length, 'Groups'), stat(st.channels.length, 'Channels')),
         gwPanel(), el('div', { class: 'two' }, onlineList, channelList))
     }
 
