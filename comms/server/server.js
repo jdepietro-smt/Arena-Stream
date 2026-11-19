@@ -47,7 +47,7 @@ export function loadConfig(file = process.env.COMMS_CONFIG || path.join(here, 'c
 }
 
 const MAX_NAME = 32
-const MAX_PEERS = 64
+const MAX_PEERS = 400 // connections at once; cfg.maxPeers overrides (35 gateways and their crews is well under this)
 
 function safeEqual(a, b) {
   const ba = Buffer.from(String(a))
@@ -432,7 +432,7 @@ export function createServer(
         if (!group) return fail('bad-group', 'Pick a valid role')
         user = { id: `guest:${randomUUID()}`, ephemeral: true, name, title: '', groups: [group.id], overrides: {} }
       }
-      if (peers.size >= MAX_PEERS) return fail('full', 'Server is full')
+      if (peers.size >= (cfg.maxPeers ?? MAX_PEERS)) return fail('full', 'Server is full')
       if (!user.ephemeral) {
         for (const p of peers.values()) if (p.user.id === user.id) kick(p.id, 'signed-in-elsewhere', 'Signed in on another device')
       }

@@ -487,6 +487,7 @@ export class GatewayRuntime {
   private async buildPorts(cfg: GatewayConfig, ctx: AudioContext): Promise<void> {
     const active = cfg.ports.filter(p => p.enabled)
     this.engine.setGatewayTx(active.filter(p => p.channel).map(p => p.channel)) // publish only what is routed, not every channel the account may talk on
+    this.engine.setGatewayListen(active.filter(p => p.channel).map(p => p.channel)) // and hear only what is routed: otherwise the relay sends this gateway every other arena's audio
     const keep = new Map<string, Port>()
     for (const p of this.ports) {
       const next = active.find(x => x.id === p.cfg.id)

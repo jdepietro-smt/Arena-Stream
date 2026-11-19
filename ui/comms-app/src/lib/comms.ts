@@ -664,6 +664,7 @@ export class CommsEngine {
         this.ice = m.iceServers
         // Listen to everything the role may access except channels I muted before.
         this.listen = new Set((m.listen as string[]).filter(id => !this.wantMuted.has(id)))
+        this.applyGwListen()
         this.status = 'connected'
         // Re-assert state after a reconnect: latched talk survives, held doesn't.
         this.held.clear()
@@ -718,6 +719,7 @@ export class CommsEngine {
         this.channels = m.channels
         this.listen = new Set(m.listen as string[])
         for (const c of this.channels) if (c.announce && c.canListen) this.listen.add(c.id)
+        this.applyGwListen()
         this.applyRouting() // a changed talk trim takes effect now
         this.setMusicSenders(m.musicSenders)
         for (const ch of [...this.musicTx.keys()]) {
@@ -1068,6 +1070,22 @@ export class CommsEngine {
 
   /** Gateway only: the channels its ports send on. Only those get a published track (null = every channel it may talk on). */
   private gwTx: Set<string> | null = null
+
+  /** Gateway only: the channels its ports are routed to. It listens to these and nothing else (plus a stage announce, which cannot
+   *  be switched off), so the media relay does not forward every other arena's audio to it. Remembered across reconnects. */
+  private gwListen: Set<string> | null = null
+  setGatewayListen(ids: string[]) {
+    this.gwListen = new Set(ids)
+    this.applyGwListen()
+  }
+  private applyGwListen() {
+    if (!this.opts?.gateway || !this.gwListen) return
+    const want = new Set(this.channels.filter(c => c.canListen && (this.gwListen!.has(c.id) || c.announce)).map(c => c.id))
+    if (want.size === this.listen.size && [...want].every(i => this.listen.has(i))) return
+    this.listen = want
+    if (this.welcomed) this.pushState() // tell the server, which decides what the relay forwards
+    this.emit()
+  }
   setGatewayTx(ids: string[]) {
     const next = new Set(ids)
     if (this.gwTx && this.gwTx.size === next.size && [...next].every(i => this.gwTx!.has(i))) return
