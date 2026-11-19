@@ -153,8 +153,10 @@ export class Directory {
     // A music channel carries one-way stereo music: no talk-back, and it is never an IFB.
     const music = !!src.music
     const ifb = !!src.ifb && !music
+    // A stage-announce channel: listeners cannot switch it off, and it ducks everything else while someone speaks on it.
+    const announce = !!src.announce && !music && !ifb
     // A party-line channel (the Program channel, say) can also carry music: talk as usual, plus a music source.
-    const withMusic = !music && !ifb && !!src.withMusic
+    const withMusic = !music && !ifb && !announce && !!src.withMusic
     const hasMusic = music || withMusic
     // One optional link per music channel, sorted by what it is:
     //  - an audio stream (internet radio, Icecast, an MP3/AAC/Ogg stream or file): `source`, which the server relays and
@@ -176,7 +178,7 @@ export class Directory {
     return {
       id, name, color, ...(music ? { music: true } : {}), ...(withMusic ? { withMusic: true } : {}), ...(source ? { source } : {}), ...(link ? { link } : {}),
       ...(noDuck ? { noDuck: true } : {}), ...(gainDb ? { gainDb } : {}), ...(talkGainDb ? { talkGainDb } : {}),
-      ...(ifb ? { ifb: true } : {}), ...((ifb || (hasMusic && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
+      ...(ifb ? { ifb: true } : {}), ...(announce ? { announce: true } : {}), ...(((ifb || announce) || (hasMusic && !noDuck)) && duck != null ? { duck: Number(duck) } : {}),
     }
   }
 
@@ -194,7 +196,7 @@ export class Directory {
     const i = this.channels.findIndex(c => c.id === id)
     if (i < 0) throw new DirectoryError('No such channel', 404)
     const src = { ...this.channels[i] }
-    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'withMusic', 'noDuck', 'gainDb', 'talkGainDb']) if (body[k] !== undefined) src[k] = body[k]
+    for (const k of ['name', 'color', 'ifb', 'duck', 'music', 'withMusic', 'noDuck', 'gainDb', 'talkGainDb', 'announce']) if (body[k] !== undefined) src[k] = body[k]
     // The stream/link field replaces whatever was stored (either kind); it is re-sorted by #cleanChannel.
     if (body.source !== undefined) { delete src.link; src.source = body.source } else if (src.link) { src.source = src.link; delete src.link }
     this.channels[i] = this.#cleanChannel(id, src)

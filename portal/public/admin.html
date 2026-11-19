@@ -609,7 +609,7 @@ async function commsSection(box) {
 
     // ── Channels: every channel, what kind it is, which gateway carries it, and which groups may use it
     const channelsView = () => {
-      const kind = c => c.music ? 'Music' : c.ifb ? 'IFB' : c.withMusic ? 'Party + music' : 'Party line'
+      const kind = c => c.music ? 'Music' : c.ifb ? 'IFB' : c.announce ? 'Stage announce' : c.withMusic ? 'Party + music' : 'Party line'
       const badge = (on, t) => el('span', { class: 'gb' + (on ? ' on' : '') }, t)
       const head = ['Channel', 'Type', 'Gateway', 'Listen gain', 'Talk gain'].map(h => el('th', {}, h)).concat(st.groups.map(g => el('th', { class: 'gcol', title: plural(st.users.filter(u => (u.groups || []).includes(g.id)).length, 'member') }, g.name)))
       // Gain trim in dB, applied by every app that listens to the channel. Clicks are batched into one save.

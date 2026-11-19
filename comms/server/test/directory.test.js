@@ -215,3 +215,13 @@ test('a gateway remembers the channels it bridged', () => {
   assert.deepEqual(d.gateways[0].channels, ['a', 'b'])
   d.noteGatewayChannels('nope', ['x'])                   // unknown gateway: ignored
 })
+
+test('a stage-announce channel is never music, IFB or music-carrying', () => {
+  const d = freshDir()
+  const a = d.addChannel({ name: 'Stage', announce: true, duck: 0.1 })
+  assert.deepEqual([a.announce, a.duck], [true, 0.1])
+  assert.equal(d.addChannel({ name: 'Stage2', announce: true, ifb: true }).announce, undefined, 'IFB wins over announce')
+  assert.equal(d.addChannel({ name: 'Stage3', announce: true, music: true }).announce, undefined, 'music channels cannot announce')
+  assert.equal(d.addChannel({ name: 'Stage4', announce: true, withMusic: true }).withMusic, undefined)
+  assert.equal(d.updateChannel('stage', { announce: false }).announce, undefined)
+})

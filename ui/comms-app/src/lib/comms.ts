@@ -8,7 +8,7 @@ import { Room, RoomEvent, Track, RemoteAudioTrack, LocalTrackPublication } from 
 // A peer's gain is 1 only while I'm talking on a channel that peer listens to
 // (or talking directly to them), so nothing but silence is ever sent otherwise.
 
-export interface Channel { id: string; name: string; color: string; ifb?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; gainDb?: number; talkGainDb?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
+export interface Channel { id: string; name: string; color: string; ifb?: boolean; announce?: boolean; music?: boolean; withMusic?: boolean; stream?: boolean; link?: string; noDuck?: boolean; duck?: number; gainDb?: number; talkGainDb?: number; canTalk: boolean; canListen: boolean; canMusic?: boolean }
 export type MediaMode = 'mesh' | 'sfu'
 /** Where the music I send comes from: an input device (virtual cable / loopback) or shared tab/system audio. */
 export type MusicSource = { kind: 'device'; deviceId: string } | { kind: 'display' } | { kind: 'stream' } | { kind: 'node'; node: AudioNode }
@@ -430,7 +430,14 @@ export class CommsEngine {
   private peerLevel(info: PeerInfo): number {
     if (info.talk.includes(`u:${this.myId}`)) return 1
     const levels = info.talk.filter(t => !isUser(t) && this.listen.has(t)).map(t => this.channelLevel(t) * this.channelTrim(t))
-    return levels.length ? Math.max(...levels) : 1
+    const base = levels.length ? Math.max(...levels) : 1
+    return info.talk.some(t => this.channels.find(c => c.id === t)?.announce) ? base : base * this.announceDuck()
+  }
+
+  /** Someone is speaking on a stage-announce channel I hear: everything else drops to this level (1 when nobody is). */
+  private announceDuck(): number {
+    for (const p of this.roster()) for (const t of p.talk) if (this.channels.find(c => c.id === t)?.announce && this.listen.has(t)) return 0.2
+    return 1
   }
 
   private applyVolumes() {
@@ -443,7 +450,8 @@ export class CommsEngine {
         p.voice.pan.pan.setTargetAtTime(this.peerPan(p.info), t, 0.02)
       }
       for (const v of this.sfuVoices.values()) {
-        v.gain.gain.setTargetAtTime(this.masterVolume * (v.ch ? this.channelLevel(v.ch) * this.channelTrim(v.ch) : 1), t, 0.02)
+        const annDuck = v.ch && !this.channels.find(c => c.id === v.ch)?.announce ? this.announceDuck() : 1
+        v.gain.gain.setTargetAtTime(this.masterVolume * (v.ch ? this.channelLevel(v.ch) * this.channelTrim(v.ch) * annDuck : 1), t, 0.02)
         v.pan.pan.setTargetAtTime(v.ch ? this.channelPan(v.ch) : 0, t, 0.02)
       }
     }
@@ -659,6 +667,7 @@ export class CommsEngine {
         // An admin changed this user's channels/permissions: adopt the server's view.
         this.channels = m.channels
         this.listen = new Set(m.listen as string[])
+        for (const c of this.channels) if (c.announce && c.canListen) this.listen.add(c.id)
         this.applyRouting() // a changed talk trim takes effect now
         this.setMusicSenders(m.musicSenders)
         for (const ch of [...this.musicTx.keys()]) {
@@ -1518,7 +1527,7 @@ export class CommsEngine {
     for (const p of this.roster()) {
       for (const t of p.talk) {
         const c = this.channels.find(x => x.id === t)
-        if (c?.ifb && this.listen.has(c.id)) { want = true; level = Math.min(level, c.duck ?? 0.15) }
+        if ((c?.ifb || c?.announce) && this.listen.has(c.id)) { want = true; level = Math.min(level, c.duck ?? 0.15) }
       }
     }
     if (want) {
@@ -1576,6 +1585,7 @@ export class CommsEngine {
   }
 
   setListen(ch: string, on: boolean) {
+    if (!on && this.channels.find(c => c.id === ch)?.announce) return // a stage announce cannot be muted
     if (on && !this.channels.find(c => c.id === ch)?.canListen) return
     if (on) this.listen.add(ch); else this.listen.delete(ch)
     this.pushState()

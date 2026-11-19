@@ -487,14 +487,15 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
   const carriesMusic = !!ch.withMusic && engine.media === 'sfu' // music needs the SFU
   return (
     <div className={`keymod ${talking ? 'talking' : ''} ${calling ? 'calling' : ''} ${alert && !calling ? `alert-${alert.level}` : ''} ${canTalk ? '' : 'rx-only'}`} style={{ ['--ch' as string]: ch.color }}>
-      <button className={`cap listenkey ${listening && canListen ? 'on' : ''}`} disabled={!canListen} onClick={() => engine.setListen(ch.id, !listening)}>
-        <i className={`led green ${listening && canListen ? 'on' : ''}`} />{!canListen ? 'NO RX' : 'LISTEN'}
+      <button className={`cap listenkey ${listening && canListen ? 'on' : ''}`} disabled={!canListen || !!ch.announce} onClick={() => engine.setListen(ch.id, !listening)}>
+        <i className={`led green ${listening && canListen ? 'on' : ''}`} />{!canListen ? 'NO RX' : ch.announce ? 'ALWAYS ON' : 'LISTEN'}
       </button>
       <div className="lcd legend">
         {engine.spatial.on && <span className="pantick" title={`Stereo position ${Math.round(engine.channelPan(ch.id) * 100)}`}><i style={{ left: `${(engine.channelPan(ch.id) + 1) * 50}%` }} /></span>}
         <div className="lg-top">
           <span className="lg-name">{ch.name}</span>
           {ch.ifb && <span className="lg-tag" title="Interrupt foldback: ducks the program feed for listeners">IFB</span>}
+          {ch.announce && <span className="lg-tag" title="Stage announce: everyone hears it, it cannot be muted, and it ducks everything else">ANNOUNCE</span>}
         </div>
         <div className="lg-sub">
           {calling

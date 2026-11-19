@@ -626,3 +626,28 @@ test('the media relay address follows the address the client used to reach the s
   assert.equal(await via(null), 'wss://1.2.3.4/livekit', 'a direct connection keeps the configured address')
   await srv.close?.()
 })
+
+test('a stage-announce channel cannot be switched off by listeners', async () => {
+  const srv = createServer({ ...cfg, pin: '' })
+  const port = await srv.listen(0)
+  try {
+    const dir = srv.directory
+    const st = dir.addChannel({ name: 'Stage', announce: true })
+    const grp = dir.groups.find(x => x.name === 'Camera')
+    dir.updateGroup(grp.id, { grants: { ...grp.grants, [st.id]: { talk: false, listen: true } } })
+    const c = await client(port)
+    c.send({ type: 'join', name: 'Bob', role: 'Camera' })
+    const w = await c.next(m => m.type === 'welcome')
+    assert.ok(w.listen.includes(st.id), 'switched on at join')
+    assert.equal(w.channels.find(x => x.id === st.id).announce, true)
+    const d = await client(port)
+    d.send({ type: 'join', name: 'Dee', role: 'Camera' })
+    await d.next(m => m.type === 'welcome')
+    c.send({ type: 'state', talk: [], listen: [] })           // tries to mute everything
+    const ps = await d.next(m => m.type === 'peer-state')
+    assert.deepEqual(ps.listen, [st.id], 'only the announce channel stays on')
+    c.ws.close(); d.ws.close()
+  } finally {
+    await srv.close()
+  }
+})

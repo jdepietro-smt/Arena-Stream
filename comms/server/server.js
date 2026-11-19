@@ -89,6 +89,8 @@ export function createServer(
       ...c, ...(source ? { stream: true } : {}), canTalk: perms[c.id].talk, canListen: perms[c.id].listen,
       canMusic: !!sfu && mayStartMusic(perms, c.id),
     }))
+  // Stage-announce channels cannot be switched off by the people allowed to hear them.
+  const mustListen = p => dir.channels.filter(c => c.announce && p.perms[c.id]?.listen).map(c => c.id)
   const publicInfo = p => ({ id: p.id, name: p.user.name, role: p.title, talk: p.talk, listen: p.listen, ...(p.user.gateway ? { gateway: true } : {}) })
   const titleOf = u => u.title || dir.group(u.groups?.[0])?.name || ''
   const send = (p, msg) => { if (p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)) }
@@ -260,7 +262,7 @@ export function createServer(
         p.chansJson = json
         // Newly visible, listenable channels start switched on, like at join.
         const added = chans.filter(c => !prevIds.has(c.id) && c.canListen).map(c => c.id)
-        p.listen = [...new Set([...p.listen, ...added])].filter(id => p.perms[id]?.listen)
+        p.listen = [...new Set([...p.listen, ...added, ...mustListen(p)])].filter(id => p.perms[id]?.listen)
         p.talk = p.talk.filter(t => (t.startsWith('u:') ? peers.has(t.slice(2)) : p.perms[t]?.talk))
         // Lost the right to send on a music channel (or it stopped being one): switch it off for everyone.
         for (const ch of [...p.musicOn]) {
@@ -469,7 +471,7 @@ export function createServer(
         case 'state': {
           const asList = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string') : [])
           const prevDirect = me.talk.filter(t => t.startsWith('u:')).join()
-          me.listen = [...new Set(asList(msg.listen).filter(id => me.perms[id]?.listen))]
+          me.listen = [...new Set([...asList(msg.listen).filter(id => me.perms[id]?.listen), ...mustListen(me)])]
           me.talk = [...new Set(asList(msg.talk).filter(id =>
             (me.perms[id]?.talk && !isMusic(id)) || (id.startsWith('u:') && peers.has(id.slice(2)) && !peers.get(id.slice(2)).user.gateway)))]
           broadcast({ type: 'peer-state', id: me.id, talk: me.talk, listen: me.listen })
