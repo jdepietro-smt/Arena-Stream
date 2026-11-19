@@ -456,9 +456,9 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
   const talking = engine.talkSet.has(ch.id)
   const latched = engine.latched.has(ch.id)
   const talkers = engine.talkersOn(ch.id, name)
-  const call = engine.calls.get(ch.id)
-  const calling = !!call && Date.now() - call.at < 4000
-  const caller = calling ? engine.roster().find(p => p.id === call!.from)?.name : ''
+  const calling = engine.callActive(ch.id)
+  const caller = calling ? engine.callerName(ch.id) : ''
+  const out = engine.callOutState(ch.id)
   const alert = engine.activeAlert(ch.id)
   const musicNow = ch.withMusic ? engine.musicSendersOn(ch.id) : []
   const carriesMusic = !!ch.withMusic && engine.media === 'sfu' // music needs the SFU
@@ -475,7 +475,8 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
         </div>
         <div className="lg-sub">
           {calling
-            ? <span className="blink">CALL ▸ {(caller || 'SOMEONE').toUpperCase()}</span>
+            ? <span className="blink" title="Click to answer" style={{ cursor: 'pointer' }} onClick={() => engine.ackCall(ch.id)}>CALL ▸ {(caller || 'SOMEONE').toUpperCase()}</span>
+            : out ? <span className={out.state === 'answered' ? '' : 'dim'}>{out.state === 'answered' ? `SEEN ▸ ${(out.by || '').toUpperCase()}` : 'CALL SENT'}</span>
             : alert ? <span className={`blink alert-text ${alert.level}`}>{alert.level === 'warn' ? '▲' : '●'} {alert.text.toUpperCase()}</span>
             : engine.musicError && ch.canMusic && carriesMusic ? <span className="alert-text warn">{engine.musicError.toUpperCase()}</span>
             : talkers.length ? talkers.map(t => <span key={t}>{t.toUpperCase()}</span>)
@@ -500,7 +501,7 @@ function ChannelKey({ ch, index, engine, name, prefs, patch, devices }: {
           <i className={`led amber ${latched ? 'on' : ''}`} />LATCH
         </button>
         <button className="cap sm" disabled={!canTalk} onClick={() => engine.callChannel(ch.id)}>
-          <i className={`led amber ${calling ? 'on blink' : ''}`} />CALL
+          <i className={`led amber ${calling ? 'on blink' : out ? 'on' : ''}`} />CALL
         </button>
       </div>
       {carriesMusic && ch.canMusic && <MusicControls ch={ch} engine={engine} prefs={prefs} patch={patch} devices={devices} />}
@@ -623,16 +624,21 @@ function MusicKey({ ch, engine }: { ch: Channel; engine: CommsEngine }) {
 function Person({ p, engine }: { p: PeerInfo; engine: CommsEngine }) {
   const target = `u:${p.id}`
   const direct = engine.talkSet.has(target)
+  const calling = engine.callActive(target)
+  const out = engine.callOutState(target)
   const names = p.talk.map(t => engine.channels.find(c => c.id === t)?.name ?? (t === `u:${engine.myId}` ? 'YOU' : 'DIRECT'))
   const linked = engine.peerLinked(p.id)
   const rtt = engine.peerRtt(p.id)
   return (
-    <div className={`person ${names.length ? 'active' : ''}`}>
+    <div className={`person ${names.length ? 'active' : ''} ${calling ? 'calling' : ''}`}>
       <i className={`led green ${linked ? 'on' : ''}`} title={linked ? 'audio link up' : 'waiting for link'} />
       <div className="pname">{p.name}<em>{p.role}</em>
         {names.length > 0 && <div className="ptalk">▸ {names.join(', ')}</div>}
       </div>
       {rtt != null && <span className="rtt">{rtt}ms</span>}
+      <button className="cap sm" title={calling ? 'Click to answer this call' : 'Call light: get this person to look'} onClick={() => calling ? engine.ackCall(target) : engine.callUser(p.id)}>
+        <i className={`led amber ${calling ? 'on blink' : out ? 'on' : ''}`} />{calling ? 'ANSWER' : out?.state === 'answered' ? 'SEEN' : 'CALL'}
+      </button>
       <button className="cap sm direct"
         onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); engine.press(target) }}
         onPointerUp={() => engine.release(target)}

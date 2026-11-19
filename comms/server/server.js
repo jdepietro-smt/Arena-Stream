@@ -498,12 +498,24 @@ export function createServer(
           if (sfu) void refreshTracks(me)
           break
         case 'call': {
-          if (!me.perms[msg.channel]?.talk) break
-          for (const p of peers.values()) {
-            if (p !== me && p.listen.includes(msg.channel)) {
-              send(p, { type: 'call', from: me.id, channel: msg.channel })
-            }
+          // A call light: one signal per second per sender at most, so a stuck button cannot flood the room.
+          const now = Date.now()
+          if (now - (me.lastCall ?? 0) < 1000) break
+          me.lastCall = now
+          if (typeof msg.to === 'string') {            // a call to one person
+            const to = peers.get(msg.to)
+            if (to && to !== me && !to.user.gateway) send(to, { type: 'call', from: me.id, channel: null })
+            break
           }
+          const ch = String(msg.channel ?? '')
+          if (!me.perms[ch]?.talk || isMusic(ch)) break
+          // Everyone who may listen is called, whether or not they have the channel switched on right now.
+          for (const p of peers.values()) if (p !== me && !p.user.gateway && p.perms[ch]?.listen) send(p, { type: 'call', from: me.id, channel: ch })
+          break
+        }
+        case 'call-ack': {                             // "seen": tell the caller
+          const to = peers.get(msg.to)
+          if (to && to !== me) send(to, { type: 'call-ack', from: me.id, channel: typeof msg.channel === 'string' ? msg.channel : null })
           break
         }
         case 'link': {

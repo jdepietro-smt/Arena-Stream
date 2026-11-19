@@ -404,3 +404,4 @@ body { background: radial-gradient(ellipse at 50% 0%, #10203d 0%, #070d1c 55%, #
   .header-lcd { flex-wrap: wrap; gap: 6px 14px; }
   .hl-mid { order: 3; flex-basis: 100%; justify-content: flex-start; flex-wrap: wrap; }
 }
+.person.calling { animation: callflash .5s steps(2) infinite; }

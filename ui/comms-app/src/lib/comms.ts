@@ -113,6 +113,8 @@ export class CommsEngine {
   peers = new Map<string, Peer>()
   /** channel id -> {from, at} of the latest call signal */
   calls = new Map<string, { from: string; at: number }>()
+  /** Calls I have sent: key is a channel id or `u:<peer id>`; `by` is who has answered. */
+  callOut = new Map<string, { at: number; by?: string; byAt?: number }>()
   serverRttMs: number | null = null
   /** Session token for rejoining after a reload (accounts mode), and the code of the last error. */
   sessionToken: string | null = null
@@ -702,6 +704,9 @@ export class CommsEngine {
         break
       case 'call':
         this.onCall(m.from, m.channel)
+        break
+      case 'call-ack':
+        this.onCallAck(m.from, m.channel)
         break
       case 'pong':
         this.lastPong = Date.now()
@@ -1552,7 +1557,7 @@ export class CommsEngine {
     return !!c?.canTalk && !c.music // music channels carry music, not talk
   }
 
-  press(target: string) { if (!this.mayTalk(target)) return; this.held.add(target); this.pushState(); this.emit() }
+  press(target: string) { if (!this.mayTalk(target)) return; this.ackCall(target); this.held.add(target); this.pushState(); this.emit() }
   release(target: string) { this.held.delete(target); this.pushState(); this.emit() }
   releaseAll() { if (this.held.size) { this.held.clear(); this.pushState(); this.emit() } }
 
@@ -1577,7 +1582,50 @@ export class CommsEngine {
     this.emit()
   }
 
-  callChannel(ch: string) { this.send({ type: 'call', channel: ch }) }
+  callChannel(ch: string) {
+    this.send({ type: 'call', channel: ch })
+    this.markCallOut(ch)
+  }
+  callUser(peerId: string) {
+    this.send({ type: 'call', to: peerId })
+    this.markCallOut(`u:${peerId}`)
+  }
+  private markCallOut(key: string) {
+    this.callOut.set(key, { at: Date.now() })
+    this.emit()
+    setTimeout(() => this.emit(), 10_100)
+  }
+  /** A call stays lit until somebody deals with it (or two minutes pass). */
+  callActive(key: string): boolean {
+    const c = this.calls.get(key)
+    return !!c && Date.now() - c.at < 120_000
+  }
+  /** Who is calling on this key, for the legend. */
+  callerName(key: string): string { const c = this.calls.get(key); return c ? this.roster().find(p => p.id === c.from)?.name ?? '' : '' }
+  /** What my own call on this key is doing: 'sent' for 10 s, or 'answered' (with the name) for 6 s after someone saw it. */
+  callOutState(key: string): { state: 'sent' | 'answered'; by?: string } | null {
+    const o = this.callOut.get(key)
+    if (!o) return null
+    if (o.by && Date.now() - (o.byAt ?? 0) < 6000) return { state: 'answered', by: o.by }
+    return Date.now() - o.at < 10_000 && !o.by ? { state: 'sent' } : null
+  }
+  /** Mark a call as seen and tell the caller. Talking on the channel (or directly to the caller) does this too. */
+  ackCall(key: string) {
+    const c = this.calls.get(key)
+    if (!c) return
+    this.calls.delete(key)
+    this.send({ type: 'call-ack', to: c.from, channel: key.startsWith('u:') ? null : key })
+    this.emit()
+  }
+  private onCallAck(from: string, channel: string | null) {
+    const key = channel ?? `u:${from}`
+    const o = this.callOut.get(key)
+    if (!o) return
+    o.by = this.roster().find(p => p.id === from)?.name ?? 'Someone'
+    o.byAt = Date.now()
+    this.emit()
+    setTimeout(() => this.emit(), 6100)
+  }
 
   /** The alert currently showing on a channel's key (they fade after 8 s). */
   activeAlert(ch: string): ArenaAlert | null {
@@ -1617,11 +1665,15 @@ export class CommsEngine {
     })
   }
 
-  private onCall(from: string, channel: string) {
-    this.calls.set(channel, { from, at: Date.now() })
+  private onCall(from: string, channel: string | null) {
+    const key = channel ?? `u:${from}`
+    const call = { from, at: Date.now() }
+    this.calls.set(key, call)
     this.beep()
+    // Nobody has answered: remind twice more, 6 s apart.
+    for (const n of [1, 2]) setTimeout(() => { if (this.calls.get(key) === call) this.beep() }, n * 6000)
     this.emit()
-    setTimeout(() => this.emit(), 4100) // let the flash expire
+    setTimeout(() => this.emit(), 120_100) // let an unanswered call light go out
   }
 
   private beep() {

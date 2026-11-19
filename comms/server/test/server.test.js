@@ -59,6 +59,31 @@ test('join, state, signal relay, call, leave', async () => {
     a.send({ type: 'call', channel: 'cam' })
     assert.equal((await b.next(m => m.type === 'call')).channel, 'cam')
 
+    // The person called says "seen": the caller is told who.
+    b.send({ type: 'call-ack', to: wa.id, channel: 'cam' })
+    const ack = await a.next(m => m.type === 'call-ack')
+    assert.equal(ack.from, wb.id)
+    assert.equal(ack.channel, 'cam')
+
+    // A call light is not a flood: a second one inside a second is dropped.
+    await new Promise(r => setTimeout(r, 1100))
+    a.send({ type: 'call', channel: 'cam' })
+    a.send({ type: 'call', channel: 'cam' })
+    await b.next(m => m.type === 'call')
+    await new Promise(r => setTimeout(r, 1100))
+
+    // It reaches someone who may listen even while they have the channel switched off.
+    b.send({ type: 'state', talk: [], listen: [] })
+    await a.next(m => m.type === 'peer-state')
+    a.send({ type: 'call', channel: 'cam' })
+    assert.equal((await b.next(m => m.type === 'call' && m.channel === 'cam')).from, wa.id)
+    await new Promise(r => setTimeout(r, 1100))
+
+    // A call to one person carries no channel.
+    a.send({ type: 'call', to: wb.id })
+    const direct = await b.next(m => m.type === 'call' && m.channel === null)
+    assert.equal(direct.from, wa.id)
+
     b.ws.close()
     assert.equal((await a.next(m => m.type === 'peer-leave')).id, wb.id)
     a.ws.close()
