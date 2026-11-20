@@ -76,6 +76,16 @@ try:
     assert st == 200 and len(r["hosts"]) == 1 and r["hosts"][0]["pending"] == 0, r
     assert [x["ok"] for x in r["hosts"][0]["results"]] == [True, False] and r["hosts"][0]["results"][1]["error"] == "no signal"
     assert r["hosts"][0]["streams"][0]["name"] == "Garden"
+    # Path health travels with the heartbeats (small dicts only)
+    hp = {"relays": [{"host": "a", "port": 8895, "up": True, "rttMs": 20.0}, {"host": "b", "port": 8895, "up": False}], "up": 1, "total": 2}
+    st = [{"sid": "s1", "name": "Garden", "state": "live", "bitrate": 10000, "paths": hp}, {"sid": "s2", "name": "Alt", "state": "live", "paths": "not a dict"}]
+    call("/v1/host/heartbeat", dict(hb, streams=st))
+    got = call("/v1/hosts")[1]["hosts"][0]["streams"]
+    assert got[0]["paths"] == hp and "paths" not in got[1], got
+    call("/v1/host/heartbeat", dict(hb, streams=[{"sid": "s1", "name": "Garden", "paths": {"x": "y" * 3000}}]))
+    assert "paths" not in call("/v1/hosts")[1]["hosts"][0]["streams"][0]           # too big: dropped, the heartbeat still works
+    call("/v1/decoder/heartbeat", {"id": "pc1-1", "name": "Truck decoder", "host": "pc1", "state": "live", "stream": "ESPN", "paths": {"paths": 2, "up": 1, "pathUp": [True, False]}})
+    assert call("/v1/decoders")[1]["decoders"][0]["paths"]["up"] == 1
     print("directory: all checks passed")
 finally:
     srv.terminate()

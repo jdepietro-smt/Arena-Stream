@@ -73,9 +73,19 @@ def _live_decoders(now):
     for k, v in _decoders.items():
         w = _wants.get(k)
         out.append({"id": k, "name": v["name"], "host": v["host"], "state": v["state"], "stream": v["stream"],
-                    "pubIp": v["pubIp"], "ageMs": int((now - v["seen"]) * 1000),
+                    "paths": v.get("paths"), "pubIp": v["pubIp"], "ageMs": int((now - v["seen"]) * 1000),
                     "want": {"stream": w["stream"], "seq": w["seq"]} if w else None})
     return out
+
+
+def _small(obj, limit=1500):
+    """Health details a client attaches (per-relay state and so on): kept only if it is a dict and small."""
+    if not isinstance(obj, dict):
+        return None
+    try:
+        return obj if len(json.dumps(obj)) <= limit else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _live_hosts(now):
@@ -171,7 +181,11 @@ class Handler(BaseHTTPRequestHandler):
         streams = []
         for x in (msg.get("streams") or [])[:32]:
             if isinstance(x, dict):
-                streams.append({k: x.get(k) for k in ("sid", "name", "state", "bitrate", "device", "remote", "error") if k in x})
+                st = {k: x.get(k) for k in ("sid", "name", "state", "bitrate", "device", "remote", "error") if k in x}
+                p = _small(x.get("paths"))
+                if p is not None:
+                    st["paths"] = p
+                streams.append(st)
         with _lock:
             old = _hosts.get(hid)
             results = (old["results"] if old else [])
@@ -210,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             _decoders[did] = {"name": str(msg.get("name", did))[:80], "host": str(msg.get("host", ""))[:80],
                               "state": str(msg.get("state", ""))[:20], "stream": str(msg.get("stream", ""))[:128],
-                              "pubIp": _client_ip(self), "seen": now}
+                              "paths": _small(msg.get("paths")), "pubIp": _client_ip(self), "seen": now}
             w = _wants.get(did)
             want = {"stream": w["stream"], "seq": w["seq"]} if w else None
         self._send(200, {"ok": True, "want": want})

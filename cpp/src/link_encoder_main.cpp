@@ -217,6 +217,16 @@ static std::string relay_safe_name(const std::string& n) {
 }
 
 // Every relay this encoder publishes to, for the announce: [{"host":..,"port":..,"name":..}, ...] (first = primary).
+// Per-relay state for the stats line: [{"host":..,"port":..,"up":true,"rttMs":..,"sent":..,"retrans":..}, ...]
+static std::string relay_legs_json(const std::vector<sdi::TsFanout::LegHealth>& legs) {
+    std::string o = "[";
+    char b[96];
+    for (size_t i = 0; i < legs.size(); ++i) {
+        std::snprintf(b, sizeof b, ",\"rttMs\":%.1f,\"sent\":%lld,\"retrans\":%lld}", legs[i].rtt_ms, (long long)legs[i].sent, (long long)legs[i].retrans);
+        o += std::string(i ? "," : "") + "{\"host\":" + json_str(legs[i].host) + ",\"port\":" + std::to_string(legs[i].port) + ",\"up\":" + (legs[i].up ? "true" : "false") + b;
+    }
+    return o + "]";
+}
 static std::string relays_json(const std::vector<std::pair<std::string, int>>& l, const std::string& name) {
     std::string o = "[";
     for (size_t i = 0; i < l.size(); ++i)
@@ -550,7 +560,7 @@ int main(int argc, char** argv) {
         std::printf("{\"type\":\"link_stats\",\"name\":%s,\"format\":%s,\"source\":%s,\"fps\":%.1f,\"kbps\":%.0f,"
                     "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\","
                     "\"lossPct\":%.1f,\"targetKbps\":%d,\"adapt\":%s,\"warn\":%s,"
-                    "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f,\"relaysUp\":%d,\"relaysTotal\":%d}\n",
+                    "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f,\"relaysUp\":%d,\"relaysTotal\":%d,\"fec\":\"%s\",\"relays\":%s}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
                     fanout->clients(), fanout->relay_up() ? "true" : "false", fanout->relay_rtt_ms(),
@@ -558,7 +568,7 @@ int main(int argc, char** argv) {
                     g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
                     adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str(),
                     args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms,
-                    fanout->relays_up(), fanout->relays_total());
+                    fanout->relays_up(), fanout->relays_total(), fc.relay_fec.c_str(), relay_legs_json(fanout->relay_legs()).c_str());
         std::fflush(stdout);
         last_v = v; last_bytes = by;
     }

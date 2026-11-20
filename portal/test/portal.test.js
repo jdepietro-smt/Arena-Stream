@@ -1046,3 +1046,18 @@ test('schedules: validated, fire once when due, report success, and alert when t
     assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { scheduleTz: 'Mars/Olympus' } } })).status, 400)
   } finally { await t.close() }
 })
+
+test('path health from the encoder PCs reaches the monitor and the wall', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    const paths = { total: 2, up: 1, fec: 'light', lossPct: 0.2, relays: [{ host: '1.1.1.1', port: 8895, up: true, rttMs: 30 }, { host: '2.2.2.2', port: 8895, up: false }] }
+    t.setHosts([{ ...PC(), streams: [{ sid: 's1', name: 'ESPN 1', state: 'live', bitrate: 10000, paths }] }])
+    await t.monitor.tick()
+    const st = (await t.call('/portal/api/owner/monitor')).body
+    assert.deepEqual(st.streams.find(x => x.name === 'ESPN 1').paths.relays.map(r => r.up), [true, false])
+    assert.equal(st.streams.find(x => x.name === 'LAN only').paths, null)                 // a stream with no report has none
+    const w = (await t.call('/portal/api/wall')).body
+    assert.deepEqual(w.tiles.find(x => x.name === 'ESPN 1').relays, { up: 1, total: 2 })
+  } finally { await t.close() }
+})

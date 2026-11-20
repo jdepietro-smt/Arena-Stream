@@ -122,6 +122,22 @@ public:
         for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) add_health(h, l->sock);
         return h;
     }
+    // Each relay on its own: is it connected, how far away, how much has had to be re-sent (for monitoring).
+    struct LegHealth { std::string host; int port = 0; bool up = false; double rtt_ms = -1; int64_t sent = 0, retrans = 0; };
+    std::vector<LegHealth> relay_legs() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        std::vector<LegHealth> out;
+        for (auto& l : legs_) {
+            LegHealth h; h.host = l->host; h.port = l->port;
+            if (l->sock != SRT_INVALID_SOCK) {
+                SRT_TRACEBSTATS st{};
+                if (srt_bistats(l->sock, &st, 0, 1) == 0) { h.up = true; h.rtt_ms = st.msRTT; h.sent = st.pktSentTotal; h.retrans = st.pktRetransTotal; }
+                else h.up = true;
+            }
+            out.push_back(h);
+        }
+        return out;
+    }
     PathHealth viewer_health() const {
         std::lock_guard<std::mutex> lk(mtx_);
         PathHealth h;

@@ -321,6 +321,7 @@ const encRun = (id: string): EncRun => {
   if (!r) { r = { proc: null, wanted: false, started: 0, restart: null, stoppedAt: 0, closed: null }; encRuns.set(id, r) }
   return r
 }
+const encPaths = new Map<string, unknown>()   // latest per-relay health of each stream, passed on to the portal
 const encStatAt = new Map<string, number>()   // when each stream's encoder last reported, to tell "starting" from "live"
 const streamCfg = (id: string) => cfg().streams.find(s => s.id === id)
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
@@ -383,7 +384,10 @@ function startEncoder(id: string): { ok: boolean; error?: string } {
     try {
       const m = JSON.parse(l)
       if (m.type === 'preview') send('encoder-preview', id, m.jpg)   // monitor picture, not a stats line
-      else { encStatAt.set(id, Date.now()); send('encoder-stats', id, m) }
+      else {
+        encStatAt.set(id, Date.now()); send('encoder-stats', id, m)
+        encPaths.set(id, { fec: m.fec || 'off', up: m.relaysUp, total: m.relaysTotal, relays: Array.isArray(m.relays) ? m.relays : [], lossPct: m.lossPct, kbps: m.kbps })
+      }
     } catch { send('log', l) }
   })
   lines(proc.stderr, (l) => send('log', `[${s.name.trim()}] ${l}`))
@@ -566,6 +570,7 @@ ipcMain.handle('encoder-bitrate', (_, id: string, kbps: number) => {
 // One link_decoder process per decoder, keyed by the decoder's id. Every event carries that id.
 const decRuns = new Map<string, ChildProcess>()
 const decLast = new Map<string, unknown>()   // last link_state per decoder, for a panel that was remounted
+const decPaths = new Map<string, unknown>()  // latest path health of each decoder, passed on to the portal
 const decCfg = (id: string) => cfg().decs.find(d => d.id === id)
 
 const AUDIO_SENTINEL = 0xFFFFFFFF
@@ -645,14 +650,17 @@ function startDecoder(id: string, select: string): { ok: boolean; error?: string
       try {
         const j = JSON.parse(l)
         if (j.type === 'link_state') { decLast.set(id, j); send('decoder-state', id, j); return }
-        if (j.type === 'decoder_stats') { send('decoder-stats', id, j); return }
+        if (j.type === 'decoder_stats') {
+          decPaths.set(id, { paths: j.paths, up: j.pathsUp, pathUp: j.pathUp, rttMs: j.pathRttMs, wins: j.pathWins, dups: j.dupDropped, late: j.lateDropped, lost: j.pktLoss, dropped: j.pktDrop, kbps: j.bitrateKbps, g2gMs: j.g2gMs })
+          send('decoder-stats', id, j); return
+        }
       } catch { /* fall through to log */ }
     }
     send('log', `[decoder ${id}] ${l}`)
   })
   proc.on('error', (e) => send('log', `decoder failed to start: ${e.message}`))
   proc.on('close', (code) => {
-    if (decRuns.get(id) === proc) { decRuns.delete(id); decLast.delete(id); send('decoder-state', id, { type: 'link_state', state: 'stopped' }) }
+    if (decRuns.get(id) === proc) { decRuns.delete(id); decLast.delete(id); decPaths.delete(id); send('decoder-state', id, { type: 'link_state', state: 'stopped' }) }
     send('log', `[decoder ${id}] link_decoder ended (code ${code})`)
   })
   return { ok: true }
@@ -714,6 +722,7 @@ function startDecoderBeat() {
         const r = await postDirectory(c.directory, c.key, '/v1/decoder/heartbeat', {
           id: beatId(d.id), name: `${os.hostname()} decoder ${i + 1}`, host: os.hostname(),
           state: running ? (ls?.state ?? 'connecting') : 'stopped', stream: running ? (ls?.encoder || d.selected) : '',
+          ...(running && ls?.state === 'live' ? { paths: { via: (ls as { path?: string }).path, ...(decPaths.get(d.id) as object | undefined) } } : {}),
         })
         const w = r?.want as { stream: string; seq: number } | null | undefined
         if (!w) continue
@@ -744,7 +753,7 @@ function startHostBeat() {
     const streams = c.streams.map(s => {
       const run = encRun(s.id)
       const live = run.wanted && run.proc && now - (encStatAt.get(s.id) ?? 0) < 6000
-      return { sid: s.id, name: s.name.trim(), state: live ? 'live' : run.wanted ? 'starting' : 'stopped', bitrate: s.bitrate, device: s.device, remote: s.remote }
+      return { sid: s.id, name: s.name.trim(), state: live ? 'live' : run.wanted ? 'starting' : 'stopped', bitrate: s.bitrate, device: s.device, remote: s.remote, ...(live && s.remote ? { paths: encPaths.get(s.id) } : {}) }
     })
     const results = hostResults.splice(0, hostResults.length)
     try {

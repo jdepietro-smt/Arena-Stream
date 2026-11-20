@@ -466,6 +466,22 @@ function bar(used, total) {
   return el('div', { style: 'height:8px;background:#232832;border-radius:4px;overflow:hidden;min-width:120px' }, el('div', { style: 'height:100%;width:' + pct + '%;background:' + (pct > 90 ? 'var(--bad)' : pct > 75 ? 'var(--acc)' : 'var(--ok)') }))
 }
 // Monitoring: what is wrong right now, how each stream has behaved over the last day, and where alerts go.
+// One chip per relay the encoder publishes to: green with the round trip when connected, red when not.
+function relayChips(p) {
+  if (!p || !Array.isArray(p.relays) || !p.relays.length) return el('span', { class: 'hint' }, 'no data')
+  return el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, p.relays.map((r, i) => el('span', { class: 'chip ' + (r.up ? 'ok' : 'bad'), title: r.host + ':' + r.port + (r.up ? '' : ' is not connected') + (r.retrans && r.sent ? ', ' + (r.retrans / r.sent * 100).toFixed(1) + '% re-sent' : '') },
+    (i === 0 ? 'primary' : 'backup') + (r.up ? (r.rttMs > 0 ? ' ' + Math.round(r.rttMs) + ' ms' : '') : ' down'))),
+    p.fec && p.fec !== 'off' ? el('span', { class: 'hint' }, 'FEC ' + p.fec) : null, typeof p.lossPct === 'number' && p.lossPct >= 0.5 ? el('span', { class: 'hint' }, p.lossPct.toFixed(1) + '% re-sent') : null)
+}
+function decoderPaths(p) {
+  if (!p) return el('span', { class: 'hint' }, 'no data')
+  if (p.via === 'lan') return el('span', { class: 'hint' }, 'direct on the LAN' + (p.rttMs && p.rttMs[0] > 0 ? ', ' + Math.round(p.rttMs[0]) + ' ms' : ''))
+  const pu = Array.isArray(p.pathUp) ? p.pathUp : []
+  const n = p.paths === 2 ? 2 : 1
+  return el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, Array.from({ length: n }, (_, i) => el('span', { class: 'chip ' + (pu[i] === false ? 'bad' : 'ok') }, 'path ' + (i + 1) + (pu[i] === false ? ' down' : p.rttMs && p.rttMs[i] > 0 ? ' ' + Math.round(p.rttMs[i]) + ' ms' : ''))),
+    n === 2 && Array.isArray(p.wins) ? el('span', { class: 'hint', title: 'Packets each path delivered first, and second copies dropped' }, 'first: ' + p.wins[0] + ' / ' + p.wins[1] + ', dup ' + (p.dups || 0)) : null,
+    p.lost ? el('span', { class: 'hint' }, p.lost + ' lost') : null)
+}
 function spark(series) {
   const W = 220, H = 34
   if (!series.length) return el('span', { class: 'hint' }, 'no data yet')
@@ -498,12 +514,13 @@ async function monitorSection(box) {
       st.alerts.length ? el('table', {}, el('thead', {}, el('tr', {}, ['', 'Alert', 'Detail', 'Since'].map(h => el('th', {}, h)))),
         el('tbody', {}, st.alerts.map(a => el('tr', {}, el('td', {}, el('span', { class: 'chip ' + (a.severity === 'critical' ? 'bad' : 'warn') }, a.severity)), el('td', {}, a.title), el('td', {}, a.detail || ''), el('td', {}, ago(a.openedAt)))))) : el('div', { class: 'empty' }, 'Nothing is wrong right now.'),
       el('h2', { style: 'margin-top:22px' }, 'Streams, last 24 hours'),
-      st.streams.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'State', 'Rate now', 'On air', 'Video rate (per minute)'].map(h => el('th', {}, h)))),
+      st.streams.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'State', 'Rate now', 'Relays', 'On air', 'Video rate (per minute)'].map(h => el('th', {}, h)))),
         el('tbody', {}, st.streams.map(s => el('tr', {}, el('td', {}, s.name),
           el('td', {}, el('span', { class: 'chip ' + (s.live ? 'ok' : 'bad') }, s.live ? 'on air' : 'off air ' + ago(s.lastSeen))),
           el('td', {}, s.live ? (s.measuredKbps != null ? Math.round(s.measuredKbps) + ' of ' + s.kbps : s.kbps) + ' kbps' : '-'),
+          el('td', {}, s.live ? relayChips(s.paths) : '-'),
           el('td', {}, s.uptimePct == null ? '-' : s.uptimePct + '%'), el('td', {}, spark(s.series)))))) : el('div', { class: 'empty' }, 'No streams seen yet.'),
-      ...(st.decoders.length ? [el('h2', { style: 'margin-top:22px' }, 'Decoders'), el('table', {}, el('tbody', {}, st.decoders.map(d => el('tr', {}, el('td', {}, d.name), el('td', {}, el('span', { class: 'chip ' + (d.live ? 'ok' : 'bad') }, d.live ? 'online' : 'offline ' + ago(d.lastSeen)))))))] : []),
+      ...(st.decoders.length ? [el('h2', { style: 'margin-top:22px' }, 'Decoders'), el('table', {}, el('thead', {}, el('tr', {}, ['Decoder', 'State', 'Receiving over', 'Path health'].map(h => el('th', {}, h)))), el('tbody', {}, st.decoders.map(d => el('tr', {}, el('td', {}, d.name), el('td', {}, el('span', { class: 'chip ' + (d.live ? 'ok' : 'bad') }, d.live ? 'online' : 'offline ' + ago(d.lastSeen))), el('td', {}, d.live && d.paths ? (d.paths.via === 'lan' ? 'LAN (direct)' : d.paths.paths === 2 ? 'two relays' : d.paths.via === 'relay' ? 'one relay' : '-') : '-'), el('td', {}, d.live ? decoderPaths(d.paths) : '-')))))] : []),
       el('h2', { style: 'margin-top:22px' }, 'Recent alerts'),
       st.events.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Opened', 'Alert', 'Level', 'Lasted'].map(h => el('th', {}, h)))),
         el('tbody', {}, st.events.slice(0, 40).map(e => el('tr', {}, el('td', {}, fmtTime(e.openedAt)), el('td', {}, e.title), el('td', {}, el('span', { class: 'chip ' + (e.severity === 'critical' ? 'bad' : 'warn') }, e.severity)),
@@ -959,6 +976,7 @@ function buildWall() {
   wallEls = { root, grid, summary, filter, cols, tiles: new Map(), data: [], order: '' }
   return root
 }
+const ALERT_TAG = { lowrate: 'LOW RATE', redundancy: 'NO BACKUP', lossy: 'LOSSY LINK', relays: 'NO RELAY', offline: 'OFF AIR' }
 const tileState = t => !t.live ? (t.stopped ? ['stopped', 'off'] : ['bad', 'off']) : t.alert === 'critical' ? ['bad', ''] : t.alert === 'warning' ? ['warn', ''] : ['ok', '']
 function wallTile(t) {
   let node = wallEls.tiles.get(t.id)
@@ -976,11 +994,11 @@ function wallTile(t) {
   node.root.className = 'wtile ' + cls + (off ? ' off' : '')
   node.name.textContent = t.name
   node.tag.className = 'chip ' + (cls === 'ok' ? 'ok' : cls === 'warn' ? 'warn' : cls === 'stopped' ? '' : 'bad')
-  node.tag.textContent = !t.live ? (t.stopped ? 'STOPPED' : 'OFF AIR') : t.alert === 'critical' ? 'PROBLEM' : t.alert === 'warning' ? 'LOW RATE' : 'LIVE'
+  node.tag.textContent = !t.live ? (t.stopped ? 'STOPPED' : 'OFF AIR') : t.alert ? (ALERT_TAG[t.alertKind] || (t.alert === 'critical' ? 'PROBLEM' : 'WARNING')) : 'LIVE'
   node.off.replaceChildren(...(t.live ? [] : [t.stopped ? 'STOPPED' : 'OFF AIR', el('small', {}, (t.stopped ? 'stopped on purpose, ' : '') + (t.lastSeen ? 'last seen ' + ago(t.lastSeen) : ''))]))
   node.off.style.color = t.stopped ? 'var(--mut)' : ''
   const rate = t.live ? (t.measuredKbps != null ? (t.measuredKbps / 1000).toFixed(1) + ' of ' + (t.kbps / 1000).toFixed(1) : (t.kbps / 1000).toFixed(1)) + ' Mbps' : ''
-  node.bot.textContent = [rate, t.live && t.format, t.live && t.webViewers ? t.webViewers + ' viewing' : ''].filter(Boolean).join('   ')
+  node.bot.textContent = [rate, t.live && t.relays && t.relays.total > 0 ? 'relays ' + t.relays.up + '/' + t.relays.total : '', t.live && t.format, t.live && t.webViewers ? t.webViewers + ' viewing' : ''].filter(Boolean).join('   ')
   // picture: the thumbnail if there is one, otherwise a note saying why not
   const url = thumbCache[t.id]
   const have = node.img.querySelector('img.thumb')

@@ -382,6 +382,8 @@ struct Stats {
     uint64_t wins[2]     = {0, 0};   // packets each path delivered first (two paths only)
     uint64_t dups        = 0;    // second copies dropped
     uint64_t late        = 0;    // copies that came too late to use
+    bool    path_ok[2]   = {true, false};      // each path connected right now
+    double  path_rtt[2]  = {-1, -1};           // and its round trip, ms (-1 = unknown)
     std::string format;
     std::string decoder;         // "d3d11va" | "dxva2" | "software"
 };
@@ -404,6 +406,8 @@ static void emit_stats(const Stats& s) {
               << ",\"pathWins\":["   << s.wins[0] << "," << s.wins[1] << "]"
               << ",\"dupDropped\":"  << s.dups
               << ",\"lateDropped\":" << s.late
+              << ",\"pathUp\":["     << (s.path_ok[0] ? "true" : "false") << "," << (s.path_ok[1] ? "true" : "false") << "]"
+              << ",\"pathRttMs\":["  << s.path_rtt[0] << "," << s.path_rtt[1] << "]"
               << ",\"decoder\":\""   << s.decoder << "\""
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
@@ -1163,9 +1167,16 @@ int main(int argc, char** argv) {
                 std::lock_guard<std::mutex> lk(merged.m);
                 stats.paths = 2; stats.paths_up = int(path_up[0].load()) + int(path_up[1].load());
                 stats.wins[0] = merged.first[0]; stats.wins[1] = merged.first[1]; stats.dups = merged.dup; stats.late = merged.late;
+                for (int pi = 0; pi < 2; ++pi) {
+                    stats.path_ok[pi] = path_up[pi].load();
+                    const SRTSOCKET ps = path_sock[pi].load();
+                    SRT_TRACEBSTATS pt{};
+                    stats.path_rtt[pi] = (ps != SRT_INVALID_SOCK && srt_bistats(ps, &pt, 0, 1) == 0) ? double(pt.msRTT) : -1;
+                }
             } else stats.paths_up = 1;
             if (sk != SRT_INVALID_SOCK && srt_bistats(sk, &s, 1, 1) == 0) {
                 stats.rtt_ms   = s.msRTT;
+                if (!dual) stats.path_rtt[0] = s.msRTT;
                 stats.pkt_loss = s.pktRcvLossTotal;
                 stats.pkt_drop = s.pktRcvDropTotal;
             }

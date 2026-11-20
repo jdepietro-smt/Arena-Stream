@@ -342,10 +342,12 @@ function createPortal(cfg) {
     if (p === '/portal/api/wall' && m === 'GET') {
       const [list, readers] = await Promise.all([encoders(), readerCounts()])
       const ms = monitor.state()
-      const sev = {}
-      for (const a of ms.alerts) {
-        const mm2 = a.key.match(/^stream\.(?:offline|lowrate):(.+)$/)
-        if (mm2) sev[mm2[1]] = (sev[mm2[1]] === 'critical' || a.severity === 'critical') ? 'critical' : 'warning'
+      const sev = {}, kind = {}
+      for (const a of ms.alerts) {          // alerts come most severe first, so the first one for a stream names its problem
+        const mm2 = a.key.match(/^stream\.(offline|lowrate|relays|redundancy|lossy):(.+)$/)
+        if (!mm2) continue
+        if (!sev[mm2[2]]) kind[mm2[2]] = mm2[1]
+        sev[mm2[2]] = (sev[mm2[2]] === 'critical' || a.severity === 'critical') ? 'critical' : 'warning'
       }
       const known = new Map(ms.streams.map(x => [x.id, x]))
       const links = store.links().filter(l => linkState(l) === 'active')
@@ -356,7 +358,7 @@ function createPortal(cfg) {
           id: e.id, name: e.name, format: e.format, codec: e.codec, kbps: e.kbps, live: true,
           canShare: !!rn, browserOk: browserOk(e), measuredKbps: k && k.measuredKbps != null ? k.measuredKbps : null,
           webViewers: rn ? (readers[pathName(rn)] || 0) : 0, links: links.filter(l => l.stream === e.name).length,
-          alert: sev[e.id] || null, uptimePct: k ? k.uptimePct : null,
+          alert: sev[e.id] || null, alertKind: kind[e.id] || null, uptimePct: k ? k.uptimePct : null, relays: k && k.paths ? { up: k.paths.up, total: k.paths.total } : null,
         }
       })
       const live = new Set(list.map(e => e.id))
@@ -418,6 +420,9 @@ function createPortal(cfg) {
   const prevBytes = new Map()
   async function collect() {
     const [h, list] = await Promise.all([health(), encoders()])
+    // Per-relay health is reported by the encoder PCs (through the directory's host list), matched to a stream by its name.
+    const pathsByName = new Map()
+    try { for (const host of (await dir('/v1/hosts')).hosts || []) for (const st of host.streams || []) if (st.paths && st.name) pathsByName.set(st.name, st.paths) } catch { /* older directory or none: no path data */ }
     let decoders = []
     try { decoders = (await dir('/v1/decoders')).decoders || [] } catch { /* directory down: the monitor says so */ }
     const rate = {}
@@ -434,8 +439,8 @@ function createPortal(cfg) {
     } catch { /* media server API down: no measured rates, the service rule reports it */ }
     return {
       directoryOk: h.app.directory,
-      encoders: list.map(e => { const m = rate[e.relay && e.relay.name] ?? rate[e.name]; return { id: e.id, name: e.name, kbps: e.kbps || 0, measuredKbps: m } }),
-      decoders: decoders.map(d => ({ id: d.id, name: d.name })),
+      encoders: list.map(e => { const m = rate[e.relay && e.relay.name] ?? rate[e.name]; return { id: e.id, name: e.name, kbps: e.kbps || 0, measuredKbps: m, paths: pathsByName.get(e.name) || null } }),
+      decoders: decoders.map(d => ({ id: d.id, name: d.name, paths: d.paths || null })),
       services: h.services, system: h.system, disks: h.disks,
     }
   }

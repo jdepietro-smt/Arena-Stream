@@ -6,6 +6,7 @@
 //
 // Pure logic: `collect()` is given by the caller and returns a snapshot, so all of this is testable without a server.
 //   snapshot = { at?, directoryOk, encoders: [{ id, name, kbps, measuredKbps? }], decoders: [{ id, name }],
+//                (encoders may carry paths: { total, up, fec, lossPct, relays: [{ host, port, up, rttMs }] }; decoders paths: { paths, up, pathUp, rttMs })
 //                services: [{ name, label, installed, active }], system: { load: [1,5,15], cpus, memTotal, memFree },
 //                disks: [{ mount, total, free }] }
 const fs = require('node:fs')
@@ -24,6 +25,8 @@ const DEFAULTS = {
   cpuLoadPct: 90, cpuSec: 90,        // 1-minute load as a share of all cores
   memFreePct: 8, memSec: 90,
   diskWarnPct: 90, diskCritPct: 97,
+  pathSec: 20,                       // a relay down (or a decoder path lost) this long is an alert
+  lossyPct: 5, lossySec: 30,         // re-sends above this share of packets on the way to the relay
   forgetStreamHours: 24,   // a stream that has not been seen for this long stops being expected
 }
 
@@ -113,12 +116,26 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
         // Still announcing in the first seconds after a stop is the old stream finishing, not a new start.
         if (data.stopped[e.name] && t - data.stopped[e.name] > 20000) delete data.stopped[e.name]
         const rec = data.streams[e.id] || (data.streams[e.id] = { id: e.id, name: e.name, firstSeen: t, history: [] })
-        rec.name = e.name; rec.lastSeen = t; rec.kbps = e.kbps; rec.measuredKbps = e.measuredKbps ?? null
+        rec.name = e.name; rec.lastSeen = t; rec.kbps = e.kbps; rec.measuredKbps = e.measuredKbps ?? null; rec.paths = e.paths || null
         addPoint(rec, t, true, e.measuredKbps ?? e.kbps)
         clear('stream.offline:' + e.id)
         const low = e.measuredKbps != null && e.kbps > 0 && e.measuredKbps < e.kbps * o.lowRatePct / 100
         if (sustained('low:' + e.id, low, o.lowRateSec)) raise('stream.lowrate:' + e.id, 'warning', `${e.name}: video rate is low`, `Receiving about ${Math.round(e.measuredKbps)} kbps of the ${e.kbps} kbps it announces. The link from this site may be struggling.`)
         else if (!low) clear('stream.lowrate:' + e.id)
+
+        // Relays: the encoder reports each relay it publishes to. With two, losing one is not an outage but it is no longer
+        // protected; with none reachable, remote viewers and decoders cannot get the stream at all.
+        const pa = e.paths
+        const down = pa && Array.isArray(pa.relays) ? pa.relays.filter(r => !r.up).map(r => `${r.host}:${r.port}`) : []
+        const none = !!pa && pa.total >= 1 && pa.up === 0
+        const part = !!pa && pa.total >= 2 && pa.up >= 1 && pa.up < pa.total
+        if (sustained('relnone:' + e.id, none, o.pathSec)) raise('stream.relays:' + e.id, 'critical', `${e.name}: not reaching any relay`, `${down.join(', ') || 'The relay'} not connected. Remote decoders and web links cannot see this stream; a decoder on the same network still can.`)
+        else if (!none) clear('stream.relays:' + e.id)
+        if (sustained('relpart:' + e.id, part, o.pathSec)) raise('stream.redundancy:' + e.id, 'warning', `${e.name}: running without a backup relay`, `Not connected: ${down.join(', ')}. Playback is fine, but a failure of the other relay would now take the stream down.`)
+        else if (!part) clear('stream.redundancy:' + e.id)
+        const lossy = !!pa && typeof pa.lossPct === 'number' && pa.lossPct >= o.lossyPct
+        if (sustained('lossy:' + e.id, lossy, o.lossySec)) raise('stream.lossy:' + e.id, 'warning', `${e.name}: the link to the relay is losing packets`, `${pa.lossPct.toFixed(1)}% had to be re-sent.${pa.fec && pa.fec !== 'off' ? ' Packet loss protection is on (' + pa.fec + ').' : ' Turning on packet loss protection for this stream (Light or Standard) should help.'}`)
+        else if (!lossy || pa.lossPct < o.lossyPct / 2) clear('stream.lossy:' + e.id)
       }
       for (const rec of Object.values(data.streams)) {
         if (seen.has(rec.id)) continue
@@ -131,7 +148,12 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       }
       // Decoders
       const dseen = new Set()
-      for (const d of s.decoders || []) { dseen.add(d.id); data.decoders[d.id] = { id: d.id, name: d.name, lastSeen: t }; clear('decoder.offline:' + d.id) }
+      for (const d of s.decoders || []) {
+        dseen.add(d.id); data.decoders[d.id] = { id: d.id, name: d.name, lastSeen: t, paths: d.paths || null }; clear('decoder.offline:' + d.id)
+        const lost = !!d.paths && d.paths.paths === 2 && d.paths.up < 2
+        if (sustained('decpath:' + d.id, lost, o.pathSec)) raise('decoder.path:' + d.id, 'warning', `Decoder ${d.name}: running on one relay path`, `It is set to use two relays and ${d.paths.up === 0 ? 'has none connected' : 'has lost one'}. It keeps playing, but without protection.`)
+        else if (!lost) clear('decoder.path:' + d.id)
+      }
       for (const d of Object.values(data.decoders)) {
         if (dseen.has(d.id)) continue
         if (t - d.lastSeen > o.forgetStreamHours * 3600 * 1000) { delete data.decoders[d.id]; clear('decoder.offline:' + d.id); continue }
@@ -178,10 +200,10 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       at: t, lastTick, running: !!lastTick && t - lastTick < 30000,
       alerts: [...active.values()].sort((a, b) => (a.severity === b.severity ? b.openedAt - a.openedAt : a.severity === 'critical' ? -1 : 1)),
       streams: Object.values(data.streams).map(r => ({
-        id: r.id, name: r.name, live: r.lastSeen === lastTick, stopped: !!data.stopped[r.name] && r.lastSeen !== lastTick, lastSeen: r.lastSeen, kbps: r.kbps, measuredKbps: r.measuredKbps, uptimePct: uptimePct(r),
+        id: r.id, name: r.name, paths: r.lastSeen === lastTick ? r.paths || null : null, live: r.lastSeen === lastTick, stopped: !!data.stopped[r.name] && r.lastSeen !== lastTick, lastSeen: r.lastSeen, kbps: r.kbps, measuredKbps: r.measuredKbps, uptimePct: uptimePct(r),
         series: r.history.slice(-180).map(p => ({ t: p.t, kbps: p.up ? Math.round(p.kbps / p.up) : 0, up: p.n ? p.up / p.n : 0 })),
       })).sort((a, b) => a.name.localeCompare(b.name)),
-      decoders: Object.values(data.decoders).map(d => ({ ...d, live: d.lastSeen === lastTick })),
+      decoders: Object.values(data.decoders).map(d => ({ ...d, paths: d.lastSeen === lastTick ? d.paths : null, live: d.lastSeen === lastTick })),
       events: data.events.slice(-100).reverse(),
       snapshot: lastSnap && { system: lastSnap.system, disks: lastSnap.disks },
     }

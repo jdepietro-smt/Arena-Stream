@@ -173,3 +173,65 @@ test('a stream that keeps announcing for a few seconds after a stop is still a s
   for (let i = 0; i < 6; i++) await r.step()
   assert.deepEqual(keys(r), [])
 })
+
+const relayPaths = (up, o = {}) => ({ total: 2, up, fec: 'off', lossPct: 0, relays: [{ host: '10.0.0.1', port: 8895, up: up >= 1, rttMs: 20 }, { host: '10.0.0.2', port: 8895, up: up === 2, rttMs: 25 }], ...o })
+
+test('losing the backup relay is a warning after a short while, and clears when it returns', async () => {
+  const r = rig({ pathSec: 20 })
+  r.snap.encoders[0].paths = relayPaths(2)
+  for (let i = 0; i < 6; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+  r.snap.encoders[0].paths = relayPaths(1)
+  await r.step(5)
+  assert.deepEqual(keys(r), [])                                        // a blip is not an alert
+  await r.step(20)
+  assert.deepEqual(keys(r), ['stream.redundancy:e1'])
+  assert.match(r.m.state().alerts[0].detail, /10\.0\.0\.2:8895/)      // names the relay that is down
+  assert.equal(r.m.state().streams[0].paths.up, 1)
+  r.snap.encoders[0].paths = relayPaths(2)
+  await r.step()
+  assert.deepEqual(keys(r), [])
+})
+
+test('no relay reachable at all is critical', async () => {
+  const r = rig({ pathSec: 20 })
+  r.snap.encoders[0].paths = relayPaths(0)
+  await r.step(); await r.step(25)
+  assert.deepEqual(keys(r), ['stream.relays:e1'])
+  assert.equal(r.m.state().alerts[0].severity, 'critical')
+  const one = rig({ pathSec: 20 })                                    // a single relay that is down counts too
+  one.snap.encoders[0].paths = { total: 1, up: 0, relays: [{ host: 'x', port: 1, up: false }] }
+  await one.step(); await one.step(25)
+  assert.deepEqual(keys(one), ['stream.relays:e1'])
+})
+
+test('a lossy link to the relay is flagged, with advice when protection is off', async () => {
+  const r = rig({ lossySec: 30 })
+  r.snap.encoders[0].paths = relayPaths(2, { lossPct: 8 })
+  await r.step(); await r.step(20)
+  assert.deepEqual(keys(r), [])
+  await r.step(20)
+  assert.deepEqual(keys(r), ['stream.lossy:e1'])
+  assert.match(r.m.state().alerts[0].detail, /Turning on packet loss protection/)
+  r.snap.encoders[0].paths = relayPaths(2, { lossPct: 1 })
+  await r.step()
+  assert.deepEqual(keys(r), [])
+  const f = rig({ lossySec: 10 })
+  f.snap.encoders[0].paths = relayPaths(2, { lossPct: 9, fec: 'light' })
+  await f.step(); await f.step(15)
+  assert.match(f.m.state().alerts[0].detail, /protection is on \(light\)/)
+})
+
+test('a decoder that set out to use two relays and has lost one is flagged; a single-path decoder is not', async () => {
+  const r = rig({ pathSec: 20 })
+  r.snap.decoders[0].paths = { paths: 2, up: 1, pathUp: [true, false] }
+  await r.step(); await r.step(25)
+  assert.deepEqual(keys(r), ['decoder.path:d1'])
+  r.snap.decoders[0].paths = { paths: 2, up: 2 }
+  await r.step()
+  assert.deepEqual(keys(r), [])
+  const s = rig({ pathSec: 20 })
+  s.snap.decoders[0].paths = { paths: 1, up: 1, via: 'relay' }
+  await s.step(); await s.step(30)
+  assert.deepEqual(keys(s), [])
+})
