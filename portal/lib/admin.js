@@ -15,6 +15,8 @@ const SETTINGS = {
   thumbEverySec:        { type: 'int', min: 2, max: 30, def: 5 },
   defaultLinkExpiryMin: { type: 'int', min: 0, max: 525600, def: 1440 },
   requireLinkPassword:  { type: 'bool', def: false },
+  alertsEnabled:        { type: 'bool', def: true },                   // send alerts to the webhook
+  alertWebhook:         { type: 'webhook', def: '' },                  // where alerts are posted (Slack, Teams, a pager)
   sharedLogin:          { type: 'bool', def: true },                   // the one shared portal password still works at sign-in
 }
 
@@ -32,6 +34,11 @@ function cleanSetting(key, v) {
   if (d.type === 'url') {
     const s = String(v || '').trim().replace(/\/$/, '')
     if (s && !/^https?:\/\/[^\s/]+(:\d+)?$/.test(s)) throw new Error('address must look like http://host or https://host')
+    return s
+  }
+  if (d.type === 'webhook') {
+    const s = String(v || '').trim()
+    if (s && !/^https?:\/\/[^\s/]+(:\d+)?(\/\S*)?$/.test(s)) throw new Error('webhook must be a full address starting with http:// or https://')
     return s
   }
   return v

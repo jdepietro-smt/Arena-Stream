@@ -21,6 +21,7 @@ const { openAdmin, SETTINGS, USERNAME, ROLES, cleanProfile } = require('./lib/ad
 const commsLib = require('./lib/comms')
 const { createThumbs } = require('./lib/thumbs')
 const captest = require('./lib/captest-core')
+const { openMonitor, webhookBody } = require('./lib/monitor')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
 // (portal/deploy/ctl.sh) that accepts only these names; the portal itself runs unprivileged.
@@ -46,6 +47,7 @@ function loadConfig(env = process.env) {
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
     ownerInit: env.PORTAL_OWNER_PASSWORD_INIT || '',                // first owner password; stored hashed, then removed from the env file
+    monitorEverySec: parseInt(env.PORTAL_MONITOR_SEC || '5', 10),   // how often the system is checked for alerts (0 = off)
     ctlDir: env.PORTAL_CTL_DIR || '',                               // where restart requests are left for the root helper
   }
 }
@@ -378,6 +380,50 @@ function createPortal(cfg) {
     }
   }
 
+  // ── Monitoring and alerts: see lib/monitor.js ───────────────────────────────────────────────────────────
+  // What the monitor looks at every few seconds. The measured rate of a stream is what the media server actually receives
+  // from it (not what the encoder says it sends), so a struggling link shows up even while the encoder still announces itself.
+  const prevBytes = new Map()
+  async function collect() {
+    const [h, list] = await Promise.all([health(), encoders()])
+    let decoders = []
+    try { decoders = (await dir('/v1/decoders')).decoders || [] } catch { /* directory down: the monitor says so */ }
+    const rate = {}
+    try {
+      const j = await (await mtx('/v3/paths/list?itemsPerPage=500')).json()
+      const t = Date.now()
+      for (const it of j.items || []) {
+        const b = Number(it.bytesReceived)
+        if (!Number.isFinite(b)) continue
+        const prev = prevBytes.get(it.name)
+        prevBytes.set(it.name, { b, t })
+        if (prev && t > prev.t && b >= prev.b) rate[it.name] = (b - prev.b) * 8 / ((t - prev.t) / 1000) / 1000
+      }
+    } catch { /* media server API down: no measured rates, the service rule reports it */ }
+    return {
+      directoryOk: h.app.directory,
+      encoders: list.map(e => { const m = rate[e.relay && e.relay.name] ?? rate[e.name]; return { id: e.id, name: e.name, kbps: e.kbps || 0, measuredKbps: m } }),
+      decoders: decoders.map(d => ({ id: d.id, name: d.name })),
+      services: h.services, system: h.system, disks: h.disks,
+    }
+  }
+  async function postWebhook(kind, a) {
+    const s = S()
+    if (!s.alertsEnabled || !s.alertWebhook) return
+    const r = await fetch(s.alertWebhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(webhookBody(kind, a)), signal: AbortSignal.timeout(5000) })
+    if (!r.ok) throw new Error('webhook answered ' + r.status)
+  }
+  const monitor = openMonitor({
+    dir: cfg.dataDir, collect, opts: cfg.monitorOpts,
+    notify: (kind, a) => { admin.audit('monitor', 'alert.' + kind, `${a.title}`, ''); return postWebhook(kind, a).catch(e => console.log('alert webhook failed: ' + e.message)) },
+  })
+  let monitorTimer = null
+  if (cfg.monitorEverySec > 0) {
+    monitorTimer = setInterval(() => { monitor.tick().catch(() => {}) }, cfg.monitorEverySec * 1000)
+    monitorTimer.unref?.()
+    monitor.tick().catch(() => {})
+  }
+
   const captestDir = path.join(cfg.dataDir, 'captest')
   const readJsonFile = f => { try { return JSON.parse(fs.readFileSync(path.join(captestDir, f), 'utf8')) } catch { return null } }
   const captestState = () => {
@@ -641,6 +687,13 @@ function createPortal(cfg) {
       return send(res, 200, { ok: true, signedOut: true })
     }
 
+    if (sub === 'monitor' && m === 'GET') return send(res, 200, { ...monitor.state(), webhookSet: !!S().alertWebhook, alertsEnabled: S().alertsEnabled })
+    if (sub === 'monitor/test' && m === 'POST') {
+      if (!S().alertWebhook) return send(res, 400, { error: 'enter a webhook address and save it first' })
+      try { await postWebhook('open', { key: 'test', severity: 'warning', title: 'Test alert from Arena Portal', detail: 'If you can read this, alerts reach you.', openedAt: Date.now() }) } catch (e) { return send(res, 502, { error: 'the webhook did not accept it: ' + e.message }) }
+      admin.audit('owner', 'monitor.test', '', ip)
+      return send(res, 200, { ok: true })
+    }
     if (sub === 'health' && m === 'GET') return send(res, 200, await health())
     let sm
     if ((sm = sub.match(/^services\/([a-z0-9-]+)\/restart$/)) && m === 'POST') {
@@ -770,8 +823,8 @@ function createPortal(cfg) {
       else res.end()
     })
   })
-  server.on('close', () => { thumbs.stopAll(); admin.flush() })
-  return { server, store, pathName, thumbs, admin }
+  server.on('close', () => { thumbs.stopAll(); admin.flush(); clearInterval(monitorTimer); monitor.flush() })
+  return { server, store, pathName, thumbs, admin, monitor }
 }
 
 module.exports = { createPortal, loadConfig }

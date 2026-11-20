@@ -263,7 +263,7 @@ function newLinkDialog(stream) {
 // ── Admin (owner-only) ─────────────────────────────────────────────────────────
 // Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
 let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
-const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['monitor', 'Monitoring'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
 
 async function oapi(path, method = 'GET', body) {
   const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
@@ -299,6 +299,7 @@ async function adminRender() {
   try {
     if (adminSub === 'account') await accountSection(content)
     else if (adminSub === 'settings') await settingsSection(content)
+    else if (adminSub === 'monitor') await monitorSection(content)
     else if (adminSub === 'health') await healthSection(content)
     else if (adminSub === 'capacity') await capacitySection(content)
     else await activitySection(content)
@@ -449,6 +450,62 @@ function bar(used, total) {
   const pct = total ? Math.round(used / total * 100) : 0
   return el('div', { style: 'height:8px;background:#232832;border-radius:4px;overflow:hidden;min-width:120px' }, el('div', { style: 'height:100%;width:' + pct + '%;background:' + (pct > 90 ? 'var(--bad)' : pct > 75 ? 'var(--acc)' : 'var(--ok)') }))
 }
+// Monitoring: what is wrong right now, how each stream has behaved over the last day, and where alerts go.
+function spark(series) {
+  const W = 220, H = 34
+  if (!series.length) return el('span', { class: 'hint' }, 'no data yet')
+  const max = Math.max(1, ...series.map(p => p.kbps))
+  const step = W / Math.max(1, series.length - 1)
+  const pts = series.map((p, i) => (i * step).toFixed(1) + ',' + (H - 2 - (p.kbps / max) * (H - 6)).toFixed(1)).join(' ')
+  const gaps = series.map((p, i) => p.up < 0.5 ? '<rect x="' + (i * step - step / 2).toFixed(1) + '" y="0" width="' + Math.max(2, step).toFixed(1) + '" height="' + H + '" fill="#ff5b50" opacity=".35"/>' : '').join('')
+  const s = el('span', { title: 'Last ' + series.length + ' minutes. Red = off air.' })
+  s.innerHTML = '<svg width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">' + gaps + '<polyline fill="none" stroke="#ffb938" stroke-width="1.5" points="' + pts + '"/></svg>'
+  return s
+}
+const ago = t => { const sec = Math.max(0, Math.round((Date.now() - t) / 1000)); return sec < 90 ? sec + ' s ago' : fmtAgo(sec) + ' ago' }
+async function monitorSection(box) {
+  const hook = el('input', { type: 'text', placeholder: 'https://hooks.slack.com/services/...', style: 'width:100%' })
+  const on = el('input', { type: 'checkbox' })
+  const m = msgBox()
+  let primed = false
+  const draw = async () => {
+    const [st, cfg] = await Promise.all([oapi('/monitor'), primed ? null : oapi('/settings')])
+    if (!primed) { hook.value = cfg.settings.alertWebhook || ''; on.checked = cfg.settings.alertsEnabled; primed = true }
+    const crit = st.alerts.filter(a => a.severity === 'critical').length
+    const status = !st.running ? ['bad', 'Monitoring is not running'] : crit ? ['bad', crit + ' critical'] : st.alerts.length ? ['warn', st.alerts.length + ' warning' + (st.alerts.length > 1 ? 's' : '')] : ['ok', 'All clear']
+    const live = st.streams.filter(s => s.live).length
+    box.replaceChildren(
+      el('div', { class: 'row', style: 'gap:12px;margin-bottom:14px;flex-wrap:wrap' },
+        el('div', { class: 'stat' + (status[0] === 'ok' ? ' up' : '') }, el('b', { style: status[0] === 'ok' ? '' : 'color:var(--' + (status[0] === 'bad' ? 'bad' : 'acc') + ')' }, status[1]), el('span', {}, 'Status')),
+        el('div', { class: 'stat' }, el('b', {}, live + ' / ' + st.streams.length), el('span', {}, 'Streams on air')),
+        el('div', { class: 'stat' }, el('b', {}, String(st.decoders.filter(d => d.live).length) + ' / ' + st.decoders.length), el('span', {}, 'Decoders online'))),
+      el('h2', {}, 'Open alerts'),
+      st.alerts.length ? el('table', {}, el('thead', {}, el('tr', {}, ['', 'Alert', 'Detail', 'Since'].map(h => el('th', {}, h)))),
+        el('tbody', {}, st.alerts.map(a => el('tr', {}, el('td', {}, el('span', { class: 'chip ' + (a.severity === 'critical' ? 'bad' : 'warn') }, a.severity)), el('td', {}, a.title), el('td', {}, a.detail || ''), el('td', {}, ago(a.openedAt)))))) : el('div', { class: 'empty' }, 'Nothing is wrong right now.'),
+      el('h2', { style: 'margin-top:22px' }, 'Streams, last 24 hours'),
+      st.streams.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'State', 'Rate now', 'On air', 'Video rate (per minute)'].map(h => el('th', {}, h)))),
+        el('tbody', {}, st.streams.map(s => el('tr', {}, el('td', {}, s.name),
+          el('td', {}, el('span', { class: 'chip ' + (s.live ? 'ok' : 'bad') }, s.live ? 'on air' : 'off air ' + ago(s.lastSeen))),
+          el('td', {}, s.live ? (s.measuredKbps != null ? Math.round(s.measuredKbps) + ' of ' + s.kbps : s.kbps) + ' kbps' : '-'),
+          el('td', {}, s.uptimePct == null ? '-' : s.uptimePct + '%'), el('td', {}, spark(s.series)))))) : el('div', { class: 'empty' }, 'No streams seen yet.'),
+      ...(st.decoders.length ? [el('h2', { style: 'margin-top:22px' }, 'Decoders'), el('table', {}, el('tbody', {}, st.decoders.map(d => el('tr', {}, el('td', {}, d.name), el('td', {}, el('span', { class: 'chip ' + (d.live ? 'ok' : 'bad') }, d.live ? 'online' : 'offline ' + ago(d.lastSeen)))))))] : []),
+      el('h2', { style: 'margin-top:22px' }, 'Recent alerts'),
+      st.events.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Opened', 'Alert', 'Level', 'Lasted'].map(h => el('th', {}, h)))),
+        el('tbody', {}, st.events.slice(0, 40).map(e => el('tr', {}, el('td', {}, fmtTime(e.openedAt)), el('td', {}, e.title), el('td', {}, el('span', { class: 'chip ' + (e.severity === 'critical' ? 'bad' : 'warn') }, e.severity)),
+          el('td', {}, e.closedAt ? Math.max(1, Math.round((e.closedAt - e.openedAt) / 1000)) + ' s' : el('span', { class: 'chip bad' }, 'still open')))))) : el('div', { class: 'empty' }, 'No alerts yet.'),
+      el('div', { class: 'card', style: 'max-width:640px;margin:22px 0 0;gap:12px' },
+        el('h2', {}, 'Send alerts to'),
+        el('div', { class: 'hint', style: 'margin:0' }, 'Paste an incoming-webhook address (Slack, Microsoft Teams, or any tool that accepts a JSON post). It is told when an alert opens and when it clears. Streams off air, a low video rate, stopped services, a full disk and an overloaded server all raise alerts.'),
+        hook,
+        el('label', { class: 'check', style: 'flex-direction:row;gap:6px;color:var(--text)' }, on, el('span', {}, 'Send alerts')),
+        el('div', { class: 'row' },
+          el('button', { class: 'b pri', onclick: async () => { try { await oapi('/settings', 'POST', { settings: { alertWebhook: hook.value, alertsEnabled: on.checked } }); flash(m, 'Saved.', true) } catch (e) { flash(m, e.message) } } }, 'Save'),
+          el('button', { class: 'b', onclick: async () => { try { await oapi('/monitor/test', 'POST'); flash(m, 'Test alert sent. Check your channel.', true) } catch (e) { flash(m, e.message) } } }, 'Send a test alert'), m)))
+  }
+  await draw()
+  healthTimer = setInterval(() => { if (adminSub === 'monitor' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && document.activeElement !== hook) draw().catch(() => {}) }, 5000)
+}
+
 async function healthSection(box) {
   const draw = async () => {
     const h = await oapi('/health')

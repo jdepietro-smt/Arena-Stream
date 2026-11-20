@@ -72,7 +72,7 @@ async function setup() {
     cb(new Error('unexpected'))
   }
   const ctlDir = path.join(dataDir, 'ctl')
-  const { server, store, pathName, thumbs, admin } = createPortal({
+  const { server, store, pathName, thumbs, admin, monitor } = createPortal({
     ownerInit: 'ownerpass1234', execFile: fakeExec, ctlDir,
     spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
@@ -96,7 +96,7 @@ async function setup() {
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
   const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, thumbs, admin, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
+  return { call, calls, close, thumbs, admin, monitor, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -927,4 +927,27 @@ test('comms: the certificate is pinned to the one the owner confirmed', async ()
       assert.equal(r.status, 502); assert.match(r.body.error, /different certificate/)
     } finally { srv2.close() }
   } finally { await t.close(); srv.close() }
+})
+
+test('monitoring: needs the owner, lists streams, and the test alert reaches the webhook', async () => {
+  const t = await setup()
+  const got = []
+  const hook = http.createServer((req, res) => { let b = ''; req.on('data', c => b += c); req.on('end', () => { got.push(JSON.parse(b)); res.end('ok') }) })
+  const hp = await listen(hook)
+  try {
+    await adminLogin(t)
+    assert.equal((await t.call('/portal/api/owner/monitor')).status, 403)
+    await ownerLogin(t)
+    await t.monitor.tick()
+    const st = (await t.call('/portal/api/owner/monitor')).body
+    assert.equal(st.running, true)
+    assert.deepEqual(st.streams.map(s => s.name).sort(), ['Cam HEVC', 'ESPN 1', 'LAN only'])
+    assert.deepEqual(st.decoders.map(d => d.name), ['Truck'])
+    assert.equal(st.webhookSet, false)
+    assert.equal((await t.call('/portal/api/owner/monitor/test', { method: 'POST' })).status, 400)          // no webhook yet
+    assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { alertWebhook: 'ftp://nope' } } })).status, 400)
+    assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { alertWebhook: `http://127.0.0.1:${hp}/services/T/B` } } })).status, 200)
+    assert.equal((await t.call('/portal/api/owner/monitor/test', { method: 'POST' })).status, 200)
+    assert.match(got[0].text, /Test alert from Arena Portal/)
+  } finally { hook.close(); await t.close() }
 })
