@@ -161,10 +161,27 @@ location /w/ {
 }
 NGINX
 
-python3 - <<'PY'
-import glob, re, shutil, sys
+# Backups go to /var/backups/arena-portal, NOT beside the site files: nginx reads every file in sites-enabled and
+# conf.d, so a backup there is loaded as a second copy of the site (and an earlier version of this script even
+# patched and backed up its own backups, over and over, until the file name was too long).
+BK=/var/backups/arena-portal
+install -d -m 700 "$BK"
+python3 - "$BK" <<'PY'
+import glob, os, re, shutil, sys
+BK = sys.argv[1]
 INC = 'include /etc/nginx/snippets/arena-portal.conf;'
-files = [f for f in glob.glob('/etc/nginx/sites-enabled/*') + glob.glob('/etc/nginx/conf.d/*.conf')]
+SKIP = ('.pre-portal', '.pre-linkd', '.bak', '.orig', '.dpkg-old', '.dpkg-dist', '~', '.swp')
+
+# Clear out backups an older run left next to the site files, keeping them (the shortest name is the real original).
+for f in sorted(glob.glob('/etc/nginx/sites-enabled/*.pre-portal*') + glob.glob('/etc/nginx/conf.d/*.pre-portal*'), key=len):
+    dst = os.path.join(BK, 'leftover-' + os.path.basename(f)[:120])
+    if not os.path.exists(dst):
+        shutil.move(f, dst)
+    else:
+        os.remove(f)
+    print('moved an old backup out of nginx: ' + os.path.basename(f)[:60])
+
+files = [f for f in glob.glob('/etc/nginx/sites-enabled/*') + glob.glob('/etc/nginx/conf.d/*.conf') if not f.endswith(SKIP)]
 patched = []
 for f in files:
     t = open(f).read()
@@ -172,7 +189,7 @@ for f in files:
         continue                       # already done, or not a dashboard site
     new, n = re.subn(r'(?m)^([ \t]*)location\s+/\s*\{', lambda m: f'{m.group(1)}{INC}\n{m.group(0)}', t)
     if n:
-        shutil.copy(f, f + '.pre-portal')
+        shutil.copy(f, os.path.join(BK, f.replace(os.sep, '/').strip('/').replace('/', '_') + '.pre-portal'))
         open(f, 'w').write(new)
         patched.append(f)
 print('patched: ' + (', '.join(patched) if patched else 'nothing new'))
@@ -180,7 +197,7 @@ open('/tmp/arena-portal-patched', 'w').write('\n'.join(patched))
 PY
 if ! nginx -t 2>/tmp/arena-nginx-test.log; then
   cat /tmp/arena-nginx-test.log
-  while read -r f; do [ -n "$f" ] && mv -f "$f.pre-portal" "$f"; done < /tmp/arena-portal-patched
+  while read -r f; do [ -n "$f" ] && cp -f "$BK/$(echo "${f#/}" | tr / _).pre-portal" "$f"; done < /tmp/arena-portal-patched
   echo "nginx rejected the change; it was rolled back and the dashboard is untouched"
   exit 1
 fi
