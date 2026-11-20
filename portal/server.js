@@ -335,6 +335,36 @@ function createPortal(cfg) {
       if (m === 'GET') return send(res, 200, { link: publicLink(l), recent: store.views(l.id).slice(-50).reverse() })
     }
 
+    // The multiview wall: every stream that is on air, plus streams seen in the last day that are not (shown as off air),
+    // each with the state the monitor has given it.
+    if (p === '/portal/api/wall' && m === 'GET') {
+      const [list, readers] = await Promise.all([encoders(), readerCounts()])
+      const ms = monitor.state()
+      const sev = {}
+      for (const a of ms.alerts) {
+        const mm2 = a.key.match(/^stream\.(?:offline|lowrate):(.+)$/)
+        if (mm2) sev[mm2[1]] = (sev[mm2[1]] === 'critical' || a.severity === 'critical') ? 'critical' : 'warning'
+      }
+      const known = new Map(ms.streams.map(x => [x.id, x]))
+      const links = store.links().filter(l => linkState(l) === 'active')
+      const onAir = list.map(e => {
+        const rn = e.relay && e.relay.name
+        const k = known.get(e.id)
+        return {
+          id: e.id, name: e.name, format: e.format, codec: e.codec, kbps: e.kbps, live: true,
+          canShare: !!rn, browserOk: browserOk(e), measuredKbps: k && k.measuredKbps != null ? k.measuredKbps : null,
+          webViewers: rn ? (readers[pathName(rn)] || 0) : 0, links: links.filter(l => l.stream === e.name).length,
+          alert: sev[e.id] || null, uptimePct: k ? k.uptimePct : null,
+        }
+      })
+      const live = new Set(list.map(e => e.id))
+      const off = ms.streams.filter(x => !live.has(x.id)).map(x => ({
+        id: x.id, name: x.name, live: false, kbps: x.kbps, lastSeen: x.lastSeen, canShare: false, browserOk: false,
+        webViewers: 0, links: 0, alert: 'critical', uptimePct: x.uptimePct,
+      }))
+      return send(res, 200, { tiles: onAir.concat(off), monitoring: ms.running, at: Date.now() })
+    }
+
     if (p === '/portal/api/decoders' && m === 'GET') {
       try { return send(res, 200, await dir('/v1/decoders')) } catch (e) { return send(res, 502, { error: String(e.message) }) }
     }

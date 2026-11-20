@@ -951,3 +951,24 @@ test('monitoring: needs the owner, lists streams, and the test alert reaches the
     assert.match(got[0].text, /Test alert from Arena Portal/)
   } finally { hook.close(); await t.close() }
 })
+
+test('wall: lists live streams, and a stream that left shows as off air', async () => {
+  const t = await setup()
+  try {
+    assert.equal((await t.call('/portal/api/wall')).status, 401)
+    await adminLogin(t)
+    await t.monitor.tick()
+    let w = (await t.call('/portal/api/wall')).body
+    assert.deepEqual(w.tiles.map(x => x.name).sort(), ['Cam HEVC', 'ESPN 1', 'LAN only'])
+    const espn = w.tiles.find(x => x.name === 'ESPN 1')
+    assert.deepEqual([espn.live, espn.canShare, espn.browserOk, espn.alert], [true, true, true, null])
+    assert.equal(w.tiles.find(x => x.name === 'Cam HEVC').browserOk, false)       // H.265: no picture
+    t.setEncoders([{ id: 'e1', name: 'ESPN 1', format: '1920x1080i@59.94', codec: 'h264_nvenc', kbps: 10000, ageMs: 100, relay: { host: 'h', port: 8895, name: 'ESPN-1' } }])
+    await new Promise(r => setTimeout(r, 1100))      // the portal caches the encoder list for a second
+    await t.monitor.tick()
+    w = (await t.call('/portal/api/wall')).body
+    const gone = w.tiles.filter(x => !x.live).map(x => x.name).sort()
+    assert.deepEqual(gone, ['Cam HEVC', 'LAN only'])
+    assert.equal(w.tiles.find(x => x.name === 'LAN only').alert, 'critical')
+  } finally { await t.close() }
+})

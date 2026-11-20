@@ -3,6 +3,7 @@
 Web side of Arena Link, added next to the existing server services (nothing is replaced):
 
 - **Web links.** Share a live stream as a link that plays in any browser, with an expiry and an optional password. Links can be revoked at any time, and each open is logged.
+- **Wall.** A multiview of every stream on air, one picture per tile (the same thumbnails as the Streams tab, refreshed every few seconds), with its name, state, video rate (received versus announced) and web viewers. A green border is healthy, amber is a low rate, red is a problem; a stream that left in the last 24 hours stays on the wall as a red OFF AIR tile instead of vanishing. Problems sort first. Choose how many tiles across, filter by name, and use Full screen for a monitor on the wall. Click a tile for live video (same limit of live previews as elsewhere). H.265 streams show no picture, as in the Streams tab. Uses the monitoring data, so alerts need the monitor running.
 - **Streams.** Live encoders from the directory: format, codec, bitrate, web viewers, links.
 - **Previews.** A thumbnail per stream (and per decoder, showing what it plays) on the Streams and Decoders tabs; click one for live video. Live previews are limited to three at a time because each sends the full stream to the browser.
 - **Decoders.** See every decoder PC running the Arena Link app and choose which stream each one plays out to SDI.
