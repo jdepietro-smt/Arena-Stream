@@ -313,6 +313,16 @@ target_include_directories(link_paths_test PRIVATE include)
 sdi_target_warnings(link_paths_test)
 add_test(NAME link_paths COMMAND link_paths_test)
 
+add_executable(path_dedupe_test tests/path_dedupe_test.cpp)
+target_include_directories(path_dedupe_test PRIVATE include)
+sdi_target_warnings(path_dedupe_test)
+add_test(NAME path_dedupe COMMAND path_dedupe_test)
+
+add_executable(fec_profile_test tests/fec_profile_test.cpp)
+target_include_directories(fec_profile_test PRIVATE include)
+sdi_target_warnings(fec_profile_test)
+add_test(NAME fec_profile COMMAND fec_profile_test)
+
 add_executable(latency_stamp_test tests/latency_stamp_test.cpp)
 target_include_directories(latency_stamp_test PRIVATE include)
 sdi_target_warnings(latency_stamp_test)

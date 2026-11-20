@@ -10,9 +10,9 @@ type Mode = 'encoder' | 'decoder'
 type Quality = 'low' | 'balanced' | 'max'
 interface QRow { quality: Quality; encoder: string; target_kbps: number; frames: number; psnr: number; psnr_c: number; ssim: number; ssim_min: number; kbps: number; max_kb: number; enc_ms: number; enc_ms_p95: number; dec_ms: number }
 const QUALITY_LABEL: Record<Quality, string> = { low: 'Lowest delay', balanced: 'Balanced', max: 'Best picture' }
-interface StreamCfg { id: string; name: string; device: string; video: 'h264' | 'h265'; codec: 'gpu' | 'cpu'; quality: Quality; adapt: boolean; deinterlace?: boolean; bitrate: number; audio: boolean; remote: boolean; relayLatency: number; port: number }
+interface StreamCfg { id: string; name: string; device: string; video: 'h264' | 'h265'; codec: 'gpu' | 'cpu'; quality: Quality; adapt: boolean; deinterlace?: boolean; bitrate: number; audio: boolean; remote: boolean; relayLatency: number; fec?: 'off' | 'light' | 'standard'; port: number }
 
-interface DecCfg { id: string; output: string; outLevels: 'standard' | 'full' | 'soft'; whiteLevel: number; lanLatency: number; relayLatency: number; selected: string; monitorAudio: boolean }
+interface DecCfg { id: string; output: string; outLevels: 'standard' | 'full' | 'soft'; whiteLevel: number; lanLatency: number; relayLatency: number; fec?: 'off' | 'light' | 'standard'; dualPath?: boolean; selected: string; monitorAudio: boolean }
 interface Config {
   mode: Mode
   directory: string
@@ -424,6 +424,15 @@ function StreamPanel({ stream: e, index, all, cards, scanning, onScan, canRemove
               </select>
             </label>
           )}
+          {e.remote && (
+            <label>Packet loss protection <span className="hint">extra parity data on the way to the server, so lost packets are rebuilt without waiting for a resend. Needs the updated relay.</span>
+              <select value={e.fec ?? 'off'} disabled={live} onChange={ev => set({ fec: ev.target.value as 'off' | 'light' | 'standard' })}>
+                <option value="off">Off</option>
+                <option value="light">Light: about 10% more upload, fixes scattered loss</option>
+                <option value="standard">Standard: about 30% more upload, also fixes bursts</option>
+              </select>
+            </label>
+          )}
           </details>
         </section>
 
@@ -668,7 +677,15 @@ function DecoderPanel({ dec: d, index, all, outputs, outputNote, scanning, onSca
                 {[60, 80, 100, 120, 160, 200, 300].map(v => <option key={v} value={v}>{v} ms</option>)}
               </select>
             </label>
+            <label>Packet loss protection <span className="hint">asked of the relay for this PC's download. Needs the updated relay.</span>
+              <select value={d.fec ?? 'off'} onChange={ev => restartWith({ fec: ev.target.value as 'off' | 'light' | 'standard' })}>
+                <option value="off">Off</option>
+                <option value="light">Light</option>
+                <option value="standard">Standard</option>
+              </select>
+            </label>
           </div>
+          <label className="check"><input type="checkbox" checked={d.dualPath !== false} onChange={ev => restartWith({ dualPath: ev.target.checked })} /> Use both relays at once when the encoder sends to two (no gap if one fails)</label>
           <label className="check"><input type="checkbox" checked={d.monitorAudio} onChange={ev => toggleAudio(ev.target.checked)} /> Monitor audio on this PC</label>
           </details>
           {running && <button className="btn" onClick={disconnect}>DISCONNECT</button>}

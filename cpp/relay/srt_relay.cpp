@@ -13,6 +13,8 @@
 //              LL_PUBLISH_SECRET (required to publish)
 #include <srt/srt.h>
 
+#include "../include/fec_profile.h"
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -67,8 +69,17 @@ bool name_ok(const std::string& n) {
 
 // Runs inside srt_accept's handshake: reject bad ids before a socket exists.
 int listen_cb(void*, SRTSOCKET ns, int, const struct sockaddr*, const char* streamid) {
-    const Id id = parse_id(streamid ? streamid : "");
+    // "read:NAME~fec=light": the peer asked for forward error correction on this connection (see fec_profile.h).
+    std::string fec_profile;
+    const Id id = parse_id(sdi::fec::split_streamid(streamid ? streamid : "", fec_profile));
     if (!name_ok(id.name)) return -1;
+    if (!fec_profile.empty() && fec_profile != "off") {
+        const std::string cfg = sdi::fec::config(fec_profile);
+        if (cfg.empty() || srt_setsockflag(ns, SRTO_PACKETFILTER, cfg.data(), int(cfg.size())) == SRT_ERROR) {
+            std::fprintf(stderr, "relay: refused %s: unusable FEC request '%s'\n", id.name.c_str(), fec_profile.c_str());
+            return -1;
+        }
+    }
     if (id.role == "publish") {
         if (!g_secret.empty() && id.secret != g_secret) return -1;
         return 0;
@@ -166,7 +177,8 @@ int main() {
         char sid[512]; int sl = sizeof(sid);
         std::memset(sid, 0, sizeof(sid));
         srt_getsockflag(s, SRTO_STREAMID, sid, &sl);
-        const Id id = parse_id(sid);
+        std::string fec_unused;
+        const Id id = parse_id(sdi::fec::split_streamid(sid, fec_unused));   // the "~fec=..." request was already applied at the handshake
 
         if (id.role == "publish") {
             std::lock_guard<std::mutex> lk(g_mtx);

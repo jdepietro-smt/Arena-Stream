@@ -74,6 +74,8 @@ struct Opts {
     bool        list = false;
     bool        no_mdns = false, mdns_watch = false;
     int         lan_latency = 40, relay_latency = 100;   // relay 0 = size from the measured RTT (relay_latency.h)
+    bool        dual = true;                 // read two relays at once when the encoder publishes to two (no gap if one fails)
+    std::string fec;                         // "", light, standard: forward error correction asked of the relay
     std::vector<std::string> engine_args;
 };
 
@@ -92,6 +94,8 @@ bool parse(int argc, char** argv, Opts& o) {
         else if (k == "--mdns-watch")    o.mdns_watch = true;
         else if (k == "--lan-latency")   o.lan_latency = std::atoi(next().c_str());
         else if (k == "--relay-latency") o.relay_latency = std::atoi(next().c_str());
+        else if (k == "--no-dual")       o.dual = false;
+        else if (k == "--fec")           { o.fec = next(); if (o.fec == "off") o.fec.clear(); if (!o.fec.empty() && o.fec != "light" && o.fec != "standard") { std::fprintf(stderr, "--fec must be off, light or standard\n"); return false; } }
         else if (k == "--")              { for (++i; i < argc; ++i) o.engine_args.push_back(argv[i]); }
         else { std::fprintf(stderr, "unknown argument: %s\n", k.c_str()); return false; }
     }
@@ -337,10 +341,18 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Two relays carrying the same stream: read both at once (the engine merges them, first copy wins) so the loss of
+        // either one costs nothing. If that cannot start, fall back to trying the paths one by one.
+        struct Attempt { Path p; std::string second; };
+        std::vector<Attempt> attempts;
+        if (o.dual && paths.size() >= 2 && paths[0].kind == "relay" && paths[1].kind == "relay")
+            attempts.push_back({paths[0], paths[1].url});
+        for (const Path& x : paths) attempts.push_back({x, ""});
         bool live_once = false;
-        for (const Path& p_in : paths) {
+        for (const Attempt& at : attempts) {
             if (g_stop || g_select_changed) break;
-            Path p = p_in;
+            Path p = at.p;
+            const std::string shown = at.second.empty() ? p.url : p.url + " + " + at.second;
             double probe_ms = -1;
             // This leg (relay -> decoder) is sized from this PC's own RTT to the relay, which lives on the
             // directory's host unless the encoder said otherwise.
@@ -349,16 +361,21 @@ int main(int argc, char** argv) {
                 if (relay_is_dir) probe_ms = sdi::net::tcp_rtt_ms(dir.host, dir.port);
                 p.latency_ms = sdi::link::auto_relay_latency_ms(probe_ms);
             }
-            state("connecting", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
+            state("connecting", enc->name, p.kind, shown, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
             std::vector<std::string> args{"--src", p.url, "--latency", std::to_string(p.latency_ms)};
+            if (!at.second.empty()) { args.push_back("--src2"); args.push_back(at.second); }
+            if (p.kind == "relay" && !o.fec.empty()) { args.push_back("--fec"); args.push_back(o.fec); }
             args.insert(args.end(), o.engine_args.begin(), o.engine_args.end());
             const auto t0 = std::chrono::steady_clock::now();
             const EngineResult r = run_engine(engine, args, job, [&] {
                 last_ok_enc = enc->id; last_ok_url = p.url;
-                state("live", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
+                state("live", enc->name, p.kind, shown, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
             });
             if (r.killed) break;
-            if (p.kind == "relay") relay_failed[p.url] = std::chrono::steady_clock::now();   // dropped or never came up: others first next time
+            if (p.kind == "relay") {   // dropped or never came up: others first next time
+                relay_failed[p.url] = std::chrono::steady_clock::now();
+                if (!at.second.empty()) relay_failed[at.second] = std::chrono::steady_clock::now();
+            }
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             state(r.went_live ? "ended" : "failed", enc->name, p.kind,
                   "engine exit " + std::to_string(r.exit_code) + " after " + std::to_string(int(secs)) + "s");

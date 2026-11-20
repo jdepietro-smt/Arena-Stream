@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include "fec_profile.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -44,6 +46,7 @@ struct FanoutConfig {
     std::string relay_name;
     std::string relay_secret;
     int         relay_latency_ms   = 100;
+    std::string relay_fec;                   // "", "light" or "standard": forward error correction to the relay (see fec_profile.h)
     int64_t     pace_bytes_per_sec = 0;      // SRT send-rate cap (SRTO_MAXBW); 0 = SRT default (unpaced)
 };
 
@@ -213,10 +216,12 @@ private:
     };
 
     void relay_loop(Leg& leg) {
-        const std::string sid = "publish:" + cfg_.relay_name + ":" + cfg_.relay_secret;
+        const std::string sid = sdi::fec::tag_streamid("publish:" + cfg_.relay_name + ":" + cfg_.relay_secret, cfg_.relay_fec);
+        const std::string fec = sdi::fec::config(cfg_.relay_fec);
         while (!stop_) {
             SRTSOCKET s = srt_create_socket();
             common_opts(s, cfg_.relay_latency_ms);
+            if (!fec.empty()) srt_setsockflag(s, SRTO_PACKETFILTER, fec.data(), int(fec.size()));
             srt_setsockflag(s, SRTO_STREAMID, sid.data(), int(sid.size()));
             const int tmo = 2000;
             srt_setsockflag(s, SRTO_CONNTIMEO, &tmo, sizeof(tmo));

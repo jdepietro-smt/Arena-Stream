@@ -74,11 +74,11 @@ function findBin(name: string): string | null {
 // Config (one JSON file in the user's app-data folder)
 // ─────────────────────────────────────────────────────────────────────────────
 // One outgoing stream: its own input, name and LAN port.
-interface StreamCfg { id: string; name: string; device: string; video: 'h264' | 'h265'; codec: 'gpu' | 'cpu'; quality: 'low' | 'balanced' | 'max'; adapt: boolean; deinterlace?: boolean; bitrate: number; audio: boolean; remote: boolean; relayLatency: number; port: number }
+interface StreamCfg { id: string; name: string; device: string; video: 'h264' | 'h265'; codec: 'gpu' | 'cpu'; quality: 'low' | 'balanced' | 'max'; adapt: boolean; deinterlace?: boolean; bitrate: number; audio: boolean; remote: boolean; relayLatency: number; fec?: 'off' | 'light' | 'standard'; port: number }
 const STREAM_DEFAULTS = { name: '', device: '', video: 'h264' as const, codec: 'gpu' as const, quality: 'balanced' as const, adapt: true, bitrate: 10000, audio: true, remote: true, relayLatency: 0 }
 
 // One receiving decoder: its own source encoder, output and buffers. Several can run at once.
-interface DecCfg { id: string; output: string; outLevels: 'standard' | 'full' | 'soft'; whiteLevel: number; lanLatency: number; relayLatency: number; selected: string; monitorAudio: boolean }
+interface DecCfg { id: string; output: string; outLevels: 'standard' | 'full' | 'soft'; whiteLevel: number; lanLatency: number; relayLatency: number; fec?: 'off' | 'light' | 'standard'; dualPath?: boolean; selected: string; monitorAudio: boolean }
 const DEC_DEFAULTS = { output: 'preview', outLevels: 'standard' as const, whiteLevel: 100, lanLatency: 40, relayLatency: 0, selected: '', monitorAudio: false }
 
 interface Config {
@@ -363,7 +363,7 @@ function startEncoder(id: string): { ok: boolean; error?: string } {
     '--direct-port', String(s.port),
     '--directory', c.directory,
     '--preview',
-    ...(s.remote && c.relayHost ? ['--relay', c.relayHost, '--relay-latency', String(s.relayLatency)] : []),
+    ...(s.remote && c.relayHost ? ['--relay', c.relayHost, '--relay-latency', String(s.relayLatency), ...(s.fec && s.fec !== 'off' ? ['--relay-fec', s.fec] : [])] : []),
   ]
   send('log', `[encoder ${s.name.trim()}] ${path.basename(bin)} ${args.join(' ')}`)
 
@@ -629,6 +629,8 @@ function startDecoder(id: string, select: string): { ok: boolean; error?: string
     ...(select ? ['--select', select] : []),
     '--lan-latency', String(d.lanLatency),
     '--relay-latency', String(d.relayLatency),
+    ...(d.fec && d.fec !== 'off' ? ['--fec', d.fec] : []),
+    ...(d.dualPath === false ? ['--no-dual'] : []),
     '--',
     ...(out ? ['--backend', out.backend, '--device', out.device, '--conn', out.conn, '--achannels', '2', ...(d.outLevels === 'full' || d.outLevels === 'soft' ? ['--out-range', 'full'] : []),
                                     ...(d.whiteLevel < 100 ? ['--white-level', String(d.whiteLevel)] : [])] : ['--preview-only']),

@@ -61,6 +61,7 @@ struct Args {
     std::string relay;                        // "IPv4[:port]" (default port 8895); empty = LAN only
     std::string relay_secret;
     int         relay_latency_ms = 100;       // 0 = size it from the measured RTT to the server (see relay_latency.h)
+    std::string relay_fec;                    // "", light, standard: forward error correction on the way to the relay
     bool        mdns = true;                  // advertise on the local network (_arenalink._udp)
     std::string directory;                    // "http://host:port"; empty = no announce
     std::string key;
@@ -80,7 +81,7 @@ void usage() {
         "link_encoder --name NAME [--backend aja|decklink] [--device N] [--conn sdi|N] [--reference freerun|inputN]\n"
         "             [--codec gpu|cpu|ENC] [--bitrate KBPS] [--acodec libopus|none] [--abitrate KBPS] [--achannels N]\n"
         "             [--direct-port P] [--direct-latency MS]\n"
-        "             [--relay IPV4[:PORT] --relay-secret S [--relay-latency MS]]\n"
+        "             [--relay IPV4[:PORT][,IPV4[:PORT]] --relay-secret S [--relay-latency MS] [--relay-fec off|light|standard]]\n"
         "             [--directory http://HOST:PORT --key KEY]\n");
 }
 
@@ -106,6 +107,7 @@ bool parse(int argc, char** argv, Args& a) {
         else if (k == "--relay")            a.relay = next();
         else if (k == "--relay-secret")     a.relay_secret = next();
         else if (k == "--relay-latency")    a.relay_latency_ms = std::atoi(next());
+        else if (k == "--relay-fec")        { a.relay_fec = next(); if (!sdi::fec::known(a.relay_fec)) { std::fprintf(stderr, "--relay-fec must be off, light or standard\n"); std::exit(2); } }
         else if (k == "--directory")        a.directory = next();
         else if (k == "--key")              a.key = next();
         else if (k == "--preview")          a.preview = true;
@@ -398,13 +400,17 @@ int main(int argc, char** argv) {
                       << (relay_probe_ms > 0 ? std::to_string(int(relay_probe_ms)) + " ms RTT to the server" : std::string("RTT not measurable, default")) << ")\n";
         }
         fc.relay_latency_ms = relay_latency;
+        fc.relay_fec        = (args.relay_fec == "off" ? std::string() : args.relay_fec);
     }
     // SRT pacing: video + audio + TS/SRT overhead, times headroom for bursts and retransmits.
     // A wider rate-control buffer (balanced/max) lets one frame be several times the average, so
     // those profiles get more headroom; a tighter cap would just move the burst into the SRT delay.
     const double pace_headroom = enc.quality() == "max" ? 2.5 : enc.quality() == "balanced" ? 2.0 : 1.25;
+    // Forward error correction sends parity packets on top of the video (about 10% for light, 30% for standard); the cap has to
+    // leave room for them or the send queue backs up and delay climbs (measured: standard FEC under a 1.25x cap added ~900 ms).
+    const double fec_extra = fc.relay_fec == "standard" ? 1.30 : fc.relay_fec == "light" ? 1.10 : 1.0;
     auto pace_for = [&](int video_kbps) {
-        return int64_t((video_kbps + (audio_on ? args.audio_kbps : 0)) * 1000.0 / 8.0 * 1.12 * pace_headroom);
+        return int64_t((video_kbps + (audio_on ? args.audio_kbps : 0)) * 1000.0 / 8.0 * 1.12 * pace_headroom * fec_extra);
     };
     fc.pace_bytes_per_sec = pace_for(enc.current_bitrate_kbps());
     auto fanout = std::make_unique<sdi::TsFanout>(fc);

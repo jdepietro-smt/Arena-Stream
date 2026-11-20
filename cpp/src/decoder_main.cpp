@@ -19,11 +19,16 @@
 #include "crash_report.h"
 #include "playout_device.h"
 #include "frame_queue.h"
+#include "fec_profile.h"
+#include "path_dedupe.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -86,6 +91,8 @@ struct Args {
                                             // down (for a TV that renders whites too hot)
     uint32_t    preview_width = 960;       // monitor picture width sent to the app (smaller = far less data)
     int         preview_fps = 0;           // monitor picture rate cap; 0 = the stream's own rate
+    std::string src2;                      // second path (another relay carrying the same stream): both are read at once
+    std::string fec;                       // "", light, standard: forward error correction asked of the relay (see fec_profile.h)
 };
 
 // Highlight roll-down on the luma of a UYVY buffer, in place. Below the knee (65% of the range)
@@ -117,6 +124,8 @@ static bool parse_args(int argc, char** argv, Args& a) {
         else if (arg=="--device")            a.device_id  = nxt();
         else if (arg=="--conn")              a.connection = nxt();
         else if (arg=="--latency")           a.latency    = std::atoi(nxt());
+        else if (arg=="--src2")              a.src2       = nxt();
+        else if (arg=="--fec")               { a.fec = nxt(); if (!sdi::fec::known(a.fec)) { std::cerr << "error: --fec must be off, light or standard\n"; return false; } if (a.fec == "off") a.fec.clear(); }
         else if (arg=="--achannels")         a.audio_channels = uint32_t(std::atoi(nxt()));
         else if (arg=="--preview-only")      a.preview_only = true;
         else if (arg=="--force-progressive") a.force_progressive = true;
@@ -278,6 +287,83 @@ static int srt_read_cb(void* opaque, uint8_t* buf, int sz) {
     return (n <= 0) ? AVERROR_EOF : n;
 }
 
+// One connected SRT source with its MPEG-TS demuxer.
+struct Source {
+    SRTSOCKET        sock = SRT_INVALID_SOCK;
+    AVIOContext*     avio = nullptr;
+    AVFormatContext* fmt  = nullptr;
+};
+
+static void close_source(Source& s) {
+    if (s.sock != SRT_INVALID_SOCK) srt_close(s.sock);
+    s.sock = SRT_INVALID_SOCK;
+    if (s.fmt) avformat_close_input(&s.fmt);
+    if (s.avio) { av_freep(&s.avio->buffer); avio_context_free(&s.avio); }
+}
+
+// Connects to an srt:// URL and opens the MPEG-TS demuxer on it (no probing: the stream is always H.264/Opus in MPEG-TS).
+//
+// mediamtx and the Arena relay serve many streams on one port and pick one by the streamid in the URL query
+// (?streamid=read:<name>), so that has to be passed on. SRTO_RCVLATENCY takes milliseconds through the C API (the URI's
+// ?latency= is microseconds). If forward error correction is asked for and this is a relay connection (streamid "read:..."),
+// the socket gets the filter and the stream id carries the request so the relay applies the same on its side.
+static bool open_source(const std::string& url, int latency_ms, const std::string& fec_profile, Source& s, std::string& why) {
+    std::string hp = url;
+    if (hp.substr(0, 6) == "srt://") hp = hp.substr(6);
+    const auto q = hp.find('?');
+    const std::string query = (q != std::string::npos) ? hp.substr(q + 1) : "";
+    if (q != std::string::npos) hp = hp.substr(0, q);
+    const auto col = hp.rfind(':');
+    const std::string host = (col != std::string::npos) ? hp.substr(0, col) : hp;
+    const int port = (col != std::string::npos) ? std::atoi(hp.substr(col + 1).c_str()) : 4200;
+
+    std::string streamid;
+    {
+        const std::string key = "streamid=";
+        const auto pos = query.find(key);
+        if (pos != std::string::npos) {
+            const auto start = pos + key.size();
+            const auto end = query.find('&', start);
+            streamid = query.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        }
+    }
+
+    s.sock = srt_create_socket();
+    int lat = latency_ms;
+    srt_setsockopt(s.sock, 0, SRTO_RCVLATENCY, &lat, sizeof(lat));
+    if (!streamid.empty()) {
+        const std::string cfg = streamid.rfind("read:", 0) == 0 ? sdi::fec::config(fec_profile) : std::string();
+        if (!cfg.empty()) {
+            srt_setsockopt(s.sock, 0, SRTO_PACKETFILTER, cfg.data(), int(cfg.size()));
+            streamid = sdi::fec::tag_streamid(streamid, fec_profile);
+        }
+        srt_setsockopt(s.sock, 0, SRTO_STREAMID, streamid.c_str(), int(streamid.size()));
+    }
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET; sa.sin_port = htons(uint16_t(port));
+    inet_pton(AF_INET, host.c_str(), &sa.sin_addr);
+    std::cerr << "sdi_decoder: connecting to " << host << ":" << port << "\n";
+    if (srt_connect(s.sock, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) < 0) {
+        why = std::string("connect failed: ") + srt_getlasterror_str();
+        close_source(s);
+        return false;
+    }
+
+    const int AVIO_SZ = 188 * 16;
+    uint8_t* avio_buf = static_cast<uint8_t*>(av_malloc(AVIO_SZ));
+    s.avio = avio_alloc_context(avio_buf, AVIO_SZ, 0, &s.sock, srt_read_cb, nullptr, nullptr);
+    s.fmt = avformat_alloc_context();
+    s.fmt->pb = s.avio;
+    s.fmt->probesize = 0;
+    s.fmt->max_analyze_duration = 0;
+    if (avformat_open_input(&s.fmt, nullptr, av_find_input_format("mpegts"), nullptr) < 0) {
+        why = "avformat_open_input failed";
+        close_source(s);
+        return false;
+    }
+    return true;
+}
+
 // ─── Stats ────────────────────────────────────────────────────────────────────
 struct Stats {
     double  rtt_ms       = 0;
@@ -291,6 +377,11 @@ struct Stats {
     double  decode_ms    = 0;    // mean time in the decoder per frame (diagnoses a CPU-bound decode PC)
     double  out_ms       = 0;    // mean time blocked handing a frame to the SDI output
     int64_t skipped      = 0;    // frames not output while catching up after falling behind (cumulative)
+    int     paths        = 1;    // network paths being read (2 = two relays at once)
+    int     paths_up     = 1;
+    uint64_t wins[2]     = {0, 0};   // packets each path delivered first (two paths only)
+    uint64_t dups        = 0;    // second copies dropped
+    uint64_t late        = 0;    // copies that came too late to use
     std::string format;
     std::string decoder;         // "d3d11va" | "dxva2" | "software"
 };
@@ -308,6 +399,11 @@ static void emit_stats(const Stats& s) {
               << ",\"decodeMs\":"    << s.decode_ms
               << ",\"outMs\":"       << s.out_ms
               << ",\"skipped\":"     << s.skipped
+              << ",\"paths\":"       << s.paths
+              << ",\"pathsUp\":"     << s.paths_up
+              << ",\"pathWins\":["   << s.wins[0] << "," << s.wins[1] << "]"
+              << ",\"dupDropped\":"  << s.dups
+              << ",\"lateDropped\":" << s.late
               << ",\"decoder\":\""   << s.decoder << "\""
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
@@ -446,73 +542,25 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ── 2. Parse SRT URI ────────────────────────────────────────────────
-    // mediamtx's SRT listener is a single socket shared by every path —
-    // it uses the streamid (the ?streamid=read:<path> query param) to pick
-    // which path to serve. Query params were previously stripped out to
-    // find host/port and then discarded entirely, so mediamtx received a
-    // connection with no streamid and rejected it (ERROR:PEER) no matter
-    // which stream was selected.
-    std::string raw = args.src;
-    std::string hp = raw; if (hp.substr(0,6)=="srt://") hp=hp.substr(6);
-    auto q = hp.find('?');
-    std::string query = (q!=std::string::npos) ? hp.substr(q+1) : "";
-    if (q!=std::string::npos) hp=hp.substr(0,q);
-    auto col = hp.rfind(':');
-    std::string host = (col!=std::string::npos) ? hp.substr(0,col) : hp;
-    int  port        = (col!=std::string::npos) ? std::atoi(hp.substr(col+1).c_str()) : 4200;
-
-    std::string streamid;
+    // ── 2-4. Connect and open the MPEG-TS demuxer (see open_source). ─────────────────
+    auto* src1 = new Source;
     {
-        const std::string key = "streamid=";
-        auto pos = query.find(key);
-        if (pos != std::string::npos) {
-            auto start = pos + key.size();
-            auto end   = query.find('&', start);
-            streamid   = query.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        std::string why;
+        bool ok = open_source(args.src, args.latency, args.fec, *src1, why);
+        if (!ok && !args.src2.empty()) {      // the first path is down: start on the second, the first is retried in the background
+            std::cerr << "sdi_decoder: path 1 unavailable (" << why << "), starting on path 2\n";
+            std::swap(args.src, args.src2);
+            *src1 = Source{};
+            ok = open_source(args.src, args.latency, args.fec, *src1, why);
         }
-    }
-
-    // ── 3. Open SRT socket ──────────────────────────────────────────────
-    // SRTO_RCVLATENCY takes MILLISECONDS via the C API (unlike the srt://
-    // URI's ?latency= query param, which is microseconds) — passing
-    // args.latency*1000 here was requesting e.g. 40000ms (40s) instead of
-    // 40ms, so every connection over-buffered until the 8192-packet receive
-    // window overflowed before anything became playable.
-    SRTSOCKET sock = srt_create_socket();
-    {
-        int lat_ms = args.latency;
-        srt_setsockopt(sock, 0, SRTO_RCVLATENCY, &lat_ms, sizeof(lat_ms));
-        if (!streamid.empty()) {
-            srt_setsockopt(sock, 0, SRTO_STREAMID, streamid.c_str(), int(streamid.size()));
+        if (!ok) {
+            std::cerr << "sdi_decoder: " << why << "\n";
+            srt_cleanup(); return 1;
         }
-    }
-    struct sockaddr_in sa{};
-    sa.sin_family = AF_INET; sa.sin_port = htons((uint16_t)port);
-    inet_pton(AF_INET, host.c_str(), &sa.sin_addr);
-
-    std::cerr << "sdi_decoder: connecting to " << host << ":" << port << "\n";
-    if (srt_connect(sock, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        std::cerr << "sdi_decoder: connect failed: " << srt_getlasterror_str() << "\n";
-        srt_cleanup(); return 1;
     }
     std::cerr << "sdi_decoder: connected\n";
-
-    // ── 4. Wrap SRT in AVIO, force MPEG-TS format (skip probing). ──────
-    const int AVIO_SZ = 188 * 16;
-    uint8_t* avio_buf = (uint8_t*)av_malloc(AVIO_SZ);
-    AVIOContext* avio = avio_alloc_context(avio_buf, AVIO_SZ, 0, &sock,
-                                           srt_read_cb, nullptr, nullptr);
-    const AVInputFormat* mpegts_fmt = av_find_input_format("mpegts");
-
-    AVFormatContext* fmt = avformat_alloc_context();
-    fmt->pb                   = avio;
-    fmt->probesize            = 0;
-    fmt->max_analyze_duration = 0;
-
-    if (avformat_open_input(&fmt, nullptr, mpegts_fmt, nullptr) < 0) {
-        std::cerr << "sdi_decoder: avformat_open_input failed\n"; return 1;
-    }
+    SRTSOCKET& sock = src1->sock;
+    AVFormatContext*& fmt = src1->fmt;
 
     // ── 5. Find video + audio streams (read a few packets if not already
     //    known from PAT/PMT — same approach as sdi_player.cpp). ─────────
@@ -540,7 +588,10 @@ int main(int argc, char** argv) {
               << (asi >= 0 ? (", audio on stream " + std::to_string(asi)) : ", no audio") << "\n";
 
     // ── 6. Video decoder. ────────────────────────────────────────────────
-    AVCodecParameters* vpar = fmt->streams[vsi]->codecpar;
+    // With two paths a reader thread keeps demuxing from `fmt`, so work from a private copy of the parameters.
+    AVCodecParameters* vpar_copy = nullptr;
+    if (!args.src2.empty()) { vpar_copy = avcodec_parameters_alloc(); avcodec_parameters_copy(vpar_copy, fmt->streams[vsi]->codecpar); }
+    AVCodecParameters* vpar = vpar_copy ? vpar_copy : fmt->streams[vsi]->codecpar;
     const AVCodec* vdec = avcodec_find_decoder(vpar->codec_id);
     AVCodecContext* vdec_ctx = avcodec_alloc_context3(vdec);
     avcodec_parameters_to_context(vdec_ctx, vpar);
@@ -641,8 +692,80 @@ int main(int argc, char** argv) {
         preview_pacer_loop(st, preview_queue, preview_mode_ready, preview_mode, args.preview_fps);
     });
 
+    // ── 8b. Two paths (--src2): read both relays at once and use whichever copy of each packet arrives first. ─────
+    // A healthy pair costs no extra delay (the first copy goes straight on); if either relay or its network path fails the
+    // other carries the stream with no gap, and the failed one is reconnected in the background.
+    const bool dual = !args.src2.empty();
+    struct Merged {
+        std::mutex m; std::condition_variable cv; std::deque<AVPacket*> q;
+        sdi::PathDedupe dedupe; uint64_t first[2] = {0, 0}, dup = 0, late = 0;
+    } merged;
+    std::atomic<bool> readers_stop{false};
+    std::atomic<SRTSOCKET> path_sock[2] = {SRT_INVALID_SOCK, SRT_INVALID_SOCK};
+    std::atomic<bool> path_up[2] = {false, false};
+    std::jthread readers[2];
+    auto steady_us = [] { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    auto reader = [&](int idx, Source* initial, std::string url) {
+        Source* cur = initial;
+        bool owned = false;                                   // the first source belongs to main; later ones to this thread
+        AVPacket* p = av_packet_alloc();
+        while (!readers_stop) {
+            if (!cur) {
+                auto* n = new Source;
+                std::string why;
+                if (!open_source(url, args.latency, args.fec, *n, why)) {
+                    close_source(*n); delete n;
+                    for (int i = 0; i < 10 && !readers_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                cur = n; owned = true;
+                std::cerr << "sdi_decoder: path " << idx + 1 << " connected\n";
+            }
+            path_sock[idx] = cur->sock; path_up[idx] = true;
+            while (!readers_stop && av_read_frame(cur->fmt, p) >= 0) {
+                if (p->stream_index >= 0 && unsigned(p->stream_index) < cur->fmt->nb_streams) {
+                    const int64_t ts = p->dts != AV_NOPTS_VALUE ? p->dts : p->pts;
+                    std::lock_guard<std::mutex> lk(merged.m);
+                    const auto v = ts == AV_NOPTS_VALUE ? sdi::PathDedupe::Fresh
+                        : merged.dedupe.check(p->stream_index, av_rescale_q(ts, cur->fmt->streams[p->stream_index]->time_base, AVRational{1, 1000000}), steady_us());
+                    if (v == sdi::PathDedupe::Fresh) {
+                        AVPacket* c = av_packet_alloc();
+                        if (c && av_packet_ref(c, p) == 0) {
+                            if (merged.q.size() >= 512) { av_packet_free(&merged.q.front()); merged.q.pop_front(); }
+                            merged.q.push_back(c); ++merged.first[idx]; merged.cv.notify_one();
+                        } else av_packet_free(&c);
+                    } else if (v == sdi::PathDedupe::Duplicate) ++merged.dup;
+                    else ++merged.late;
+                }
+                av_packet_unref(p);
+            }
+            av_packet_unref(p);
+            path_up[idx] = false; path_sock[idx] = SRT_INVALID_SOCK;
+            if (!readers_stop) std::cerr << "sdi_decoder: path " << idx + 1 << " lost, reconnecting in the background\n";
+            if (owned) { close_source(*cur); delete cur; }
+            cur = nullptr; owned = false;
+            for (int i = 0; i < 3 && !readers_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        av_packet_free(&p);
+    };
+    if (dual) {
+        readers[0] = std::jthread([&] { reader(0, src1, args.src); });
+        readers[1] = std::jthread([&] { reader(1, nullptr, args.src2); });
+        std::cerr << "sdi_decoder: reading two paths at once\n";
+    }
+    auto next_packet = [&](AVPacket* out) -> bool {
+        if (!dual) return av_read_frame(fmt, out) >= 0;
+        std::unique_lock<std::mutex> lk(merged.m);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+        while (merged.q.empty())
+            if (merged.cv.wait_until(lk, deadline) == std::cv_status::timeout && merged.q.empty()) return false;   // both paths silent: the supervisor reconnects
+        AVPacket* head = merged.q.front(); merged.q.pop_front();
+        av_packet_move_ref(out, head); av_packet_free(&head);
+        return true;
+    };
+
     // ── 9. Decode loop. ──────────────────────────────────────────────────
-    while (av_read_frame(fmt, pkt) >= 0) {
+    while (next_packet(pkt)) {
         bytes_recv += pkt->size;
 
         if (pkt->stream_index == vsi) {
@@ -1033,7 +1156,15 @@ int main(int argc, char** argv) {
         if (stats_ms >= 200) {
             t_last_stats = now;
             SRT_TRACEBSTATS s{};
-            if (srt_bistats(sock, &s, 1, 1) == 0) {
+            SRTSOCKET sk = sock;
+            if (dual) {
+                sk = path_sock[0].load();
+                if (sk == SRT_INVALID_SOCK) sk = path_sock[1].load();
+                std::lock_guard<std::mutex> lk(merged.m);
+                stats.paths = 2; stats.paths_up = int(path_up[0].load()) + int(path_up[1].load());
+                stats.wins[0] = merged.first[0]; stats.wins[1] = merged.first[1]; stats.dups = merged.dup; stats.late = merged.late;
+            } else stats.paths_up = 1;
+            if (sk != SRT_INVALID_SOCK && srt_bistats(sk, &s, 1, 1) == 0) {
                 stats.rtt_ms   = s.msRTT;
                 stats.pkt_loss = s.pktRcvLossTotal;
                 stats.pkt_drop = s.pktRcvDropTotal;
@@ -1048,6 +1179,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (dual) {      // wake the readers (they are blocked in a receive), then wait for them
+        readers_stop = true;
+        for (auto& ps : path_sock) { const SRTSOCKET x = ps.exchange(SRT_INVALID_SOCK); if (x != SRT_INVALID_SOCK) srt_close(x); }
+        for (auto& r : readers) if (r.joinable()) r.join();
+        std::lock_guard<std::mutex> lk(merged.m);
+        for (AVPacket* q : merged.q) av_packet_free(&q);
+        merged.q.clear();
+    }
     if (playout) playout->stop();
     srt_close(sock);
     srt_cleanup();

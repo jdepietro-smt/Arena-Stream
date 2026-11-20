@@ -50,3 +50,20 @@ windows. Window is a setting, not a constant.
 - Every stage reports its own timing; the decoder shows the breakdown and has a
   one-click "copy report".
 - Nothing ships without a measured test against a reference.
+
+## Redundancy and error protection
+
+Two independent protections for the internet path, used together or alone:
+
+- **Two relays at once (hitless).** An encoder given two relays (`--relay A,B`) sends the stream to both. A decoder that finds two
+  relays in the announce reads both and merges them first-copy-wins (`path_dedupe.h`): a healthy pair costs no extra delay (measured
+  identical to one path), and if either relay or its network path fails the picture carries on from the other with no gap while the
+  failed one reconnects in the background. If the first relay is down when the decoder starts, it starts on the second. Costs a full
+  second copy of the encoder's uplink and of the decoder's download.
+- **Forward error correction (FEC) per hop.** SRT's packet filter adds parity packets so a receiver rebuilds lost packets instead of
+  waiting a round trip for a resend. `light` (cols 10, rows 1, about 10% extra) repairs scattered single losses; `standard` (10 x 5,
+  about 30% extra) also repairs bursts. Measured at 3% random loss, retransmissions fell from 2.7% to 0.9% (light) and 0.0%
+  (standard); with bursts of 5 lost packets, light does nothing and standard repairs them all. Each hop is protected on its own
+  (encoder to relay: `--relay-fec`; relay to decoder: `--fec`). The setting rides in the SRT stream id (`read:NAME~fec=light`), so
+  programs that do not send it get no FEC and keep working; the relay must be the new build to accept it.
+  The encoder's send-rate cap is raised to leave room for the parity packets, otherwise the queue backs up (measured +900 ms).
