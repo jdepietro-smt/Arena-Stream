@@ -24,6 +24,8 @@ struct EncoderInfo {
     int         relay_port  = 0;      // 0 = encoder isn't publishing to a relay
     std::string relay_name;
     bool        local = false;        // heard on this network by mDNS: its LAN address is reachable
+    struct Relay { std::string host; int port = 0; };
+    std::vector<Relay> more_relays;   // further relays that carry the same stream (failover); tried after the first
 };
 
 struct Path {
@@ -59,6 +61,12 @@ inline bool parse_encoders(const std::string& body, std::vector<EncoderInfo>& ou
             i.relay_name = r->str("name");
             i.relay_host = r->str("host");
         }
+        // "relays" lists every relay the encoder publishes to, the first being the same as "relay" (older decoders
+        // read only that one). The rest are failover targets.
+        if (const json::Value* rs = e.get("relays"); rs && rs->type == json::Value::Arr)
+            for (size_t k = 1; k < rs->a.size(); ++k)
+                if (rs->a[k].type == json::Value::Obj && int(rs->a[k].num("port")) > 0)
+                    i.more_relays.push_back({rs->a[k].str("host"), int(rs->a[k].num("port"))});
         if (!i.id.empty() && !i.name.empty()) out.push_back(std::move(i));
     }
     return true;
@@ -73,8 +81,31 @@ inline std::vector<Path> choose_paths(const EncoderInfo& e, const std::string& y
         const std::string host = e.relay_host.empty() ? p.directory_host : e.relay_host;
         out.push_back({"relay", "srt://" + host + ":" + std::to_string(e.relay_port) + "?streamid=read:" + e.relay_name,
                        p.relay_latency_ms});
+        for (const auto& r : e.more_relays) {
+            const std::string h = r.host.empty() ? p.directory_host : r.host;
+            out.push_back({"relay", "srt://" + h + ":" + std::to_string(r.port) + "?streamid=read:" + e.relay_name,
+                           p.relay_latency_ms});
+        }
     }
     return out;
+}
+
+// After a relay has worked, try it again before the others: switching back and forth between relays on every
+// reconnect would cost a connect timeout each time. A LAN path stays first. `last_ok` is the url that was live.
+inline void prefer_last_good(std::vector<Path>& paths, const std::string& last_ok) {
+    if (last_ok.empty()) return;
+    auto it = std::find_if(paths.begin(), paths.end(), [&](const Path& x) { return x.kind == "relay" && x.url == last_ok; });
+    if (it == paths.end()) return;
+    auto first_relay = std::find_if(paths.begin(), paths.end(), [](const Path& x) { return x.kind == "relay"; });
+    if (it != first_relay) std::rotate(first_relay, it, it + 1);
+}
+
+// After a relay failed to go live, try the others first next time: the failed one goes last among the relays.
+inline void demote_failed(std::vector<Path>& paths, const std::string& failed) {
+    auto it = std::find_if(paths.begin(), paths.end(), [&](const Path& x) { return x.kind == "relay" && x.url == failed; });
+    if (it == paths.end()) return;
+    auto last_relay = std::find_if(paths.rbegin(), paths.rend(), [](const Path& x) { return x.kind == "relay"; }).base();
+    if (it + 1 != last_relay) std::rotate(it, it + 1, last_relay);
 }
 
 // Selector matches id or name, case-insensitively. Empty selector picks the first encoder.

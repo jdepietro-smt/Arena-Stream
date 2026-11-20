@@ -33,7 +33,7 @@ interface DirState { ok: boolean; error?: string; yourIp?: string; encoders: Dir
 
 interface EncStats {
   name: string; format: string; source: string; fps: number; kbps: number
-  viewers: number; relayUp: boolean; relayRttMs: number; capDrops: number; directory: 'ok' | 'failed' | 'off'
+  viewers: number; relayUp: boolean; relaysUp?: number; relaysTotal?: number; relayRttMs: number; capDrops: number; directory: 'ok' | 'failed' | 'off'
   lossPct?: number; targetKbps?: number; adapt?: boolean; warn?: string
   relayLatencyMs?: number; relayAuto?: boolean; relayProbeMs?: number
 }
@@ -407,8 +407,9 @@ function StreamPanel({ stream: e, index, all, cards, scanning, onScan, canRemove
             <Tile label="Frame rate" value={stats ? stats.fps.toFixed(1) : '-'} unit="fps" />
             <Tile label="Bitrate" value={stats ? (stats.kbps / 1000).toFixed(1) : '-'} unit="Mbps" />
             <Tile label="Viewers on LAN" value={stats ? String(stats.viewers) : '-'} />
-            <Tile label="Relay" value={!stats || !e.remote ? '-' : stats.relayUp ? 'connected' : 'connecting'} cls={stats && e.remote ? (stats.relayUp ? 'ok' : 'warn') : ''}
-                  sub={stats?.relayUp && stats.relayRttMs > 0 ? `${f0(stats.relayRttMs)} ms to server` : ''} />
+            <Tile label="Relay" value={!stats || !e.remote ? '-' : (stats.relaysTotal ?? 1) > 1 ? `${stats.relaysUp ?? 0} of ${stats.relaysTotal} connected` : stats.relayUp ? 'connected' : 'connecting'}
+                  cls={stats && e.remote ? ((stats.relaysTotal ?? 1) > 1 ? ((stats.relaysUp ?? 0) === stats.relaysTotal ? 'ok' : 'warn') : stats.relayUp ? 'ok' : 'warn') : ''}
+                  sub={stats?.relayUp && stats.relayRttMs > 0 ? `${f0(stats.relayRttMs)} ms to server` : (stats && e.remote && (stats.relaysTotal ?? 1) > 1 && (stats.relaysUp ?? 0) === 0 ? 'no relay reachable' : (stats && e.remote && (stats.relaysTotal ?? 1) > 1 && stats.relaysUp !== stats.relaysTotal ? 'running without a backup' : ''))} />
             <Tile label="Directory" value={dirState} cls={stats ? (stats.directory === 'ok' ? 'ok' : 'bad') : ''}
                   sub={stats && stats.directory === 'ok' ? (onAirHere ? 'visible to decoders' : '') : ''} />
             <Tile label="Dropped frames" value={stats ? String(stats.capDrops) : '-'} cls={stats && stats.capDrops > 10 ? 'warn' : ''} />
@@ -720,7 +721,7 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
         <p className="muted small">Set once per PC. Every encoder and decoder that uses the same directory sees each other automatically.</p>
         <label>Directory address<input value={directory} onChange={e => setDirectory(e.target.value)} placeholder="http://server:8002" /></label>
         <label>Access key<input type="password" value={key} onChange={e => setKey(e.target.value)} /></label>
-        <label>Relay server <span className="hint">for decoders on other networks</span><input value={relayHost} onChange={e => setRelayHost(e.target.value)} placeholder="server IP address" /></label>
+        <label>Relay server <span className="hint">for decoders on other networks. Add a backup after a comma; the stream is sent to both, so it uses twice the upload.</span><input value={relayHost} onChange={e => setRelayHost(e.target.value)} placeholder="server IP address, backup IP address" /></label>
         <label>Relay password <span className="hint">encoders only</span><input type="password" value={relaySecret} onChange={e => setRelaySecret(e.target.value)} /></label>
         <div className="row">
           <button className="btn" onClick={test}>TEST</button>

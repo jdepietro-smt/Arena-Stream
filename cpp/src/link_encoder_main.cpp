@@ -214,6 +214,14 @@ static std::string relay_safe_name(const std::string& n) {
     return o.empty() ? "stream" : o;
 }
 
+// Every relay this encoder publishes to, for the announce: [{"host":..,"port":..,"name":..}, ...] (first = primary).
+static std::string relays_json(const std::vector<std::pair<std::string, int>>& l, const std::string& name) {
+    std::string o = "[";
+    for (size_t i = 0; i < l.size(); ++i)
+        o += std::string(i ? "," : "") + "{\"host\":" + json_str(l[i].first) + ",\"port\":" + std::to_string(l[i].second) + ",\"name\":" + json_str(name) + "}";
+    return o + "]";
+}
+
 int main(int argc, char** argv) {
     sdi::crash::install("link_encoder");
     for (int i = 1; i < argc; ++i)
@@ -357,10 +365,24 @@ int main(int argc, char** argv) {
     int relay_latency = args.relay_latency_ms;
     bool relay_auto = false;
     double relay_probe_ms = -1;
-    if (!args.relay.empty()) {
-        const auto c = args.relay.rfind(':');
-        fc.relay_host = args.relay.substr(0, c);
-        if (c != std::string::npos) relay_port = std::atoi(args.relay.c_str() + c + 1);
+    // --relay takes one relay, or several separated by commas ("1.2.3.4,5.6.7.8:8895"): the stream is sent to all of
+    // them at once, so decoders can switch to another when one dies. The first is the primary.
+    std::vector<std::pair<std::string, int>> relay_list;
+    {
+        std::istringstream rs(args.relay);
+        std::string item;
+        while (std::getline(rs, item, ',')) {
+            while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+            while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+            if (item.empty()) continue;
+            const auto c = item.rfind(':');
+            relay_list.emplace_back(item.substr(0, c), c == std::string::npos ? 8895 : std::atoi(item.c_str() + c + 1));
+        }
+    }
+    if (!relay_list.empty()) {
+        fc.relay_host = relay_list[0].first;
+        relay_port = relay_list[0].second;
+        for (size_t k = 1; k < relay_list.size(); ++k) fc.extra_relays.push_back(relay_list[k]);
         fc.relay_port       = relay_port;
         fc.relay_name       = relay_safe_name(args.name);
         fc.relay_secret     = args.relay_secret;
@@ -468,8 +490,9 @@ int main(int argc, char** argv) {
               << ",\"codec\":" << json_str(enc.name()) << ",\"kbps\":" << enc.current_bitrate_kbps()
               << ",\"lanIps\":[" << (lan_ip.empty() ? "" : json_str(lan_ip)) << "]"
               << ",\"directPort\":" << args.direct_port
-              << ",\"relay\":" << (args.relay.empty() ? "null" :
+              << ",\"relay\":" << (relay_list.empty() ? "null" :
                     "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(relay_safe_name(args.name)) + "}")
+              << ",\"relays\":" << relays_json(relay_list, relay_safe_name(args.name))
               << ",\"version\":\"link-1\"}";
             const int st = sdi::net::http_request(dir_url, "POST", "/v1/announce", args.key, b.str());
             g_dir_state = st == 200 ? 1 : 2;
@@ -521,14 +544,15 @@ int main(int argc, char** argv) {
         std::printf("{\"type\":\"link_stats\",\"name\":%s,\"format\":%s,\"source\":%s,\"fps\":%.1f,\"kbps\":%.0f,"
                     "\"viewers\":%d,\"relayUp\":%s,\"relayRttMs\":%.1f,\"capDrops\":%llu,\"directory\":\"%s\","
                     "\"lossPct\":%.1f,\"targetKbps\":%d,\"adapt\":%s,\"warn\":%s,"
-                    "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f}\n",
+                    "\"relayLatencyMs\":%d,\"relayAuto\":%s,\"relayProbeMs\":%.0f,\"relaysUp\":%d,\"relaysTotal\":%d}\n",
                     json_str(args.name).c_str(), json_str(format).c_str(), json_str(source).c_str(),
                     double(v - last_v) / dt * (mode.interlaced ? 2.0 : 1.0), double(by - last_bytes) * 8.0 / dt / 1000.0,
                     fanout->clients(), fanout->relay_up() ? "true" : "false", fanout->relay_rtt_ms(),
                     (unsigned long long)vq.dropped(),
                     g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
                     adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str(),
-                    args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms);
+                    args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms,
+                    fanout->relays_up(), fanout->relays_total());
         std::fflush(stdout);
         last_v = v; last_bytes = by;
     }

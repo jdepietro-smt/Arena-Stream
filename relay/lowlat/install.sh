@@ -2,6 +2,11 @@
 # Installs the low-latency SRT relay beside mediamtx (UDP 8895).
 # Does NOT touch mediamtx, so no stream drops and the SRT passphrase survives.
 #   git pull; bash relay/lowlat/install.sh
+#
+# A SECOND (backup) relay on another server: clone the repo there and run it with the same publish passphrase as the first
+# relay (it is in /etc/arena-lowlat.env on the first server as LL_PUBLISH_SECRET):
+#   RELAY_SECRET='the-same-passphrase' bash relay/lowlat/install.sh
+# Then put both addresses in the Link app's Relay server field, separated by a comma (primary first).
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../../cpp/relay/srt_relay.cpp"
@@ -14,11 +19,12 @@ echo "== compile"
 g++ -O2 -std=c++17 "$SRC" -o /usr/local/bin/arena-srt-relay $(pkg-config --cflags --libs srt) -lpthread
 
 # Publishers authenticate with the same SRT passphrase the encoder already uses.
-SECRET=""
+SECRET="${RELAY_SECRET:-}"
 for f in /opt/arena/.env /opt/arena/backend/.env; do
+  [ -n "$SECRET" ] && break
   [ -f "$f" ] && SECRET="$(grep -m1 '^SRT_PUBLISH_PASSPHRASE=' "$f" | cut -d= -f2- | tr -d '"' | tr -d "'")" && [ -n "$SECRET" ] && break
 done
-[ -n "$SECRET" ] || { echo "could not read SRT_PUBLISH_PASSPHRASE from /opt/arena/.env"; exit 1; }
+[ -n "$SECRET" ] || { echo "could not read SRT_PUBLISH_PASSPHRASE from /opt/arena/.env. On a backup relay run: RELAY_SECRET='<the first relay passphrase>' bash relay/lowlat/install.sh"; exit 1; }
 
 umask 077
 printf 'LL_PORT=8895

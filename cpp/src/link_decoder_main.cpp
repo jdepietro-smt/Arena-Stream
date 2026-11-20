@@ -31,6 +31,7 @@ int main() { std::fputs("link_decoder: Windows only for now\n", stderr); return 
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -294,6 +295,11 @@ int main(int argc, char** argv) {
 
     const std::string engine = exe_dir() + "sdi_decoder.exe";
     std::string last_waiting;
+    // Relay failover: which relay last worked for the stream being played, and which ones failed lately.
+    // A relay that dropped a live stream, or would not connect, goes to the back of the line for a while so
+    // the next try goes straight to a relay that is up instead of waiting out another connect timeout.
+    std::string last_ok_enc, last_ok_url;
+    std::map<std::string, std::chrono::steady_clock::time_point> relay_failed;
     while (!g_stop) {
         g_select_changed = false;
         std::string sel;
@@ -318,7 +324,13 @@ int main(int argc, char** argv) {
         }
         last_waiting.clear();
 
-        const auto paths = sdi::link::choose_paths(*enc, me, policy);
+        auto paths = sdi::link::choose_paths(*enc, me, policy);
+        if (last_ok_enc == enc->id) sdi::link::prefer_last_good(paths, last_ok_url);
+        for (auto it = relay_failed.begin(); it != relay_failed.end();) {
+            if (std::chrono::steady_clock::now() - it->second > 30s) { it = relay_failed.erase(it); continue; }
+            sdi::link::demote_failed(paths, it->first);
+            ++it;
+        }
         if (paths.empty()) {
             state("waiting", enc->name, "", "no reachable path (encoder is on another network and not on the relay)");
             std::this_thread::sleep_for(1s);
@@ -341,8 +353,12 @@ int main(int argc, char** argv) {
             std::vector<std::string> args{"--src", p.url, "--latency", std::to_string(p.latency_ms)};
             args.insert(args.end(), o.engine_args.begin(), o.engine_args.end());
             const auto t0 = std::chrono::steady_clock::now();
-            const EngineResult r = run_engine(engine, args, job, [&] { state("live", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms); });
+            const EngineResult r = run_engine(engine, args, job, [&] {
+                last_ok_enc = enc->id; last_ok_url = p.url;
+                state("live", enc->name, p.kind, p.url, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
+            });
             if (r.killed) break;
+            if (p.kind == "relay") relay_failed[p.url] = std::chrono::steady_clock::now();   // dropped or never came up: others first next time
             const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             state(r.went_live ? "ended" : "failed", enc->name, p.kind,
                   "engine exit " + std::to_string(r.exit_code) + " after " + std::to_string(int(secs)) + "s");

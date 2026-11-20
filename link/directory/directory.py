@@ -27,7 +27,7 @@ TRUST_PROXY =os.environ.get("LINK_TRUST_PROXY") == "1"
 DEC_TTL = float(os.environ.get("LINK_DEC_TTL", "20"))
 WANT_KEEP = 600.0   # a request for an offline decoder is kept this long, so it is applied when the decoder returns
 MAX_BODY = 8192
-FIELDS = ("id", "name", "format", "source", "codec", "kbps", "lanIps", "directPort", "relay", "version")
+FIELDS = ("id", "name", "format", "source", "codec", "kbps", "lanIps", "directPort", "relay", "relays", "version")
 
 _lock = threading.Lock()
 _encoders = {}   # id -> {announce fields..., pubIp, seen}

@@ -24,9 +24,11 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace sdi {
@@ -36,6 +38,9 @@ struct FanoutConfig {
     int         listen_latency_ms  = 40;     // floor for direct (LAN) viewers
     std::string relay_host;                  // empty = no relay publish
     int         relay_port         = 8895;
+    // Further relays that get the same stream at the same time (hot standby: if one relay or the path to it
+    // dies, decoders switch to another with no gap on this side). Each one costs a full copy of the uplink.
+    std::vector<std::pair<std::string, int>> extra_relays;
     std::string relay_name;
     std::string relay_secret;
     int         relay_latency_ms   = 100;
@@ -47,7 +52,11 @@ public:
     explicit TsFanout(FanoutConfig cfg) : cfg_(std::move(cfg)) {
         srt_startup();
         if (cfg_.listen_port > 0) listener_ = std::jthread([this](std::stop_token) { listen_loop(); });
-        if (!cfg_.relay_host.empty()) relay_thread_ = std::jthread([this](std::stop_token) { relay_loop(); });
+        if (!cfg_.relay_host.empty()) {
+            legs_.push_back(std::make_unique<Leg>(cfg_.relay_host, cfg_.relay_port));
+            for (const auto& r : cfg_.extra_relays) legs_.push_back(std::make_unique<Leg>(r.first, r.second));
+            for (auto& l : legs_) { Leg* p = l.get(); p->th = std::jthread([this, p](std::stop_token) { relay_loop(*p); }); }
+        }
     }
 
     ~TsFanout() {
@@ -58,10 +67,10 @@ public:
             listen_sock_ = SRT_INVALID_SOCK;
         }
         if (listener_.joinable()) listener_.join();
-        if (relay_thread_.joinable()) relay_thread_.join();
+        for (auto& l : legs_) if (l->th.joinable()) l->th.join();
         std::lock_guard<std::mutex> lk(mtx_);
         for (SRTSOCKET s : clients_) srt_close(s);
-        if (relay_sock_ != SRT_INVALID_SOCK) srt_close(relay_sock_);
+        for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) srt_close(l->sock);
         srt_cleanup();
     }
 
@@ -77,9 +86,11 @@ public:
                 if (push(clients_[i], data + off, len)) ++i;
                 else { srt_close(clients_[i]); clients_.erase(clients_.begin() + long(i)); }
             }
-            if (relay_sock_ != SRT_INVALID_SOCK && !push(relay_sock_, data + off, len)) {
-                srt_close(relay_sock_);
-                relay_sock_ = SRT_INVALID_SOCK;     // relay_loop reconnects
+            for (auto& l : legs_) {
+                if (l->sock != SRT_INVALID_SOCK && !push(l->sock, data + off, len)) {
+                    srt_close(l->sock);
+                    l->sock = SRT_INVALID_SOCK;     // relay_loop reconnects
+                }
             }
         }
         bytes_ += uint64_t(n);
@@ -93,7 +104,7 @@ public:
         cfg_.pace_bytes_per_sec = bytes_per_sec;
         if (listen_sock_ != SRT_INVALID_SOCK) apply_pace(listen_sock_);
         for (SRTSOCKET c : clients_) apply_pace(c);
-        if (relay_sock_ != SRT_INVALID_SOCK) apply_pace(relay_sock_);
+        for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) apply_pace(l->sock);
     }
 
     // Sender-side SRT counters for one set of connections (cumulative since each connected).
@@ -105,7 +116,7 @@ public:
     PathHealth relay_health() const {
         std::lock_guard<std::mutex> lk(mtx_);
         PathHealth h;
-        if (relay_sock_ != SRT_INVALID_SOCK) add_health(h, relay_sock_);
+        for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) add_health(h, l->sock);
         return h;
     }
     PathHealth viewer_health() const {
@@ -116,13 +127,19 @@ public:
     }
 
     int      clients()  const { std::lock_guard<std::mutex> lk(mtx_); return int(clients_.size()); }
-    bool     relay_up() const { std::lock_guard<std::mutex> lk(mtx_); return relay_sock_ != SRT_INVALID_SOCK; }
+    bool     relay_up() const { std::lock_guard<std::mutex> lk(mtx_); for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) return true; return false; }
+    // How many relays are connected right now, and how many were asked for.
+    int      relays_up() const { std::lock_guard<std::mutex> lk(mtx_); int n = 0; for (auto& l : legs_) if (l->sock != SRT_INVALID_SOCK) ++n; return n; }
+    int      relays_total() const { return int(legs_.size()); }
     uint64_t bytes()    const { return bytes_.load(); }
     double   relay_rtt_ms() const {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (relay_sock_ == SRT_INVALID_SOCK) return -1;
-        SRT_TRACEBSTATS st{};
-        return srt_bistats(relay_sock_, &st, 0, 1) == 0 ? st.msRTT : -1;
+        for (auto& l : legs_) {
+            if (l->sock == SRT_INVALID_SOCK) continue;
+            SRT_TRACEBSTATS st{};
+            if (srt_bistats(l->sock, &st, 0, 1) == 0) return st.msRTT;
+        }
+        return -1;
     }
 
 private:
@@ -187,7 +204,15 @@ private:
         }
     }
 
-    void relay_loop() {
+    struct Leg {
+        Leg(std::string h, int p) : host(std::move(h)), port(p) {}
+        std::string host;
+        int         port;
+        SRTSOCKET   sock = SRT_INVALID_SOCK;
+        std::jthread th;
+    };
+
+    void relay_loop(Leg& leg) {
         const std::string sid = "publish:" + cfg_.relay_name + ":" + cfg_.relay_secret;
         while (!stop_) {
             SRTSOCKET s = srt_create_socket();
@@ -198,9 +223,9 @@ private:
 
             sockaddr_in sa{};
             sa.sin_family = AF_INET;
-            sa.sin_port   = htons(uint16_t(cfg_.relay_port));
-            if (inet_pton(AF_INET, cfg_.relay_host.c_str(), &sa.sin_addr) != 1) {
-                std::fprintf(stderr, "fanout: relay host must be an IPv4 address: %s\n", cfg_.relay_host.c_str());
+            sa.sin_port   = htons(uint16_t(leg.port));
+            if (inet_pton(AF_INET, leg.host.c_str(), &sa.sin_addr) != 1) {
+                std::fprintf(stderr, "fanout: relay host must be an IPv4 address: %s\n", leg.host.c_str());
                 srt_close(s);
                 return;
             }
@@ -209,15 +234,15 @@ private:
                 for (int i = 0; i < 10 && !stop_; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            { std::lock_guard<std::mutex> lk(mtx_); relay_sock_ = s; }
-            std::fprintf(stderr, "fanout: relay publish up (%s:%d)\n", cfg_.relay_host.c_str(), cfg_.relay_port);
-            while (!stop_) {   // send() clears relay_sock_ on failure; also watch the socket state
+            { std::lock_guard<std::mutex> lk(mtx_); leg.sock = s; }
+            std::fprintf(stderr, "fanout: relay publish up (%s:%d)\n", leg.host.c_str(), leg.port);
+            while (!stop_) {   // send() clears leg.sock on failure; also watch the socket state
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 std::lock_guard<std::mutex> lk(mtx_);
-                if (relay_sock_ != s) break;
-                if (srt_getsockstate(s) != SRTS_CONNECTED) { srt_close(s); relay_sock_ = SRT_INVALID_SOCK; break; }
+                if (leg.sock != s) break;
+                if (srt_getsockstate(s) != SRTS_CONNECTED) { srt_close(s); leg.sock = SRT_INVALID_SOCK; break; }
             }
-            std::fprintf(stderr, "fanout: relay publish down, reconnecting\n");
+            std::fprintf(stderr, "fanout: relay publish down (%s:%d), reconnecting\n", leg.host.c_str(), leg.port);
         }
     }
 
@@ -225,11 +250,10 @@ private:
     mutable std::mutex       mtx_;
     std::vector<SRTSOCKET>   clients_;
     SRTSOCKET                listen_sock_ = SRT_INVALID_SOCK;
-    SRTSOCKET                relay_sock_  = SRT_INVALID_SOCK;
+    std::vector<std::unique_ptr<Leg>> legs_;
     std::atomic<bool>        stop_{false};
     std::atomic<uint64_t>    bytes_{0};
     std::jthread             listener_;
-    std::jthread             relay_thread_;
 };
 
 } // namespace sdi
