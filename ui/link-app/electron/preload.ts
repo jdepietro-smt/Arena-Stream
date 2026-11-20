@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld('link', {
   decoderStop:   (id: string)                  => ipcRenderer.invoke('decoder-stop', id),
   decoderSync:   (id: string)                  => ipcRenderer.invoke('decoder-sync', id),
 
+  hostResult:     (seq: number, ok: boolean, error?: string) => ipcRenderer.invoke('host-result', seq, ok, error),
+  onEncoderRemote: on('encoder-remote'),
+
   onLog:           on('log'),
   onDirectory:     on('directory'),
   onEncoderStats:  on('encoder-stats'),

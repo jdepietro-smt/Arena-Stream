@@ -13,7 +13,8 @@ const auth = require('../lib/auth')
 const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(srv.address().port)))
 
 async function setup() {
-  const calls = { want: [], mtx: [], whep: [], ffmpeg: [], killed: 0 }
+  const calls = { want: [], mtx: [], whep: [], ffmpeg: [], killed: 0, cmds: [] }
+  let hostsList = []
   let ffmpegWrites = true
   const addedPaths = new Set()
   let encoders = [
@@ -27,6 +28,8 @@ async function setup() {
       res.setHeader('Content-Type', 'application/json')
       if (req.url === '/v1/encoders') return res.end(JSON.stringify({ encoders }))
       if (req.url === '/v1/decoders') return res.end(JSON.stringify({ decoders: [{ id: 'pc-1', name: 'Truck', state: 'live', stream: 'ESPN 1', want: null }] }))
+      if (req.url === '/v1/hosts') return res.end(JSON.stringify({ hosts: hostsList }))
+      if (req.url === '/v1/host/command') { const c = JSON.parse(b); calls.cmds.push(c); return res.end(JSON.stringify({ ok: true, seq: 100 + calls.cmds.length })) }
       if (req.url === '/v1/decoder/want') { calls.want.push(JSON.parse(b)); return res.end(JSON.stringify({ ok: true })) }
       res.writeHead(404); res.end('{}')
     })
@@ -72,7 +75,7 @@ async function setup() {
     cb(new Error('unexpected'))
   }
   const ctlDir = path.join(dataDir, 'ctl')
-  const { server, store, pathName, thumbs, admin, monitor } = createPortal({
+  const { server, store, pathName, thumbs, admin, monitor, schedules, scheduleTick } = createPortal({
     ownerInit: 'ownerpass1234', execFile: fakeExec, ctlDir,
     spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
@@ -96,7 +99,7 @@ async function setup() {
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
   const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, thumbs, admin, monitor, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
+  return { call, calls, close, thumbs, admin, monitor, schedules, scheduleTick, setHosts: h => { hostsList = h }, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -970,5 +973,76 @@ test('wall: lists live streams, and a stream that left shows as off air', async 
     const gone = w.tiles.filter(x => !x.live).map(x => x.name).sort()
     assert.deepEqual(gone, ['Cam HEVC', 'LAN only'])
     assert.equal(w.tiles.find(x => x.name === 'LAN only').alert, 'critical')
+  } finally { await t.close() }
+})
+
+const PC = (results = []) => ({ id: 'pc1', name: 'Garden PC', host: 'pc1', ageMs: 100, pending: 0, results, streams: [{ sid: 's1', name: 'ESPN 1', state: 'live', bitrate: 10000 }] })
+
+test('encoder control: owner only, command goes to the directory, a stop is expected (not an outage)', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t)
+    assert.equal((await t.call('/portal/api/owner/encoders')).status, 403)
+    await ownerLogin(t)
+    t.setHosts([PC()])
+    const list = (await t.call('/portal/api/owner/encoders')).body
+    assert.equal(list.hosts[0].name, 'Garden PC'); assert.equal(list.tz, 'America/New_York')
+    const post = b => t.call('/portal/api/owner/encoders/command', { method: 'POST', body: b })
+    assert.equal((await post({ host: 'pc1', stream: 's1', action: 'explode' })).status, 400)
+    assert.equal((await post({ host: 'ghost', stream: 's1', action: 'stop' })).status, 404)
+    assert.equal((await post({ host: 'pc1', stream: 'nope', action: 'stop' })).status, 404)
+    await t.monitor.tick()                                                   // the portal has seen ESPN 1 live
+    assert.equal((await post({ host: 'pc1', stream: 's1', action: 'bitrate', value: 6000 })).status, 200)
+    assert.deepEqual(t.calls.cmds[0], { host: 'pc1', stream: 's1', action: 'bitrate', value: 6000 })
+    assert.equal((await post({ host: 'pc1', stream: 's1', action: 'stop' })).status, 200)
+    assert.deepEqual(t.calls.cmds[1], { host: 'pc1', stream: 's1', action: 'stop' })
+    assert.equal(t.monitor.state().streams.find(x => x.name === 'ESPN 1').live, true)
+    const acts = (await t.call('/portal/api/owner/activity?action=encoder')).body.entries
+    assert.deepEqual(acts.map(a => a.action).sort(), ['encoder.bitrate', 'encoder.stop'])
+  } finally { await t.close() }
+})
+
+test('schedules: validated, fire once when due, report success, and alert when the PC fails or stays silent', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    t.setHosts([PC()])
+    const mk = b => t.call('/portal/api/owner/schedules', { method: 'POST', body: b })
+    assert.equal((await mk({ host: 'pc1', sid: 's1', start: 'soon', days: [1] })).status, 400)
+    const made = (await mk({ host: 'pc1', hostName: 'Garden PC', sid: 's1', streamName: 'ESPN 1', label: 'Game night', start: '19:00', stop: '22:30', days: [0, 1, 2, 3, 4, 5, 6] })).body.schedule
+    assert.equal(made.label, 'Game night'); assert.ok(made.next && made.next.action)
+    const { zonedToTs } = require('../lib/schedule')
+    const seven = zonedToTs(2026, 11, 20, 19, 0, 'America/New_York')
+    await t.scheduleTick(seven - 60000)
+    assert.equal(t.calls.cmds.length, 0)                                     // too early
+    await t.scheduleTick(seven + 2000)
+    assert.deepEqual(t.calls.cmds, [{ host: 'pc1', stream: 's1', action: 'start' }])
+    await t.scheduleTick(seven + 4000)
+    assert.equal(t.calls.cmds.length, 1)                                     // never twice
+    t.setHosts([PC([{ seq: 101, ok: true, error: '' }])])
+    await t.scheduleTick(seven + 6000)
+    const log = (await t.call('/portal/api/owner/activity?action=schedule')).body.entries.map(e => e.action)
+    assert.ok(log.includes('schedule.start') && log.includes('schedule.done'), log.join())
+    assert.equal(t.monitor.state().alerts.length, 0)
+
+    // the stop: the PC reports it cannot do it
+    const stop = zonedToTs(2026, 11, 20, 22, 30, 'America/New_York')
+    await t.scheduleTick(stop + 1000)
+    assert.equal(t.calls.cmds[1].action, 'stop')
+    t.setHosts([PC([{ seq: 102, ok: false, error: 'no signal' }])])
+    await t.scheduleTick(stop + 3000)
+    assert.match(t.monitor.state().alerts[0].title, /Scheduled command failed/)
+
+    // a command nobody answers within a minute
+    await t.call('/portal/api/owner/schedules/' + made.id, { method: 'PUT', body: { start: '23:00', stop: '' } })
+    const late = zonedToTs(2026, 11, 20, 23, 0, 'America/New_York')
+    t.setHosts([PC()])
+    await t.scheduleTick(late + 1000)
+    await t.scheduleTick(late + 70000)
+    assert.ok(t.monitor.state().alerts.some(a => /not acknowledged/.test(a.title)))
+
+    assert.equal((await t.call('/portal/api/owner/schedules/' + made.id, { method: 'DELETE' })).status, 200)
+    assert.equal((await t.call('/portal/api/owner/schedules/' + made.id, { method: 'DELETE' })).status, 404)
+    assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { scheduleTz: 'Mars/Olympus' } } })).status, 400)
   } finally { await t.close() }
 })

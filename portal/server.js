@@ -22,6 +22,7 @@ const commsLib = require('./lib/comms')
 const { createThumbs } = require('./lib/thumbs')
 const captest = require('./lib/captest-core')
 const { openMonitor, webhookBody } = require('./lib/monitor')
+const sched = require('./lib/schedule')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
 // (portal/deploy/ctl.sh) that accepts only these names; the portal itself runs unprivileged.
@@ -47,6 +48,7 @@ function loadConfig(env = process.env) {
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
     ownerInit: env.PORTAL_OWNER_PASSWORD_INIT || '',                // first owner password; stored hashed, then removed from the env file
+    scheduleEverySec: parseInt(env.PORTAL_SCHEDULE_SEC || '10', 10),   // how often schedules are checked (0 = off)
     monitorEverySec: parseInt(env.PORTAL_MONITOR_SEC || '5', 10),   // how often the system is checked for alerts (0 = off)
     ctlDir: env.PORTAL_CTL_DIR || '',                               // where restart requests are left for the root helper
   }
@@ -359,8 +361,8 @@ function createPortal(cfg) {
       })
       const live = new Set(list.map(e => e.id))
       const off = ms.streams.filter(x => !live.has(x.id)).map(x => ({
-        id: x.id, name: x.name, live: false, kbps: x.kbps, lastSeen: x.lastSeen, canShare: false, browserOk: false,
-        webViewers: 0, links: 0, alert: 'critical', uptimePct: x.uptimePct,
+        id: x.id, name: x.name, live: false, stopped: !!x.stopped, kbps: x.kbps, lastSeen: x.lastSeen, canShare: false, browserOk: false,
+        webViewers: 0, links: 0, alert: x.stopped ? null : 'critical', uptimePct: x.uptimePct,
       }))
       return send(res, 200, { tiles: onAir.concat(off), monitoring: ms.running, at: Date.now() })
     }
@@ -453,6 +455,56 @@ function createPortal(cfg) {
     monitorTimer.unref?.()
     monitor.tick().catch(() => {})
   }
+
+  // ── Remote encoder control and schedules ───────────────────────────────────────────────────────────────
+  // Encoder PCs report their streams to the directory and pick up commands from it (see link/directory). The portal queues
+  // commands, either from the Encoder control page or from a schedule that has come due, and watches for the answer.
+  const schedules = sched.openSchedules(cfg.dataDir)
+  const awaiting = new Map()   // command seq -> what it was for, until the PC has answered
+  const hostsNow = async () => { try { return (await dir('/v1/hosts')).hosts || [] } catch { return null } }
+  async function sendCommand(host, stream, action, value) {
+    return dir('/v1/host/command', { host, stream, action, ...(value != null ? { value } : {}) })
+  }
+  async function scheduleTick(now = Date.now()) {
+    const tz = S().scheduleTz
+    for (const e of schedules.list()) {
+      for (const occ of sched.due(e, now, tz)) {
+        schedules.markFired(e.id, occ.key, now)             // marked first: a command is never sent twice
+        const what = `${e.label}: ${occ.action} ${e.streamName || e.sid} on ${e.hostName || e.host}`
+        try {
+          const r = await sendCommand(e.host, e.sid, occ.action)
+          awaiting.set(r.seq, { what, at: now, key: `schedule:${e.id}:${occ.key}`, manual: false })
+          if (occ.action === 'stop' && e.streamName) monitor.expectOff(e.streamName)
+          admin.audit('schedule', 'schedule.' + occ.action, what, '')
+        } catch (err) {
+          admin.audit('schedule', 'schedule.fail', `${what}: ${err.message}`, '')
+          monitor.external(`schedule:${e.id}:${occ.key}`, 'critical', `Scheduled ${occ.action} did not happen: ${e.streamName || e.sid}`, `${err.message}. ${e.hostName || e.host} may be off or not running the Arena Link app.`)
+        }
+      }
+    }
+    if (awaiting.size) {
+      const hosts = await hostsNow()
+      if (hosts) for (const [seq, w] of [...awaiting]) {
+        const results = hosts.flatMap(h => h.results || [])
+        const r = results.find(x => x.seq === seq)
+        if (r) {
+          awaiting.delete(seq)
+          if (r.ok) admin.audit('schedule', 'schedule.done', w.what, '')
+          else if (w.manual) admin.audit('owner', 'encoder.fail', `${w.what}: ${r.error}`, '')
+          else { admin.audit('schedule', 'schedule.fail', `${w.what}: ${r.error}`, ''); monitor.external(w.key, 'critical', `Scheduled command failed: ${w.what}`, r.error || 'the PC refused it') }
+        } else if (now - w.at > 60000) {
+          awaiting.delete(seq)
+          if (!w.manual) { admin.audit('schedule', 'schedule.fail', `${w.what}: no answer`, ''); monitor.external(w.key, 'critical', `Scheduled command not acknowledged: ${w.what}`, 'The PC did not answer within a minute. Is the Arena Link app running there, and is remote control allowed in its Connection settings?') }
+        }
+      }
+    }
+  }
+  let scheduleTimer = null
+  if (cfg.scheduleEverySec > 0) {
+    scheduleTimer = setInterval(() => { scheduleTick().catch(e => console.log('schedule tick failed: ' + e.message)) }, cfg.scheduleEverySec * 1000)
+    scheduleTimer.unref?.()
+  }
+  const withNext = e => { const n = sched.nextRun(e, Date.now(), S().scheduleTz); return { ...e, next: n ? { at: n.at, action: n.action } : null } }
 
   const captestDir = path.join(cfg.dataDir, 'captest')
   const readJsonFile = f => { try { return JSON.parse(fs.readFileSync(path.join(captestDir, f), 'utf8')) } catch { return null } }
@@ -717,6 +769,48 @@ function createPortal(cfg) {
       return send(res, 200, { ok: true, signedOut: true })
     }
 
+    if (sub === 'encoders' && m === 'GET') {
+      const hosts = await hostsNow()
+      if (!hosts) return send(res, 502, { error: 'the directory is not reachable' })
+      return send(res, 200, { hosts, schedules: schedules.list().map(withNext), tz: S().scheduleTz, now: Date.now() })
+    }
+    if (sub === 'encoders/command' && m === 'POST') {
+      const b = await readJson(req) || {}
+      if (!['start', 'stop', 'restart', 'bitrate'].includes(b.action)) return send(res, 400, { error: 'action must be start, stop, restart or bitrate' })
+      const hosts = await hostsNow()
+      const h = hosts && hosts.find(x => x.id === b.host)
+      const st = h && h.streams.find(x => x.sid === b.stream)
+      if (!h) return send(res, 404, { error: 'that encoder PC is not connected' })
+      if (!st) return send(res, 404, { error: 'no such stream on that PC' })
+      try {
+        const r = await sendCommand(b.host, b.stream, b.action, b.action === 'bitrate' ? Number(b.value) : undefined)
+        if (b.action === 'stop' && st.name) monitor.expectOff(st.name)
+        const what = `${b.action}${b.action === 'bitrate' ? ' ' + Number(b.value) : ''} ${st.name || b.stream} on ${h.name}`
+        awaiting.set(r.seq, { what, at: Date.now(), key: 'manual:' + r.seq, manual: true })
+        admin.audit('owner', 'encoder.' + b.action, what, ip)
+        return send(res, 200, { ok: true, seq: r.seq })
+      } catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    if (sub === 'schedules' && m === 'POST') {
+      const b = await readJson(req) || {}
+      let e
+      try { e = sched.clean(b, S().scheduleTz) } catch (err) { return send(res, 400, { error: err.message }) }
+      const saved = schedules.add(e)
+      admin.audit('owner', 'schedule.create', saved.label, ip)
+      return send(res, 200, { schedule: withNext(saved) })
+    }
+    let sc
+    if ((sc = sub.match(/^schedules\/(\d+)$/)) && (m === 'PUT' || m === 'DELETE')) {
+      const id = Number(sc[1])
+      if (!schedules.get(id)) return send(res, 404, { error: 'no such schedule' })
+      if (m === 'DELETE') { const old = schedules.get(id); schedules.remove(id); admin.audit('owner', 'schedule.delete', old.label, ip); return send(res, 200, { ok: true }) }
+      const b = await readJson(req) || {}
+      let e
+      try { e = sched.clean({ ...schedules.get(id), ...b }, S().scheduleTz) } catch (err) { return send(res, 400, { error: err.message }) }
+      const saved = schedules.update(id, e)
+      admin.audit('owner', 'schedule.update', saved.label + (b.enabled === false ? ' (turned off)' : ''), ip)
+      return send(res, 200, { schedule: withNext(saved) })
+    }
     if (sub === 'monitor' && m === 'GET') return send(res, 200, { ...monitor.state(), webhookSet: !!S().alertWebhook, alertsEnabled: S().alertsEnabled })
     if (sub === 'monitor/test' && m === 'POST') {
       if (!S().alertWebhook) return send(res, 400, { error: 'enter a webhook address and save it first' })
@@ -853,8 +947,8 @@ function createPortal(cfg) {
       else res.end()
     })
   })
-  server.on('close', () => { thumbs.stopAll(); admin.flush(); clearInterval(monitorTimer); monitor.flush() })
-  return { server, store, pathName, thumbs, admin, monitor }
+  server.on('close', () => { thumbs.stopAll(); admin.flush(); clearInterval(monitorTimer); clearInterval(scheduleTimer); monitor.flush() })
+  return { server, store, pathName, thumbs, admin, monitor, schedules, scheduleTick }
 }
 
 module.exports = { createPortal, loadConfig }

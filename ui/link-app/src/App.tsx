@@ -21,6 +21,7 @@ interface Config {
   relaySecret: string
   streams: StreamCfg[]
   decs: DecCfg[]
+  allowRemote?: boolean
 }
 
 interface Card { index: number; device: number; channel: number; name: string; backend: string }
@@ -196,6 +197,8 @@ function StreamPanel({ stream: e, index, all, cards, scanning, onScan, canRemove
   set: (patch: Partial<StreamCfg>) => void; remove: () => void; onLive: (live: boolean) => void
 }) {
   const [live, setLive] = useState(false)
+  const liveRef = useRef(false)
+  liveRef.current = live
   useEffect(() => { onLive(live) }, [live])   // eslint-disable-line react-hooks/exhaustive-deps
   const [stats, setStats] = useState<EncStats | null>(null)
   const [msg, setMsg] = useState('')
@@ -234,6 +237,35 @@ function StreamPanel({ stream: e, index, all, cards, scanning, onScan, canRemove
         if (!jpg) { picNext.current = null; setPic(''); return }
         picNext.current = jpg
         if (!picRaf.current) picRaf.current = requestAnimationFrame(() => { picRaf.current = 0; if (picNext.current) setPic(picNext.current) })
+      }),
+      // The web portal (or a schedule) asked this stream to start, stop, restart or change bitrate: do what a click would do.
+      link.onEncoderRemote(async (m: { seq: number; id: string; action: string; value?: number }) => {
+        if (m.id !== e.id) return
+        const done = (ok: boolean, error = '') => link.hostResult(m.seq, ok, error)
+        try {
+          if (m.action === 'start') {
+            if (liveRef.current) return done(true)
+            setMsg('Starting (requested from the portal) - waiting for the signal...')
+            const r = await link.encoderStart(e.id)
+            if (!r.ok) setMsg(r.error)
+            return done(r.ok, r.error)
+          }
+          if (m.action === 'stop') {
+            if (!liveRef.current) return done(true)
+            await link.encoderStop(e.id); setLive(false); setStats(null); setMsg('Stopped from the portal.')
+            return done(true)
+          }
+          if (m.action === 'restart') {
+            setMsg('Restarting (requested from the portal)...'); setStats(null)
+            const r = await link.encoderRestart(e.id)
+            return done(!!r?.ok, r?.error)
+          }
+          if (m.action === 'bitrate' && m.value) {
+            set({ bitrate: m.value }); if (liveRef.current) link.encoderBitrate(e.id, m.value)
+            return done(true)
+          }
+          done(false, 'unknown command')
+        } catch (err) { done(false, String((err as Error).message || err)) }
       }),
       link.onEncoderExit((id: string, x: { code: number | null; retrying: boolean }) => {
         if (id !== e.id) return
@@ -709,10 +741,11 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
   const [key, setKey] = useState(config.key)
   const [relayHost, setRelayHost] = useState(config.relayHost)
   const [relaySecret, setRelaySecret] = useState(config.relaySecret)
+  const [allowRemote, setAllowRemote] = useState(config.allowRemote !== false)
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   async function test() { setResult(null); setResult(await link.testDirectory(directory, key)) }
-  function save() { setConfig(c => ({ ...c, directory: directory.trim(), key: key.trim(), relayHost: relayHost.trim(), relaySecret: relaySecret.trim() })); onClose() }
+  function save() { setConfig(c => ({ ...c, directory: directory.trim(), key: key.trim(), relayHost: relayHost.trim(), relaySecret: relaySecret.trim(), allowRemote })); onClose() }
 
   return (
     <div className="modal" onClick={onClose}>
@@ -723,6 +756,7 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
         <label>Access key<input type="password" value={key} onChange={e => setKey(e.target.value)} /></label>
         <label>Relay server <span className="hint">for decoders on other networks. Add a backup after a comma; the stream is sent to both, so it uses twice the upload.</span><input value={relayHost} onChange={e => setRelayHost(e.target.value)} placeholder="server IP address, backup IP address" /></label>
         <label>Relay password <span className="hint">encoders only</span><input type="password" value={relaySecret} onChange={e => setRelaySecret(e.target.value)} /></label>
+        <label className="check"><input type="checkbox" checked={allowRemote} onChange={e => setAllowRemote(e.target.checked)} /> Allow the web portal to start, stop and retune this PC's streams (including scheduled starts and stops)</label>
         <div className="row">
           <button className="btn" onClick={test}>TEST</button>
           {result && <span className={`result ${result.ok ? 'ok' : 'bad'}`}>{result.message}</span>}

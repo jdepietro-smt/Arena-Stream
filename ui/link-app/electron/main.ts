@@ -32,7 +32,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname, '../dist/index.html'))
 }
 
-if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); startDecoderBeat(); createWindow() })
+if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); startDecoderBeat(); startHostBeat(); createWindow() })
 
 app.on('window-all-closed', () => {
   win = null
@@ -90,6 +90,7 @@ interface Config {
   latencyAuto?: boolean   // set once the old 100 ms default has been moved to Auto
   streams: StreamCfg[]
   decs: DecCfg[]
+  allowRemote?: boolean   // the web portal may start, stop and retune this PC's streams (default on)
 }
 
 // Built-in directory access key so a fresh install connects with no setup (Settings can override it).
@@ -320,6 +321,7 @@ const encRun = (id: string): EncRun => {
   if (!r) { r = { proc: null, wanted: false, started: 0, restart: null, stoppedAt: 0, closed: null }; encRuns.set(id, r) }
   return r
 }
+const encStatAt = new Map<string, number>()   // when each stream's encoder last reported, to tell "starting" from "live"
 const streamCfg = (id: string) => cfg().streams.find(s => s.id === id)
 const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
 
@@ -381,7 +383,7 @@ function startEncoder(id: string): { ok: boolean; error?: string } {
     try {
       const m = JSON.parse(l)
       if (m.type === 'preview') send('encoder-preview', id, m.jpg)   // monitor picture, not a stats line
-      else send('encoder-stats', id, m)
+      else { encStatAt.set(id, Date.now()); send('encoder-stats', id, m) }
     } catch { send('log', l) }
   })
   lines(proc.stderr, (l) => send('log', `[${s.name.trim()}] ${l}`))
@@ -724,6 +726,45 @@ function startDecoderBeat() {
   }
   beatTimer = setInterval(() => { void tick() }, 4000)
 }
+
+// ── Remote encoder control: this PC reports its streams to the directory every few seconds and is handed commands the
+// web portal (or a schedule) has queued: start, stop, restart, set bitrate. The window carries them out exactly like a
+// click, so what the screen shows is always true; the result goes back with the next report.
+let hostSeq = 0                                   // highest command number handled
+const hostResults: { seq: number; ok: boolean; error?: string }[] = []
+const hostSeen = new Set<number>()
+const hostName = () => os.hostname()
+function startHostBeat() {
+  const tick = async () => {
+    const c = cfg()
+    if (c.mode !== 'encoder' || !c.directory || !c.key) return
+    const now = Date.now()
+    const streams = c.streams.map(s => {
+      const run = encRun(s.id)
+      const live = run.wanted && run.proc && now - (encStatAt.get(s.id) ?? 0) < 6000
+      return { sid: s.id, name: s.name.trim(), state: live ? 'live' : run.wanted ? 'starting' : 'stopped', bitrate: s.bitrate, device: s.device, remote: s.remote }
+    })
+    const results = hostResults.splice(0, hostResults.length)
+    try {
+      const r = await postDirectory(c.directory, c.key, '/v1/host/heartbeat', { id: hostName(), name: hostName(), host: hostName(), streams, ack: hostSeq, results })
+      for (const cmd of (r?.commands ?? []) as { seq: number; stream: string; action: string; value?: number; ageMs: number }[]) {
+        if (hostSeen.has(cmd.seq)) continue
+        hostSeen.add(cmd.seq)
+        hostSeq = Math.max(hostSeq, cmd.seq)
+        if (hostSeen.size > 200) hostSeen.delete(hostSeen.values().next().value as number)
+        if (cmd.ageMs > 120000) { hostResults.push({ seq: cmd.seq, ok: false, error: 'too old, ignored' }); continue }
+        if (c.allowRemote === false) { hostResults.push({ seq: cmd.seq, ok: false, error: 'remote control is turned off on this PC' }); continue }
+        if (!streamCfg(cmd.stream)) { hostResults.push({ seq: cmd.seq, ok: false, error: 'no such stream on this PC' }); continue }
+        const w = BrowserWindow.getAllWindows()[0]
+        if (!w) { hostResults.push({ seq: cmd.seq, ok: false, error: 'the app window is not open' }); continue }
+        send('log', `[remote] ${cmd.action}${cmd.value ? ' ' + cmd.value : ''} on ${streamCfg(cmd.stream)?.name.trim() || cmd.stream}`)
+        send('encoder-remote', { seq: cmd.seq, id: cmd.stream, action: cmd.action, value: cmd.value })
+      }
+    } catch { hostResults.unshift(...results) /* directory unreachable: report the results next time */ }
+  }
+  setInterval(() => { void tick() }, 4000)
+}
+ipcMain.handle('host-result', (_, seq: number, ok: boolean, error?: string) => { hostResults.push({ seq, ok, error }); return true })
 
 ipcMain.handle('decoder-start', (_, id: string, select: string) => startDecoder(id, select))
 ipcMain.handle('decoder-select', (_, id: string, name: string) => {

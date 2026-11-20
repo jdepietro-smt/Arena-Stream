@@ -68,7 +68,7 @@ table.grid tbody tr:hover td{background:#1a1f27}
 .wall{background:var(--bg)}.wallbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .wallgrid{display:grid;gap:10px}
 .wtile{position:relative;aspect-ratio:16/9;background:#05070a;border:2px solid var(--edge);border-radius:8px;overflow:hidden;cursor:pointer;min-width:0}
-.wtile.ok{border-color:#1f6b33}.wtile.warn{border-color:var(--acc)}.wtile.bad{border-color:var(--bad)}
+.wtile.stopped{border-color:#3a4150}.wtile.ok{border-color:#1f6b33}.wtile.warn{border-color:var(--acc)}.wtile.bad{border-color:var(--bad)}
 .wtile .wimg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:12px;text-align:center;padding:8px}
 .wall .wtile .thumb{width:100%;height:100%;object-fit:cover;border:0;border-radius:0;display:block}
 .wtile.off .wimg{opacity:.35;filter:grayscale(1)}
@@ -276,7 +276,7 @@ function newLinkDialog(stream) {
 // ── Admin (owner-only) ─────────────────────────────────────────────────────────
 // Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
 let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
-const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['monitor', 'Monitoring'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['monitor', 'Monitoring'], ['encoders', 'Encoder control'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
 
 async function oapi(path, method = 'GET', body) {
   const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
@@ -313,6 +313,7 @@ async function adminRender() {
     if (adminSub === 'account') await accountSection(content)
     else if (adminSub === 'settings') await settingsSection(content)
     else if (adminSub === 'monitor') await monitorSection(content)
+    else if (adminSub === 'encoders') await encodersSection(content)
     else if (adminSub === 'health') await healthSection(content)
     else if (adminSub === 'capacity') await capacitySection(content)
     else await activitySection(content)
@@ -433,6 +434,7 @@ const SETTING_TEXT = {
   thumbEverySec: ['Thumbnail refresh (seconds)', 'Seconds between pictures.'],
   defaultLinkExpiryMin: ['Default link expiry (minutes)', 'Used when a link is created without choosing one. 0 means no expiry.'],
   requireLinkPassword: ['Require a password on every link', 'The Create link form refuses a link without one.'],
+  scheduleTz: ['Schedule time zone', 'The time zone the times on Encoder control schedules are written in, for example America/New_York. Daylight saving is handled.'],
 }
 async function settingsSection(box) {
   const { settings, installed } = await oapi('/settings')
@@ -519,6 +521,82 @@ async function monitorSection(box) {
   healthTimer = setInterval(() => { if (adminSub === 'monitor' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && document.activeElement !== hook) draw().catch(() => {}) }, 5000)
 }
 
+// Encoder control: see every encoder PC and its streams, start/stop/restart/retune them, and schedule starts and stops.
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const daysText = e => e.mode === 'once' ? e.date : e.days.length === 7 ? 'every day' : e.days.join() === '1,2,3,4,5' ? 'weekdays' : e.days.map(d => DAYS[d]).join(' ')
+function scheduleDialog(hosts, tz, done) {
+  const pairs = hosts.flatMap(h => h.streams.filter(x => x.name).map(x => ({ h, x })))
+  const which = el('select', {}, pairs.map((p, i) => el('option', { value: i }, p.x.name + '  (' + p.h.name + ')')))
+  const label = el('input', { type: 'text', placeholder: 'For example: Rangers game' })
+  const start = el('input', { type: 'time', value: '19:00' }), stop = el('input', { type: 'time', value: '22:30' })
+  const noStop = el('input', { type: 'checkbox' })
+  const mode = el('select', { onchange: () => { dateRow.style.display = mode.value === 'once' ? '' : 'none'; daysRow.style.display = mode.value === 'once' ? 'none' : '' } },
+    [['weekly', 'Repeats on these days'], ['once', 'Once, on a date']].map(([v, t]) => el('option', { value: v }, t)))
+  const date = el('input', { type: 'date', value: new Date().toISOString().slice(0, 10) })
+  const dateRow = el('label', { style: 'display:none' }, 'Date', date)
+  const dayBoxes = DAYS.map((d, i) => el('input', { type: 'checkbox', checked: true, 'data-d': i }))
+  const daysRow = el('div', { class: 'pills' }, DAYS.map((d, i) => el('label', { class: 'pill' }, dayBoxes[i], el('span', {}, d))))
+  const err = el('div', { class: 'err' })
+  const close = () => dlg.remove()
+  const save = async () => {
+    err.textContent = ''
+    const pick = pairs[Number(which.value)]
+    if (!pick) { err.textContent = 'No encoder PC is connected right now, so there is nothing to schedule.'; return }
+    try {
+      await oapi('/schedules', 'POST', { host: pick.h.id, hostName: pick.h.name, sid: pick.x.sid, streamName: pick.x.name, label: label.value, start: start.value, stop: noStop.checked ? '' : stop.value,
+        mode: mode.value, date: date.value, days: dayBoxes.filter(b => b.checked).map(b => Number(b.dataset.d)) })
+      close(); done()
+    } catch (e) { err.textContent = e.message }
+  }
+  const dlg = el('div', { class: 'modal', onclick: e => e.target === dlg && close() }, el('div', { class: 'card', style: 'gap:12px' },
+    el('h2', {}, 'New schedule'),
+    el('label', {}, 'Stream', which), el('label', {}, 'Name (optional)', label),
+    el('div', { class: 'row' }, el('label', {}, 'Start', start), el('label', {}, 'Stop', stop), el('label', { class: 'check', style: 'flex-direction:row;align-self:flex-end;gap:6px' }, noStop, el('span', {}, 'Do not stop'))),
+    el('div', { class: 'hint' }, 'Times are in ' + tz + '. A stop earlier than the start means the next day.'),
+    el('label', {}, 'When', mode), dateRow, daysRow, err,
+    el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: save }, 'Create'), el('button', { class: 'b', onclick: close }, 'Cancel'))))
+  document.body.append(dlg)
+}
+async function encodersSection(box) {
+  const m = msgBox()
+  const send = async (h, x, action, value) => {
+    try { await oapi('/encoders/command', 'POST', { host: h.id, stream: x.sid, action, value }); flash(m, 'Sent to ' + h.name + '. It takes a few seconds to arrive.', true); setTimeout(() => draw().catch(() => {}), 5000) } catch (e) { flash(m, e.message) }
+  }
+  const draw = async () => {
+    const d = await oapi('/encoders')
+    const chip = st => el('span', { class: 'chip ' + (st === 'live' ? 'ok' : st === 'starting' ? 'warn' : '') }, st)
+    const hostCards = d.hosts.length ? d.hosts.map(h => {
+      const lastRes = h.results.slice(-3).reverse()
+      return el('div', { class: 'card', style: 'margin:0 0 14px;max-width:none;gap:8px' },
+        el('div', { class: 'row' }, el('h2', { style: 'margin:0' }, h.name), el('span', { class: 'hint' }, 'seen ' + Math.round(h.ageMs / 1000) + ' s ago' + (h.pending ? ', ' + h.pending + ' command(s) waiting' : ''))),
+        el('table', {}, el('thead', {}, el('tr', {}, ['Stream', 'State', 'Bitrate (kbps)', ''].map(x => el('th', {}, x)))),
+          el('tbody', {}, h.streams.map(x => {
+            const rate = el('input', { type: 'number', min: 500, max: 100000, step: 500, value: x.bitrate, style: 'width:90px' })
+            return el('tr', {}, el('td', {}, x.name || el('span', { class: 'hint' }, '(no name yet)')), el('td', {}, chip(x.state)),
+              el('td', {}, el('div', { class: 'row' }, rate, el('button', { class: 'b', onclick: () => send(h, x, 'bitrate', Number(rate.value)) }, 'Set'))),
+              el('td', {}, el('div', { class: 'row' },
+                x.state === 'stopped' ? el('button', { class: 'b pri', onclick: () => send(h, x, 'start') }, 'Start') : el('button', { class: 'b', onclick: () => { if (confirm('Stop ' + x.name + '? It goes off air.')) send(h, x, 'stop') } }, 'Stop'),
+                x.state !== 'stopped' ? el('button', { class: 'b', onclick: () => { if (confirm('Restart ' + x.name + '? It is off air for a few seconds.')) send(h, x, 'restart') } }, 'Restart') : null)))
+          }))),
+        lastRes.length ? el('div', { class: 'hint' }, 'Last answers from this PC: ' + lastRes.map(r => r.ok ? 'done' : 'failed (' + (r.error || 'no reason given') + ')').join(', ')) : null)
+    }) : [el('div', { class: 'empty' }, 'No encoder PC is connected. The Arena Link app on the encoder PC must be running (encoder mode) and updated to a version that supports remote control.')]
+    const sc = d.schedules
+    box.replaceChildren(
+      el('h2', {}, 'Encoder PCs'), ...hostCards, m,
+      el('div', { class: 'row', style: 'margin:22px 0 10px' }, el('h2', { style: 'margin:0' }, 'Schedules'), el('span', { class: 'hint' }, 'times in ' + d.tz + ' (change it in Settings)'),
+        el('button', { class: 'b pri', onclick: () => scheduleDialog(d.hosts, d.tz, () => draw().catch(() => {})) }, 'New schedule')),
+      sc.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Schedule', 'Stream', 'When', 'Next', 'On', ''].map(h => el('th', {}, h)))),
+        el('tbody', {}, sc.map(e => el('tr', {}, el('td', {}, e.label), el('td', {}, (e.streamName || e.sid) + '  ', el('span', { class: 'hint' }, e.hostName || e.host)),
+          el('td', {}, daysText(e) + ', start ' + e.start + (e.stop ? ', stop ' + e.stop : '')),
+          el('td', {}, e.next ? e.next.action + ' ' + new Date(e.next.at).toLocaleString() : '-'),
+          el('td', {}, el('input', { type: 'checkbox', checked: e.enabled, onchange: async ev => { try { await oapi('/schedules/' + e.id, 'PUT', { enabled: ev.target.checked }); draw() } catch (err) { flash(m, err.message) } } })),
+          el('td', {}, el('button', { class: 'b', onclick: async () => { if (confirm('Delete the schedule "' + e.label + '"?')) { await oapi('/schedules/' + e.id, 'DELETE'); draw() } } }, 'Delete')))))) : el('div', { class: 'empty' }, 'No schedules yet.'),
+      el('div', { class: 'hint', style: 'margin-top:12px;max-width:720px' }, 'A scheduled start or stop is sent when its time arrives. If the portal was down for more than ten minutes past that time it is skipped rather than run late. If the PC does not answer, or cannot do it (for example no signal), you get an alert. A stop made here or by a schedule does not raise an off-air alert.'))
+  }
+  await draw()
+  healthTimer = setInterval(() => { if (adminSub === 'encoders' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 5000)
+}
+
 async function healthSection(box) {
   const draw = async () => {
     const h = await oapi('/health')
@@ -556,7 +634,7 @@ async function healthSection(box) {
 let actFilter = ''
 async function activitySection(box) {
   const [act, ls] = await Promise.all([oapi('/activity?limit=200' + (actFilter ? '&action=' + actFilter : '')), oapi('/links')])
-  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
+  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['encoder', 'Encoder control'], ['schedule', 'Schedules'], ['alert', 'Alerts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
   box.replaceChildren(
     el('h2', {}, 'All links'),
     ls.links.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Link', 'Stream', 'Status', 'Created', 'Views', 'Viewers (IPs)', 'Last viewed'].map(h => el('th', {}, h)))),
@@ -881,7 +959,7 @@ function buildWall() {
   wallEls = { root, grid, summary, filter, cols, tiles: new Map(), data: [], order: '' }
   return root
 }
-const tileState = t => !t.live ? ['bad', 'off'] : t.alert === 'critical' ? ['bad', ''] : t.alert === 'warning' ? ['warn', ''] : ['ok', '']
+const tileState = t => !t.live ? (t.stopped ? ['stopped', 'off'] : ['bad', 'off']) : t.alert === 'critical' ? ['bad', ''] : t.alert === 'warning' ? ['warn', ''] : ['ok', '']
 function wallTile(t) {
   let node = wallEls.tiles.get(t.id)
   if (!node) {
@@ -897,9 +975,10 @@ function wallTile(t) {
   const [cls, off] = tileState(t)
   node.root.className = 'wtile ' + cls + (off ? ' off' : '')
   node.name.textContent = t.name
-  node.tag.className = 'chip ' + (cls === 'ok' ? 'ok' : cls === 'warn' ? 'warn' : 'bad')
-  node.tag.textContent = !t.live ? 'OFF AIR' : t.alert === 'critical' ? 'PROBLEM' : t.alert === 'warning' ? 'LOW RATE' : 'LIVE'
-  node.off.replaceChildren(...(t.live ? [] : ['OFF AIR', el('small', {}, t.lastSeen ? 'last seen ' + ago(t.lastSeen) : '')]))
+  node.tag.className = 'chip ' + (cls === 'ok' ? 'ok' : cls === 'warn' ? 'warn' : cls === 'stopped' ? '' : 'bad')
+  node.tag.textContent = !t.live ? (t.stopped ? 'STOPPED' : 'OFF AIR') : t.alert === 'critical' ? 'PROBLEM' : t.alert === 'warning' ? 'LOW RATE' : 'LIVE'
+  node.off.replaceChildren(...(t.live ? [] : [t.stopped ? 'STOPPED' : 'OFF AIR', el('small', {}, (t.stopped ? 'stopped on purpose, ' : '') + (t.lastSeen ? 'last seen ' + ago(t.lastSeen) : ''))]))
+  node.off.style.color = t.stopped ? 'var(--mut)' : ''
   const rate = t.live ? (t.measuredKbps != null ? (t.measuredKbps / 1000).toFixed(1) + ' of ' + (t.kbps / 1000).toFixed(1) : (t.kbps / 1000).toFixed(1)) + ' Mbps' : ''
   node.bot.textContent = [rate, t.live && t.format, t.live && t.webViewers ? t.webViewers + ' viewing' : ''].filter(Boolean).join('   ')
   // picture: the thumbnail if there is one, otherwise a note saying why not
@@ -913,15 +992,15 @@ function wallTile(t) {
 function wallDraw() {
   if (!wallEls) return
   const q = wallEls.filter.value.trim().toLowerCase()
-  const rank = t => !t.live ? 0 : t.alert === 'critical' ? 0 : t.alert === 'warning' ? 1 : 2
+  const rank = t => !t.live ? (t.stopped ? 3 : 0) : t.alert === 'critical' ? 0 : t.alert === 'warning' ? 1 : 2
   const list = wallEls.data.filter(t => !q || t.name.toLowerCase().includes(q))
     .sort((a, b) => (wallPref.sort === 'problems' ? rank(a) - rank(b) : 0) || a.name.localeCompare(b.name))
   const nodes = list.map(wallTile)
   const order = list.map(t => t.id).join('|')
   if (order !== wallEls.order) { wallEls.grid.replaceChildren(...nodes.map(n => n.root)); wallEls.order = order }
   wallEls.grid.style.gridTemplateColumns = wallPref.cols === 'auto' ? 'repeat(auto-fill,minmax(300px,1fr))' : 'repeat(' + wallPref.cols + ',minmax(0,1fr))'
-  const all = wallEls.data, off = all.filter(t => !t.live).length, bad = all.filter(t => t.live && t.alert).length
-  wallEls.summary.textContent = (all.length - off) + ' on air' + (off ? ', ' + off + ' off air' : '') + (bad ? ', ' + bad + ' with problems' : '') + (all.length ? '' : 'No streams yet')
+  const all = wallEls.data, off = all.filter(t => !t.live && !t.stopped).length, bad = all.filter(t => t.live && t.alert).length
+  wallEls.summary.textContent = all.filter(t => t.live).length + ' on air' + (off ? ', ' + off + ' off air' : '') + (bad ? ', ' + bad + ' with problems' : '') + (all.length ? '' : 'No streams yet')
   wallEls.summary.style.color = off || bad ? 'var(--bad)' : 'var(--mut)'
   for (const [id, n] of wallEls.tiles) if (!all.some(t => t.id === id)) wallEls.tiles.delete(id)
 }

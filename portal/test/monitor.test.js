@@ -137,3 +137,39 @@ test('webhook text is readable for chat tools', () => {
   assert.match(done.text, /Resolved.*90 s/)
   assert.equal(done.closedAt, new Date(90000).toISOString())
 })
+
+test('a stream stopped on purpose is not an outage, until it is seen live again', async () => {
+  const r = rig({ offlineSec: 10 })
+  await r.step()
+  r.m.expectOff('ESPN 1')
+  r.snap.encoders = []
+  for (let i = 0; i < 6; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+  assert.equal(r.m.state().streams[0].stopped, true)
+  r.snap.encoders = [{ id: 'e1', name: 'ESPN 1', kbps: 10000, measuredKbps: 9800 }]
+  await r.step()
+  r.snap.encoders = []
+  for (let i = 0; i < 5; i++) await r.step()
+  assert.deepEqual(keys(r), ['stream.offline:e1'])                   // it was live again, so a later loss is a real one
+})
+
+test('an outside alert closes by itself after its time', async () => {
+  const r = rig()
+  await r.step()
+  r.m.external('schedule:1', 'critical', 'Scheduled start did not happen', 'PC is off', 60)
+  assert.deepEqual(keys(r), ['schedule:1'])
+  await r.step(30)
+  assert.deepEqual(keys(r), ['schedule:1'])
+  await r.step(40)
+  assert.deepEqual(keys(r), [])
+})
+
+test('a stream that keeps announcing for a few seconds after a stop is still a stop, not an outage', async () => {
+  const r = rig({ offlineSec: 10 })
+  await r.step()
+  r.m.expectOff('ESPN 1')
+  await r.step(); await r.step()                       // the encoder is still winding down (about 10 s)
+  r.snap.encoders = []
+  for (let i = 0; i < 6; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+})

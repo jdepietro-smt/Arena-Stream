@@ -53,6 +53,29 @@ try:
     st, r = call("/v1/decoders")
     assert st == 200 and len(r["decoders"]) == 1 and r["decoders"][0]["want"]["stream"] == "CBS", r
     assert call("/v1/decoder/want", {"id": "pc1-1", "stream": ""})[1]["want"]["seq"] > seq   # "" = disconnect, newer request
+    # Remote encoder control
+    hb = {"id": "pc9", "name": "Garden PC", "host": "pc9", "streams": [{"sid": "s1", "name": "Garden", "state": "live", "bitrate": 10000}]}
+    st, r = call("/v1/host/heartbeat", hb)
+    assert st == 200 and r["commands"] == [], (st, r)
+    assert call("/v1/host/heartbeat", {"name": "no id"})[0] == 400
+    assert call("/v1/host/command", {"host": "ghost", "stream": "s1", "action": "stop"})[0] == 404          # not connected
+    assert call("/v1/host/command", {"host": "pc9", "stream": "s1", "action": "explode"})[0] == 400
+    assert call("/v1/host/command", {"host": "pc9", "stream": "s1", "action": "bitrate", "value": 5})[0] == 400
+    assert call("/v1/host/command", {"host": "pc9", "stream": "s1", "action": "stop"}, key="wrong")[0] == 401
+    st, r = call("/v1/host/command", {"host": "pc9", "stream": "s1", "action": "bitrate", "value": 6000})
+    assert st == 200
+    seq1 = r["seq"]
+    seq2 = call("/v1/host/command", {"host": "pc9", "stream": "s1", "action": "stop"})[1]["seq"]
+    st, r = call("/v1/host/heartbeat", hb)
+    assert [c["seq"] for c in r["commands"]] == [seq1, seq2] and r["commands"][0]["value"] == 6000, r      # delivered until acknowledged
+    st, r = call("/v1/host/heartbeat", dict(hb, ack=seq1, results=[{"seq": seq1, "ok": True}]))
+    assert [c["seq"] for c in r["commands"]] == [seq2], r
+    st, r = call("/v1/host/heartbeat", dict(hb, ack=seq2, results=[{"seq": seq2, "ok": False, "error": "no signal"}]))
+    assert r["commands"] == []
+    st, r = call("/v1/hosts")
+    assert st == 200 and len(r["hosts"]) == 1 and r["hosts"][0]["pending"] == 0, r
+    assert [x["ok"] for x in r["hosts"][0]["results"]] == [True, False] and r["hosts"][0]["results"][1]["error"] == "no signal"
+    assert r["hosts"][0]["streams"][0]["name"] == "Garden"
     print("directory: all checks passed")
 finally:
     srv.terminate()

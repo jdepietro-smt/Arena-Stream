@@ -30,10 +30,11 @@ const DEFAULTS = {
 function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
   const o = { ...DEFAULTS, ...opts }
   const file = dir ? path.join(dir, 'monitor.json') : null
-  let data = { streams: {}, decoders: {}, events: [], seq: 0 }
+  let data = { streams: {}, decoders: {}, events: [], seq: 0, stopped: {} }
   if (file) { try { data = { ...data, ...JSON.parse(fs.readFileSync(file, 'utf8')) } } catch { /* first run */ } }
   const active = new Map()   // key -> alert (kept in memory; a restart re-derives them within a few seconds)
   const since = new Map()    // condition key -> when it first became true (for "for this long" rules)
+  const ext = new Map()      // alerts raised from outside (a failed scheduled start): key -> when they close by themselves
   let lastTick = 0, lastSave = 0, lastSnap = null, collectFailing = 0
 
   const save = (force) => {
@@ -82,8 +83,14 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
     while (rec.history.length && rec.history[0].t < cut) rec.history.shift()
   }
 
+  // A stream stopped on purpose (from the portal, or by a schedule) is not "off air": no alert until it is seen live again.
+  function expectOff(name) { data.stopped[String(name)] = now() }
+  // An alert raised by something other than the checks above. It closes by itself after `ttlSec`.
+  function external(key, severity, title, detail, ttlSec = 900) { raise(key, severity, title, detail); ext.set(key, now() + ttlSec * 1000) }
+
   async function tick() {
     const t = now()
+    for (const [k, until] of ext) if (t >= until) { ext.delete(k); clear(k) }
     let s
     try { s = await collect(); collectFailing = 0 } catch (e) {
       collectFailing++
@@ -103,6 +110,8 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       const seen = new Set()
       for (const e of s.encoders || []) {
         seen.add(e.id)
+        // Still announcing in the first seconds after a stop is the old stream finishing, not a new start.
+        if (data.stopped[e.name] && t - data.stopped[e.name] > 20000) delete data.stopped[e.name]
         const rec = data.streams[e.id] || (data.streams[e.id] = { id: e.id, name: e.name, firstSeen: t, history: [] })
         rec.name = e.name; rec.lastSeen = t; rec.kbps = e.kbps; rec.measuredKbps = e.measuredKbps ?? null
         addPoint(rec, t, true, e.measuredKbps ?? e.kbps)
@@ -116,6 +125,7 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
         addPoint(rec, t, false, 0)
         since.delete('low:' + rec.id); clear('stream.lowrate:' + rec.id)
         const gone = (t - (rec.lastSeen || 0)) / 1000
+        if (data.stopped[rec.name]) { clear('stream.offline:' + rec.id); continue }
         if (t - rec.lastSeen > o.forgetStreamHours * 3600 * 1000) { delete data.streams[rec.id]; clear('stream.offline:' + rec.id); continue }
         if (gone >= o.offlineSec) raise('stream.offline:' + rec.id, 'critical', `${rec.name} went off air`, `Last seen ${Math.round(gone)} s ago.`)
       }
@@ -168,7 +178,7 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       at: t, lastTick, running: !!lastTick && t - lastTick < 30000,
       alerts: [...active.values()].sort((a, b) => (a.severity === b.severity ? b.openedAt - a.openedAt : a.severity === 'critical' ? -1 : 1)),
       streams: Object.values(data.streams).map(r => ({
-        id: r.id, name: r.name, live: r.lastSeen === lastTick, lastSeen: r.lastSeen, kbps: r.kbps, measuredKbps: r.measuredKbps, uptimePct: uptimePct(r),
+        id: r.id, name: r.name, live: r.lastSeen === lastTick, stopped: !!data.stopped[r.name] && r.lastSeen !== lastTick, lastSeen: r.lastSeen, kbps: r.kbps, measuredKbps: r.measuredKbps, uptimePct: uptimePct(r),
         series: r.history.slice(-180).map(p => ({ t: p.t, kbps: p.up ? Math.round(p.kbps / p.up) : 0, up: p.n ? p.up / p.n : 0 })),
       })).sort((a, b) => a.name.localeCompare(b.name)),
       decoders: Object.values(data.decoders).map(d => ({ ...d, live: d.lastSeen === lastTick })),
@@ -176,7 +186,7 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       snapshot: lastSnap && { system: lastSnap.system, disks: lastSnap.disks },
     }
   }
-  return { tick, state, flush: () => save(true), _active: active }
+  return { tick, state, expectOff, external, flush: () => save(true), _active: active }
 }
 
 // The message sent to a webhook. `text` is what Slack and Teams show; the rest is for tools that read JSON.
