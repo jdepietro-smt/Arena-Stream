@@ -41,6 +41,9 @@ install -m 755 "$SRC/deploy/ctl.sh" "$APP.new/ctl.sh"
 rm -rf "$APP"; mv "$APP.new" "$APP"
 mkdir -p "$ETC" "$DATA"; chmod 700 "$ETC"
 chown -R nobody:nogroup "$DATA"
+# App releases (uploaded on the Admin page, handed to the apps by the Link directory). The portal writes here, the directory only reads.
+UPD=/var/lib/arena-updates
+mkdir -p "$UPD"; chown -R nobody:nogroup "$UPD"; chmod 755 "$UPD"
 
 step "Configuration"
 rand() { local v; v="$(openssl rand -base64 48 | tr -dc "$1" | head -c "$2")" || true; printf '%s' "$v"; }
@@ -76,6 +79,8 @@ KEY="$(grep -m1 '^LINK_KEY=' /etc/arena-link.env | cut -d= -f2-)"
 [ -n "$KEY" ] || { echo "no LINK_KEY in /etc/arena-link.env"; exit 1; }
 sed -i '/^LINK_KEY=/d' "$ETC/env"
 printf 'LINK_KEY=%s\n' "$KEY" >> "$ETC/env"
+sed -i '/^PORTAL_UPDATES_DIR=/d' "$ETC/env"
+printf 'PORTAL_UPDATES_DIR=%s\n' "$UPD" >> "$ETC/env"
 chmod 600 "$ETC/env"
 
 step "Service"
@@ -100,7 +105,7 @@ IOSchedulingClass=idle
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$DATA
+ReadWritePaths=$DATA $UPD
 
 [Install]
 WantedBy=multi-user.target
@@ -142,6 +147,19 @@ install -d /etc/nginx/snippets
 cat > /etc/nginx/snippets/arena-portal.conf <<'NGINX'
 # Managed by portal/deploy/install.sh
 location = /portal { return 301 /portal/; }
+# Uploading a new app version (a 100 MB installer): only this route gets the big body and the long timeout.
+location = /portal/api/owner/updates/upload {
+    proxy_pass http://127.0.0.1:8910;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    client_max_body_size 520m;
+    client_body_timeout 900s;
+    proxy_request_buffering off;
+    proxy_read_timeout 900s;
+    proxy_send_timeout 900s;
+}
 location /portal/ {
     proxy_pass http://127.0.0.1:8910;
     proxy_http_version 1.1;

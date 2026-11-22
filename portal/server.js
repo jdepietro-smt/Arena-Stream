@@ -23,6 +23,7 @@ const { createThumbs } = require('./lib/thumbs')
 const captest = require('./lib/captest-core')
 const { openMonitor, webhookBody } = require('./lib/monitor')
 const sched = require('./lib/schedule')
+const { openUpdates, MAX_BYTES: UPDATE_MAX } = require('./lib/updates')
 
 // Services the owner can look at and restart from the Admin page. Restarts go through a root helper
 // (portal/deploy/ctl.sh) that accepts only these names; the portal itself runs unprivileged.
@@ -48,6 +49,7 @@ function loadConfig(env = process.env) {
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
     ownerInit: env.PORTAL_OWNER_PASSWORD_INIT || '',                // first owner password; stored hashed, then removed from the env file
+    updatesDir: env.PORTAL_UPDATES_DIR || '/var/lib/arena-updates',   // app releases; the Link directory serves them to the apps
     scheduleEverySec: parseInt(env.PORTAL_SCHEDULE_SEC || '10', 10),   // how often schedules are checked (0 = off)
     monitorEverySec: parseInt(env.PORTAL_MONITOR_SEC || '5', 10),   // how often the system is checked for alerts (0 = off)
     ctlDir: env.PORTAL_CTL_DIR || '',                               // where restart requests are left for the root helper
@@ -464,6 +466,7 @@ function createPortal(cfg) {
   // ── Remote encoder control and schedules ───────────────────────────────────────────────────────────────
   // Encoder PCs report their streams to the directory and pick up commands from it (see link/directory). The portal queues
   // commands, either from the Encoder control page or from a schedule that has come due, and watches for the answer.
+  const updates = openUpdates(cfg.updatesDir)
   const schedules = sched.openSchedules(cfg.dataDir)
   const awaiting = new Map()   // command seq -> what it was for, until the PC has answered
   const hostsNow = async () => { try { return (await dir('/v1/hosts')).hosts || [] } catch { return null } }
@@ -774,6 +777,50 @@ function createPortal(cfg) {
       return send(res, 200, { ok: true, signedOut: true })
     }
 
+    // ── Software updates for the Arena Link apps ──────────────────────────────────────────────────────────
+    if (sub === 'updates' && m === 'GET') {
+      const hosts = await hostsNow()
+      let decs = []
+      try { decs = (await dir('/v1/decoders')).decoders || [] } catch { /* none */ }
+      const byPc = new Map()           // one row per PC, whichever of encoder or decoder it is running
+      for (const h of hosts || []) byPc.set(h.host || h.name, { pc: h.host || h.name, name: h.name, roles: ['encoder'], version: h.version || null, updater: h.updater || null, ageMs: h.ageMs })
+      for (const d of decs) {
+        const k = d.host || d.name, cur = byPc.get(k)
+        if (cur) { cur.roles.push('decoder'); cur.version = cur.version || d.version || null; cur.updater = cur.updater || d.updater || null }
+        else byPc.set(k, { pc: k, name: d.name, roles: ['decoder'], version: d.version || null, updater: d.updater || null, ageMs: d.ageMs })
+      }
+      return send(res, 200, { apps: Object.keys(updates.apps).filter(a => updates.apps[a].selfUpdates).map(a => updates.state(a)), fleet: [...byPc.values()].sort((a, b) => a.pc.localeCompare(b.pc)) })
+    }
+    if (sub === 'updates/upload' && m === 'POST') {
+      const q = new URL(req.url, 'http://x').searchParams
+      const parsed = updates.parseName(q.get('name'))
+      if (!parsed) return send(res, 400, { error: 'the file must be named like Arena-Link-Setup-0.2.0.exe (the name carries the version)' })
+      if (Number(req.headers['content-length']) > UPDATE_MAX) return send(res, 413, { error: 'the file is larger than 500 MB' })
+      let got
+      try { got = await updates.receive(parsed.app, parsed.file, req) } catch (e) { return send(res, 400, { error: e.message }) }
+      const st = updates.publish(parsed.app, { version: parsed.version, file: parsed.file, sha256: got.sha256, size: got.size, notes: q.get('notes') })
+      admin.audit('owner', 'updates.upload', `${parsed.file} (${Math.round(got.size / 1048576)} MB), held back until released`, ip)
+      return send(res, 200, st)
+    }
+    let up
+    if ((up = sub.match(/^updates\/([a-z]+)\/(rollout|rollback)$/)) && m === 'POST' && updates.apps[up[1]]) {
+      const b = await readJson(req) || {}
+      try {
+        if (up[2] === 'rollout') {
+          const st = updates.setRollout(up[1], b.mode, b.hosts)
+          admin.audit('owner', 'updates.rollout', `${up[1]} ${st.latest.version}: ${b.mode}${b.mode === 'only' ? ' ' + st.latest.allow.join(', ') : ''}`, ip)
+          return send(res, 200, st)
+        }
+        const st = updates.rollback(up[1], String(b.version || ''))
+        admin.audit('owner', 'updates.rollback', `${up[1]} back to ${st.latest.version}, held back until released`, ip)
+        return send(res, 200, st)
+      } catch (e) { return send(res, 400, { error: e.message }) }
+    }
+    if ((up = sub.match(/^updates\/([a-z]+)\/(\d+\.\d+\.\d+)$/)) && m === 'DELETE' && updates.apps[up[1]]) {
+      try { updates.remove(up[1], up[2]) } catch (e) { return send(res, 400, { error: e.message }) }
+      admin.audit('owner', 'updates.delete', `${up[1]} ${up[2]}`, ip)
+      return send(res, 200, updates.state(up[1]))
+    }
     if (sub === 'encoders' && m === 'GET') {
       const hosts = await hostsNow()
       if (!hosts) return send(res, 502, { error: 'the directory is not reachable' })

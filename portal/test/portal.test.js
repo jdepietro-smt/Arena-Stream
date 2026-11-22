@@ -79,7 +79,7 @@ async function setup() {
     ownerInit: 'ownerpass1234', execFile: fakeExec, ctlDir,
     spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
-    mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir,
+    mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir, updatesDir: path.join(dataDir, 'updates'),
   })
   const port = await listen(server)
   const base = `http://127.0.0.1:${port}`
@@ -1059,5 +1059,43 @@ test('path health from the encoder PCs reaches the monitor and the wall', async 
     assert.equal(st.streams.find(x => x.name === 'LAN only').paths, null)                 // a stream with no report has none
     const w = (await t.call('/portal/api/wall')).body
     assert.deepEqual(w.tiles.find(x => x.name === 'ESPN 1').relays, { up: 1, total: 2 })
+  } finally { await t.close() }
+})
+
+test('software updates: owner only, upload is checked, releases start held back, rollout and roll back work, fleet versions show', async () => {
+  const t = await setup()
+  try {
+    await adminLogin(t)
+    assert.equal((await t.call('/portal/api/owner/updates')).status, 403)
+    await ownerLogin(t)
+    const up = (name, buf, notes = '') => t.call('/portal/api/owner/updates/upload?name=' + encodeURIComponent(name) + '&notes=' + encodeURIComponent(notes), { method: 'POST', body: buf, raw: true, headers: { 'Content-Type': 'application/octet-stream' } })
+    const exe = fill => Buffer.concat([Buffer.from('MZ'), Buffer.alloc(1.2 * 1024 * 1024, fill)])
+    assert.equal((await up('setup.exe', exe(1))).status, 400)                                  // the name carries the version
+    assert.equal((await up('Arena-Link-Setup-0.2.0.exe', Buffer.from('MZ small'))).status, 400)
+    assert.equal((await up('Arena-Link-Setup-0.2.0.exe', Buffer.alloc(1.2 * 1024 * 1024, 5))).status, 400)   // not a program
+    const r = await up('Arena-Link-Setup-0.2.0.exe', exe(2), 'relay failover')
+    assert.equal(r.status, 200)
+    assert.deepEqual([r.body.latest.version, r.body.latest.paused, r.body.latest.notes], ['0.2.0', true, 'relay failover'])
+    assert.ok(fs.existsSync(path.join(t.dataDir, 'updates', 'link', 'Arena-Link-Setup-0.2.0.exe')))
+    await up('Arena-Link-Setup-0.3.0.exe', exe(3))
+
+    const post = (u, b) => t.call('/portal/api/owner/updates/' + u, { method: 'POST', body: b })
+    assert.equal((await post('link/rollout', { mode: 'only', hosts: [] })).status, 400)
+    let st = (await post('link/rollout', { mode: 'only', hosts: ['canary-pc'] })).body
+    assert.deepEqual([st.latest.version, st.latest.paused, st.latest.allow], ['0.3.0', false, ['canary-pc']])
+    st = (await post('link/rollout', { mode: 'all' })).body
+    assert.deepEqual([st.latest.paused, st.latest.allow], [false, []])
+    st = (await post('link/rollback', { version: '0.2.0' })).body
+    assert.deepEqual([st.latest.version, st.latest.exact, st.latest.paused], ['0.2.0', true, true])
+    assert.equal((await t.call('/portal/api/owner/updates/link/0.2.0', { method: 'DELETE' })).status, 400)   // current
+    assert.equal((await t.call('/portal/api/owner/updates/link/0.3.0', { method: 'DELETE' })).status, 200)
+
+    t.setHosts([{ ...PC(), host: 'garden-pc', version: '0.1.0', updater: { state: 'ready', pending: '0.2.0' } }])
+    const list = (await t.call('/portal/api/owner/updates')).body
+    assert.deepEqual(list.apps.map(a => a.app), ['link'])                       // the standalone Decoder app cannot update itself yet
+    const row = list.fleet.find(x => x.pc === 'garden-pc')
+    assert.deepEqual([row.version, row.updater.pending, row.roles], ['0.1.0', '0.2.0', ['encoder']])
+    const act = (await t.call('/portal/api/owner/activity?action=updates')).body.entries.map(e => e.action)
+    assert.ok(['updates.upload', 'updates.rollout', 'updates.rollback', 'updates.delete'].every(a => act.includes(a)), act.join())
   } finally { await t.close() }
 })

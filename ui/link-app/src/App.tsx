@@ -22,7 +22,11 @@ interface Config {
   streams: StreamCfg[]
   decs: DecCfg[]
   allowRemote?: boolean
+  updateMode?: 'idle' | 'ask' | 'off'
+  updateWindow?: { from: string; to: string } | null
 }
+
+interface UpdStatus { state: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error' | 'off'; pending?: string; pct?: number; waiting?: string; error?: string }
 
 interface Card { index: number; device: number; channel: number; name: string; backend: string }
 
@@ -63,10 +67,13 @@ export default function App() {
   const [logs, setLogs] = useState<string[]>([])
   const [showLog, setShowLog] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [upd, setUpd] = useState<UpdStatus | null>(null)
 
   useEffect(() => {
     link.getConfig().then((c: Config) => { setConfigState(c); if (!c.key) setShowSettings(true) })
+    link.updaterStatus().then((s: UpdStatus | null) => setUpd(s))
     const offs = [
+      link.onUpdaterStatus((s: UpdStatus) => setUpd(s)),
       link.onLog((l: string) => setLogs(p => [...p.slice(-300), l])),
       link.onDirectory((d: DirState) => setDir(d)),
     ]
@@ -105,6 +112,14 @@ export default function App() {
         </div>
       </div>
 
+      {upd && (upd.state === 'downloading' || upd.state === 'ready' || upd.state === 'installing' || upd.state === 'error') && (
+        <div className={`banner ${upd.state === 'error' ? 'bad' : ''}`}>
+          {upd.state === 'downloading' && `Downloading version ${upd.pending} (${upd.pct ?? 0}%)...`}
+          {upd.state === 'ready' && <>Version {upd.pending} is ready. {config.updateMode === 'ask' ? 'Install it when you are ready.' : `It installs automatically once nothing is live${upd.waiting ? ` (waiting for ${upd.waiting})` : ''}.`} <button className="btn small" onClick={() => { if (confirm('Install now? Everything on this PC stops while the app updates and restarts.')) link.updaterInstallNow() }}>INSTALL NOW</button></>}
+          {upd.state === 'installing' && `Installing version ${upd.pending}. The app restarts by itself...`}
+          {upd.state === 'error' && <>Update problem: {upd.error}. <button className="btn small" onClick={() => link.updaterCheckNow()}>TRY AGAIN</button></>}
+        </div>
+      )}
       {!dir.ok && dir.encoders.length > 0 && <div className="banner">Internet directory unreachable ({dir.error}). Showing the encoders found on this network.</div>}
       {!dir.ok && dir.encoders.length === 0 && <div className="banner bad">Directory: {dir.error}. Check Settings.</div>}
 
@@ -759,10 +774,14 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
   const [relayHost, setRelayHost] = useState(config.relayHost)
   const [relaySecret, setRelaySecret] = useState(config.relaySecret)
   const [allowRemote, setAllowRemote] = useState(config.allowRemote !== false)
+  const [updateMode, setUpdateMode] = useState<'idle' | 'ask' | 'off'>(config.updateMode ?? 'idle')
+  const [winOn, setWinOn] = useState(!!config.updateWindow)
+  const [winFrom, setWinFrom] = useState(config.updateWindow?.from ?? '03:00')
+  const [winTo, setWinTo] = useState(config.updateWindow?.to ?? '05:00')
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null)
 
   async function test() { setResult(null); setResult(await link.testDirectory(directory, key)) }
-  function save() { setConfig(c => ({ ...c, directory: directory.trim(), key: key.trim(), relayHost: relayHost.trim(), relaySecret: relaySecret.trim(), allowRemote })); onClose() }
+  function save() { setConfig(c => ({ ...c, directory: directory.trim(), key: key.trim(), relayHost: relayHost.trim(), relaySecret: relaySecret.trim(), allowRemote, updateMode, updateWindow: winOn && winFrom !== winTo ? { from: winFrom, to: winTo } : null })); onClose() }
 
   return (
     <div className="modal" onClick={onClose}>
@@ -773,6 +792,18 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
         <label>Access key<input type="password" value={key} onChange={e => setKey(e.target.value)} /></label>
         <label>Relay server <span className="hint">for decoders on other networks. Add a backup after a comma; the stream is sent to both, so it uses twice the upload.</span><input value={relayHost} onChange={e => setRelayHost(e.target.value)} placeholder="server IP address, backup IP address" /></label>
         <label>Relay password <span className="hint">encoders only</span><input type="password" value={relaySecret} onChange={e => setRelaySecret(e.target.value)} /></label>
+        <label>Software updates <span className="hint">new versions come from the server; this PC downloads them in the background</span>
+          <select value={updateMode} onChange={e => setUpdateMode(e.target.value as 'idle' | 'ask' | 'off')}>
+            <option value="idle">Install automatically when nothing is live</option>
+            <option value="ask">Download, then wait for me to click Install now</option>
+            <option value="off">Never update this PC</option>
+          </select>
+        </label>
+        {updateMode === 'idle' && (
+          <label className="check"><input type="checkbox" checked={winOn} onChange={e => setWinOn(e.target.checked)} /> Maintenance window: may install even while live, between
+            <input type="time" value={winFrom} disabled={!winOn} onChange={e => setWinFrom(e.target.value)} style={{ width: 96 }} /> and <input type="time" value={winTo} disabled={!winOn} onChange={e => setWinTo(e.target.value)} style={{ width: 96 }} />
+          </label>
+        )}
         <label className="check"><input type="checkbox" checked={allowRemote} onChange={e => setAllowRemote(e.target.checked)} /> Allow the web portal to start, stop and retune this PC's streams (including scheduled starts and stops)</label>
         <div className="row">
           <button className="btn" onClick={test}>TEST</button>

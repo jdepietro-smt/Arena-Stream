@@ -1,12 +1,13 @@
 {
   "name": "arena-link",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Arena Link - SDI encoder and decoder, automatic discovery, low-latency SRT",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build && tsc -p tsconfig.electron.json && electron-builder",
     "preview": "vite preview",
+    "test": "tsc -p tsconfig.electron.json && node --test",
     "electron": "concurrently -k \"vite --port 5173\" \"wait-on tcp:5173 && tsc -p tsconfig.electron.json && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\""
   },
   "devDependencies": {

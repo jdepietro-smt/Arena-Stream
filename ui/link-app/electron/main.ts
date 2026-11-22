@@ -8,6 +8,8 @@ import * as path from 'path'
 import * as fs from 'fs'
 import * as http from 'http'
 import * as os from 'os'
+import { startUpdater } from './updater'
+import type { UpdateMode, Window as UpdateWindow } from './update-core'
 
 // One instance only: a second launch would fight the first over the capture card and ports.
 const hasSingleLock = app.requestSingleInstanceLock()
@@ -32,7 +34,7 @@ function createWindow() {
   else win.loadFile(path.join(__dirname, '../dist/index.html'))
 }
 
-if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); startDecoderBeat(); startHostBeat(); createWindow() })
+if (hasSingleLock) app.whenReady().then(() => { startDirectoryPoll(); startDecoderBeat(); startHostBeat(); startUpdates(); createWindow() })
 
 app.on('window-all-closed', () => {
   win = null
@@ -91,6 +93,8 @@ interface Config {
   streams: StreamCfg[]
   decs: DecCfg[]
   allowRemote?: boolean   // the web portal may start, stop and retune this PC's streams (default on)
+  updateMode?: UpdateMode          // idle (default): install a new version when nothing is live; ask: wait for a click; off
+  updateWindow?: UpdateWindow | null   // optional maintenance window in which an update may install even while live
 }
 
 // Built-in directory access key so a fresh install connects with no setup (Settings can override it).
@@ -720,7 +724,7 @@ function startDecoderBeat() {
       const ls = decLast.get(d.id) as { state?: string; encoder?: string } | undefined
       try {
         const r = await postDirectory(c.directory, c.key, '/v1/decoder/heartbeat', {
-          id: beatId(d.id), name: `${os.hostname()} decoder ${i + 1}`, host: os.hostname(),
+          id: beatId(d.id), name: `${os.hostname()} decoder ${i + 1}`, host: os.hostname(), version: app.getVersion(), updater: updaterSummary(),
           state: running ? (ls?.state ?? 'connecting') : 'stopped', stream: running ? (ls?.encoder || d.selected) : '',
           ...(running && ls?.state === 'live' ? { paths: { via: (ls as { path?: string }).path, ...(decPaths.get(d.id) as object | undefined) } } : {}),
         })
@@ -737,6 +741,25 @@ function startDecoderBeat() {
   }
   beatTimer = setInterval(() => { void tick() }, 4000)
 }
+
+// ── Software updates: see updater.ts. Only the installed app does this, never a development run.
+let updater: ReturnType<typeof startUpdater> | null = null
+function startUpdates() {
+  if (!app.isPackaged) return
+  updater = startUpdater({
+    app: 'link', version: app.getVersion(), host: os.hostname(), dir: path.join(app.getPath('userData'), 'updates'),
+    config: () => cfg(),
+    isLive: () => [...encRuns.values()].some(r => r.wanted) || decRuns.size > 0,
+    prepareToQuit: async () => { stopAllEncoders(true); stopAllDecoders(); stopMdnsWatch(); await stopAllMonitors(); await new Promise(r => setTimeout(r, 3500)) },
+    quit: () => app.quit(),
+    onStatus: s => send('updater-status', s),
+    log: m => send('log', m),
+  })
+}
+const updaterSummary = () => { const s = updater?.status(); return s ? { state: s.state, pending: s.pending, pct: s.pct, waiting: s.waiting, error: s.error } : { state: 'dev' } }
+ipcMain.handle('updater-status', () => updater?.status() ?? null)
+ipcMain.handle('updater-install-now', () => { void updater?.installNow(); return true })
+ipcMain.handle('updater-check-now', () => { void updater?.checkNow(); return true })
 
 // ── Remote encoder control: this PC reports its streams to the directory every few seconds and is handed commands the
 // web portal (or a schedule) has queued: start, stop, restart, set bitrate. The window carries them out exactly like a
@@ -757,7 +780,7 @@ function startHostBeat() {
     })
     const results = hostResults.splice(0, hostResults.length)
     try {
-      const r = await postDirectory(c.directory, c.key, '/v1/host/heartbeat', { id: hostName(), name: hostName(), host: hostName(), streams, ack: hostSeq, results })
+      const r = await postDirectory(c.directory, c.key, '/v1/host/heartbeat', { id: hostName(), name: hostName(), host: hostName(), version: app.getVersion(), updater: updaterSummary(), streams, ack: hostSeq, results })
       for (const cmd of (r?.commands ?? []) as { seq: number; stream: string; action: string; value?: number; ageMs: number }[]) {
         if (hostSeen.has(cmd.seq)) continue
         hostSeen.add(cmd.seq)

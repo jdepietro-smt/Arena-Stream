@@ -22,7 +22,30 @@ def call(path, body=None, key=KEY):
         return e.code, json.load(e)
 
 
-env = dict(os.environ, LINK_PORT=PORT, LINK_KEY=KEY, LINK_TTL="1.5")
+import tempfile
+UPD = tempfile.mkdtemp(prefix="upd-")
+os.makedirs(os.path.join(UPD, "link"))
+PAYLOAD = bytes(range(256)) * 40                     # 10240 bytes
+open(os.path.join(UPD, "link", "Arena-Link-Setup-0.2.0.exe"), "wb").write(PAYLOAD)
+
+
+def write_manifest(**kw):
+    m = {"version": "0.2.0", "file": "Arena-Link-Setup-0.2.0.exe", "sha256": "ab" * 32, "size": len(PAYLOAD), "notes": "n"}
+    m.update(kw)
+    with open(os.path.join(UPD, "link", "latest.json"), "w") as f:
+        json.dump(m, f)
+
+
+def raw(path, headers=None, key=KEY):
+    req = urllib.request.Request(BASE + path, headers=dict({"X-Arena-Key": key}, **(headers or {})))
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.status, r.read(), r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), e.headers
+
+
+env = dict(os.environ, LINK_PORT=PORT, LINK_KEY=KEY, LINK_TTL="1.5", LINK_UPDATE_DIR=UPD)
 srv = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "directory.py")], env=env,
                        stdout=subprocess.DEVNULL)
 try:
@@ -86,6 +109,45 @@ try:
     assert "paths" not in call("/v1/hosts")[1]["hosts"][0]["streams"][0]           # too big: dropped, the heartbeat still works
     call("/v1/decoder/heartbeat", {"id": "pc1-1", "name": "Truck decoder", "host": "pc1", "state": "live", "stream": "ESPN", "paths": {"paths": 2, "up": 1, "pathUp": [True, False]}})
     assert call("/v1/decoders")[1]["decoders"][0]["paths"]["up"] == 1
+    # Software updates
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.0", key="wrong")[0] == 401
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.0")[1] == {"update": False}                  # nothing published yet
+    write_manifest()
+    st, r = call("/v1/update/link/latest?host=pc1&version=0.1.0")
+    assert st == 200 and r["update"] is True and r["version"] == "0.2.0" and r["file"].endswith("0.2.0.exe") and r["sha256"] == "ab" * 32, r
+    assert call("/v1/update/link/latest?host=pc1&version=0.2.0")[1] == {"update": False}                  # already there
+    assert call("/v1/update/link/latest?host=pc1&version=0.10.0")[1] == {"update": False}                 # 0.10.0 is newer than 0.2.0, numerically
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.9")[1]["update"] is True
+    write_manifest(paused=True)
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.0")[1] == {"update": False}
+    write_manifest(allow=["canary-pc"])
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.0")[1] == {"update": False}                  # staged: not this PC yet
+    assert call("/v1/update/link/latest?host=canary-pc&version=0.1.0")[1]["update"] is True
+    write_manifest(exact=True, version="0.1.5")
+    assert call("/v1/update/link/latest?host=pc1&version=0.2.0")[1]["update"] is True                     # a roll back moves backwards
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.5")[1] == {"update": False}
+    write_manifest(file="../../etc/passwd")
+    assert call("/v1/update/link/latest?host=pc1&version=0.1.0")[1] == {"update": False}                  # a manifest cannot point outside
+    write_manifest()
+    assert call("/v1/update/Link!/latest")[0] == 404 and call("/v1/update/nope/latest?version=0")[1] == {"update": False}
+    st, body, h = raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe")
+    assert st == 200 and body == PAYLOAD and h["Accept-Ranges"] == "bytes"
+    st, body, h = raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe", {"Range": "bytes=10000-"})
+    assert st == 206 and body == PAYLOAD[10000:] and h["Content-Range"] == "bytes 10000-10239/10240", (st, h)
+    st, body, h = raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe", {"Range": "bytes=0-99"})
+    assert st == 206 and body == PAYLOAD[:100]
+    st, body, h = raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe", {"Range": "bytes=-16"})
+    assert st == 206 and body == PAYLOAD[-16:]
+    assert raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe", {"Range": "bytes=99999-"})[0] == 416
+    assert raw("/v1/update/link/file/missing.exe")[0] == 404
+    assert raw("/v1/update/link/file/..%2f..%2fetc%2fpasswd")[0] in (400, 404)
+    assert raw("/v1/update/link/file/Arena-Link-Setup-0.2.0.exe", key="wrong")[0] == 401
+    # versions travel with the heartbeats
+    call("/v1/host/heartbeat", dict(hb, version="0.1.0", updater={"state": "ready", "pending": "0.2.0"}))
+    h0 = call("/v1/hosts")[1]["hosts"][0]
+    assert h0["version"] == "0.1.0" and h0["updater"]["pending"] == "0.2.0", h0
+    call("/v1/decoder/heartbeat", {"id": "pc1-1", "name": "Truck decoder", "host": "pc1", "state": "live", "stream": "ESPN", "version": "0.1.0"})
+    assert call("/v1/decoders")[1]["decoders"][0]["version"] == "0.1.0"
     print("directory: all checks passed")
 finally:
     srv.terminate()

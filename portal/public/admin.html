@@ -276,7 +276,7 @@ function newLinkDialog(stream) {
 // ── Admin (owner-only) ─────────────────────────────────────────────────────────
 // Needs the owner password on top of the normal login; it locks again after 15 idle minutes.
 let owner = { configured: true, unlocked: false, remainingSec: 0 }, adminSub = 'account', ownerTimer = null, healthTimer = null
-const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['monitor', 'Monitoring'], ['encoders', 'Encoder control'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
+const SUBS = [['account', 'Account and security'], ['settings', 'Settings'], ['monitor', 'Monitoring'], ['encoders', 'Encoder control'], ['updates', 'Software updates'], ['health', 'Server health'], ['capacity', 'Capacity test'], ['activity', 'Activity and links']]
 
 async function oapi(path, method = 'GET', body) {
   const r = await fetch('/portal/api/owner' + path, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
@@ -314,6 +314,7 @@ async function adminRender() {
     else if (adminSub === 'settings') await settingsSection(content)
     else if (adminSub === 'monitor') await monitorSection(content)
     else if (adminSub === 'encoders') await encodersSection(content)
+    else if (adminSub === 'updates') await updatesSection(content)
     else if (adminSub === 'health') await healthSection(content)
     else if (adminSub === 'capacity') await capacitySection(content)
     else await activitySection(content)
@@ -614,6 +615,74 @@ async function encodersSection(box) {
   healthTimer = setInterval(() => { if (adminSub === 'encoders' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 5000)
 }
 
+// Software updates: publish a new build of an Arena app, choose who gets it, and see which PCs are on which version.
+const rolloutText = l => !l ? 'nothing published' : l.paused ? 'held back: nobody is updating' : l.allow && l.allow.length ? 'only ' + l.allow.join(', ') : 'everyone'
+function pickPcsDialog(fleet, label, done) {
+  const boxes = fleet.map(f => ({ f, b: el('input', { type: 'checkbox' }) }))
+  const err = el('div', { class: 'err' })
+  const close = () => dlg.remove()
+  const dlg = el('div', { class: 'modal', onclick: e => e.target === dlg && close() }, el('div', { class: 'card', style: 'gap:12px;max-width:420px' },
+    el('h2', {}, 'Release ' + label + ' to these PCs first'),
+    el('div', { class: 'hint' }, 'Only the ticked PCs are offered the update. Once they are fine, release it to everyone.'),
+    fleet.length ? el('div', { style: 'display:flex;flex-direction:column;gap:6px;max-height:300px;overflow:auto' }, boxes.map(x => el('label', { class: 'check', style: 'flex-direction:row;gap:8px;color:var(--text)' }, x.b, el('span', {}, x.f.pc + '  ', el('span', { class: 'hint' }, 'on ' + (x.f.version || 'unknown')))))) : el('div', { class: 'empty' }, 'No PC is connected right now.'),
+    err, el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { try { await done(boxes.filter(x => x.b.checked).map(x => x.f.pc)); close() } catch (e) { err.textContent = e.message } } }, 'Release'), el('button', { class: 'b', onclick: close }, 'Cancel'))))
+  document.body.append(dlg)
+}
+async function updatesSection(box) {
+  const m = msgBox()
+  const draw = async () => {
+    const d = await oapi('/updates')
+    const cards = d.apps.map(a => {
+      const l = a.latest
+      const onIt = l ? d.fleet.filter(f => f.version === l.version).length : 0
+      const file = el('input', { type: 'file', accept: '.exe' })
+      const notes = el('input', { type: 'text', placeholder: 'What changed (optional)', style: 'flex:1;min-width:200px' })
+      const bar = el('div', { class: 'hint' })
+      const upload = () => {
+        const f = file.files[0]
+        if (!f) return flash(m, 'Choose the installer file first.')
+        const x = new XMLHttpRequest()
+        x.open('POST', '/portal/api/owner/updates/upload?name=' + encodeURIComponent(f.name) + '&notes=' + encodeURIComponent(notes.value))
+        x.upload.onprogress = e => { bar.textContent = 'Uploading ' + Math.round(e.loaded / e.total * 100) + '%...' }
+        x.onload = () => { let j = {}; try { j = JSON.parse(x.responseText) } catch { /* not json */ } bar.textContent = ''; if (x.status === 200) { flash(m, f.name + ' uploaded. It is held back until you release it.', true); draw() } else flash(m, j.error || 'Upload failed (' + x.status + ')') }
+        x.onerror = () => { bar.textContent = ''; flash(m, 'Upload failed: the connection dropped.') }
+        x.send(f)
+      }
+      const roll = async (mode, hosts) => { try { await oapi('/updates/' + a.app + '/rollout', 'POST', { mode, hosts }); draw() } catch (e) { flash(m, e.message) } }
+      return el('div', { class: 'card', style: 'margin:0 0 16px;max-width:none;gap:10px' },
+        el('div', { class: 'row' }, el('h2', { style: 'margin:0' }, a.label), l ? el('span', { class: 'chip ' + (l.paused ? 'warn' : 'ok') }, l.paused ? 'held back' : 'rolling out') : null),
+        l ? el('div', {}, el('b', {}, 'Version ' + l.version), '  ', el('span', { class: 'hint' }, bytes(l.size) + ', published ' + fmtTime(l.publishedAt) + (l.exact ? ', ROLL BACK: PCs move to exactly this version' : '') + (l.notes ? '. ' + l.notes : ''))) : el('div', { class: 'hint' }, 'Nothing published yet. Build the app, then upload its installer below.'),
+        l ? el('div', { class: 'hint' }, 'Offered to: ' + rolloutText(l) + '.  ' + onIt + ' of ' + d.fleet.length + ' PCs reporting are on this version.') : null,
+        l ? el('div', { class: 'row' },
+          el('button', { class: 'b pri', onclick: () => { if (confirm('Release ' + a.label + ' ' + l.version + ' to EVERY PC? Each installs when it is idle.')) roll('all') } }, 'Release to everyone'),
+          el('button', { class: 'b', onclick: () => pickPcsDialog(d.fleet, a.label + ' ' + l.version, hosts => oapi('/updates/' + a.app + '/rollout', 'POST', { mode: 'only', hosts }).then(draw)) }, 'Release to chosen PCs first...'),
+          el('button', { class: 'b', onclick: () => roll('pause') }, 'Hold back')) : null,
+        el('div', { class: 'row', style: 'flex-wrap:wrap' }, file, notes, el('button', { class: 'b', onclick: upload }, 'Upload new version'), bar),
+        el('div', { class: 'hint' }, 'The file keeps the name the build gives it (for example ' + (a.app === 'link' ? 'Arena-Link-Setup-0.2.0' : 'Arena-Decoder-Setup-0.2.0') + '.exe): the name carries the version. A new version must have a higher number than the last.'),
+        a.history.length > 1 || (a.history.length === 1 && !l) ? el('table', {}, el('thead', {}, el('tr', {}, ['Kept versions', 'Published', 'Size', ''].map(h => el('th', {}, h)))),
+          el('tbody', {}, a.history.map(h => el('tr', {}, el('td', {}, h.version + (l && h.version === l.version ? '  (current)' : '')), el('td', {}, fmtTime(h.publishedAt)), el('td', {}, bytes(h.size)),
+            el('td', {}, l && h.version === l.version ? null : el('div', { class: 'row' },
+              el('button', { class: 'b', onclick: async () => { if (!confirm('Roll back to ' + h.version + '? PCs on a newer version move back to it once you release it.')) return; try { await oapi('/updates/' + a.app + '/rollback', 'POST', { version: h.version }); draw() } catch (e) { flash(m, e.message) } } }, 'Roll back to this'),
+              el('button', { class: 'b', onclick: async () => { if (!confirm('Delete version ' + h.version + '?')) return; try { await oapi('/updates/' + a.app + '/' + h.version, 'DELETE'); draw() } catch (e) { flash(m, e.message) } } }, 'Delete'))))))) : null)
+    })
+    const newest = Object.fromEntries(d.apps.map(a => [a.app, a.latest && a.latest.version]))
+    const fleetRows = d.fleet.map(f => {
+      const want = (f.roles.includes('encoder') || f.roles.includes('decoder')) ? newest.link : null
+      const behind = f.version && want && f.version !== want
+      const u = f.updater || {}
+      const status = u.state === 'downloading' ? 'downloading ' + (u.pct != null ? u.pct + '%' : '') : u.state === 'ready' ? 'ready, waiting for ' + (u.waiting || 'a quiet moment') + (u.pending ? ' (to ' + u.pending + ')' : '') : u.state === 'installing' ? 'installing' : u.state === 'error' ? 'problem: ' + (u.error || 'see the PC') : u.state === 'off' ? 'updates turned off on this PC' : behind ? 'behind' : f.version ? 'up to date' : 'old app: no update support'
+      return el('tr', {}, el('td', {}, f.pc), el('td', {}, f.roles.join(' + ')), el('td', {}, f.version || '-'),
+        el('td', {}, el('span', { class: 'chip ' + (u.state === 'error' ? 'bad' : behind || u.state === 'downloading' || u.state === 'ready' ? 'warn' : f.version ? 'ok' : '') }, status)), el('td', { class: 'hint' }, Math.round(f.ageMs / 1000) + ' s ago'))
+    })
+    box.replaceChildren(...cards, m,
+      el('h2', { style: 'margin-top:8px' }, 'PCs'),
+      d.fleet.length ? el('table', {}, el('thead', {}, el('tr', {}, ['PC', 'Role', 'Version', 'Update', 'Seen'].map(h => el('th', {}, h)))), el('tbody', {}, fleetRows)) : el('div', { class: 'empty' }, 'No PC is connected.'),
+      el('div', { class: 'hint', style: 'margin-top:12px;max-width:720px' }, 'PCs check for a newer version every ten minutes and download it in the background. A PC installs it only when nothing is live on it (or inside the maintenance window set in its app), then restarts itself. A PC running an app from before updates existed has to be updated by hand once.'))
+  }
+  await draw()
+  healthTimer = setInterval(() => { if (adminSub === 'updates' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && !document.activeElement?.matches?.('input')) draw().catch(() => {}) }, 7000)
+}
+
 async function healthSection(box) {
   const draw = async () => {
     const h = await oapi('/health')
@@ -651,7 +720,7 @@ async function healthSection(box) {
 let actFilter = ''
 async function activitySection(box) {
   const [act, ls] = await Promise.all([oapi('/activity?limit=200' + (actFilter ? '&action=' + actFilter : '')), oapi('/links')])
-  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['encoder', 'Encoder control'], ['schedule', 'Schedules'], ['alert', 'Alerts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
+  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['updates', 'Software updates'], ['encoder', 'Encoder control'], ['schedule', 'Schedules'], ['alert', 'Alerts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
   box.replaceChildren(
     el('h2', {}, 'All links'),
     ls.links.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Link', 'Stream', 'Status', 'Created', 'Views', 'Viewers (IPs)', 'Last viewed'].map(h => el('th', {}, h)))),

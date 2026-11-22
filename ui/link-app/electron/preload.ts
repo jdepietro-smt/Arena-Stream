@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld('link', {
 
   hostResult:     (seq: number, ok: boolean, error?: string) => ipcRenderer.invoke('host-result', seq, ok, error),
   onEncoderRemote: on('encoder-remote'),
+  updaterStatus:     () => ipcRenderer.invoke('updater-status'),
+  updaterInstallNow: () => ipcRenderer.invoke('updater-install-now'),
+  updaterCheckNow:   () => ipcRenderer.invoke('updater-check-now'),
+  onUpdaterStatus:   on('updater-status'),
 
   onLog:           on('log'),
   onDirectory:     on('directory'),
