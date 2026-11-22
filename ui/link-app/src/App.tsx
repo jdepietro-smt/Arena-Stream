@@ -788,7 +788,7 @@ function Settings({ config, setConfig, onClose }: { config: Config; setConfig: (
       <div className="dialog" onClick={ev => ev.stopPropagation()}>
         <h2>Connection</h2>
         <p className="muted small">Set once per PC. Every encoder and decoder that uses the same directory sees each other automatically.</p>
-        <label>Directory address<input value={directory} onChange={e => setDirectory(e.target.value)} placeholder="http://server:8002" /></label>
+        <label>Directory address <span className="hint">add a backup after a comma: the PC announces to both and uses whichever is up</span><input value={directory} onChange={e => setDirectory(e.target.value)} placeholder="http://server:8002, http://backup-server:8002" /></label>
         <label>Access key<input type="password" value={key} onChange={e => setKey(e.target.value)} /></label>
         <label>Relay server <span className="hint">for decoders on other networks. Add a backup after a comma; the stream is sent to both, so it uses twice the upload.</span><input value={relayHost} onChange={e => setRelayHost(e.target.value)} placeholder="server IP address, backup IP address" /></label>
         <label>Relay password <span className="hint">encoders only</span><input type="password" value={relaySecret} onChange={e => setRelaySecret(e.target.value)} /></label>

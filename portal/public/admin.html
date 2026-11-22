@@ -498,11 +498,12 @@ const ago = t => { const sec = Math.max(0, Math.round((Date.now() - t) / 1000));
 async function monitorSection(box) {
   const hook = el('input', { type: 'text', placeholder: 'https://hooks.slack.com/services/...', style: 'width:100%' })
   const on = el('input', { type: 'checkbox' })
+  const sbIn = el('input', { type: 'text', placeholder: 'http://backup-server:8002', style: 'width:100%' })
   const m = msgBox()
   let primed = false
   const draw = async () => {
     const [st, cfg] = await Promise.all([oapi('/monitor'), primed ? null : oapi('/settings')])
-    if (!primed) { hook.value = cfg.settings.alertWebhook || ''; on.checked = cfg.settings.alertsEnabled; primed = true }
+    if (!primed) { hook.value = cfg.settings.alertWebhook || ''; on.checked = cfg.settings.alertsEnabled; sbIn.value = cfg.settings.directoryStandbyUrl || ''; primed = true }
     const crit = st.alerts.filter(a => a.severity === 'critical').length
     const status = !st.running ? ['bad', 'Monitoring is not running'] : crit ? ['bad', crit + ' critical'] : st.alerts.length ? ['warn', st.alerts.length + ' warning' + (st.alerts.length > 1 ? 's' : '')] : ['ok', 'All clear']
     const live = st.streams.filter(s => s.live).length
@@ -527,6 +528,12 @@ async function monitorSection(box) {
         el('tbody', {}, st.events.slice(0, 40).map(e => el('tr', {}, el('td', {}, fmtTime(e.openedAt)), el('td', {}, e.title), el('td', {}, el('span', { class: 'chip ' + (e.severity === 'critical' ? 'bad' : 'warn') }, e.severity)),
           el('td', {}, e.closedAt ? Math.max(1, Math.round((e.closedAt - e.openedAt) / 1000)) + ' s' : el('span', { class: 'chip bad' }, 'still open')))))) : el('div', { class: 'empty' }, 'No alerts yet.'),
       el('div', { class: 'card', style: 'max-width:640px;margin:22px 0 0;gap:12px' },
+        el('div', { class: 'row' }, el('h2', { style: 'margin:0' }, 'Backup directory'),
+          st.standby ? el('span', { class: 'chip ' + (st.standby.ok ? 'ok' : 'bad') }, st.standby.ok ? 'answering, knows ' + st.standby.count + ' stream' + (st.standby.count === 1 ? '' : 's') : 'not answering') : el('span', { class: 'chip' }, 'not set')),
+        el('div', { class: 'hint', style: 'margin:0' }, 'The Link directory is what lets decoders see what is on air. Install a second one on another server (see the command in the Link directory installer), put its address here to have it watched, and put both addresses in each Link app (Settings, Directory address, separated by a comma). You are alerted if it stops answering, or if a stream is not announcing to it.' + (st.standby && !st.standby.ok && st.standby.error ? ' Problem: ' + st.standby.error + '.' : '')),
+        sbIn,
+        el('div', { class: 'row' }, el('button', { class: 'b pri', onclick: async () => { try { await oapi('/settings', 'POST', { settings: { directoryStandbyUrl: sbIn.value } }); flash(m, sbIn.value.trim() ? 'Saved. It is checked every few seconds.' : 'Saved: no backup directory is watched.', true); draw() } catch (e) { flash(m, e.message) } } }, 'Save'))),
+      el('div', { class: 'card', style: 'max-width:640px;margin:22px 0 0;gap:12px' },
         el('h2', {}, 'Send alerts to'),
         el('div', { class: 'hint', style: 'margin:0' }, 'Paste an incoming-webhook address (Slack, Microsoft Teams, or any tool that accepts a JSON post). It is told when an alert opens and when it clears. Streams off air, a low video rate, stopped services, a full disk and an overloaded server all raise alerts.'),
         hook,
@@ -536,7 +543,7 @@ async function monitorSection(box) {
           el('button', { class: 'b', onclick: async () => { try { await oapi('/monitor/test', 'POST'); flash(m, 'Test alert sent. Check your channel.', true) } catch (e) { flash(m, e.message) } } }, 'Send a test alert'), m)))
   }
   await draw()
-  healthTimer = setInterval(() => { if (adminSub === 'monitor' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && document.activeElement !== hook) draw().catch(() => {}) }, 5000)
+  healthTimer = setInterval(() => { if (adminSub === 'monitor' && tab === 'admin' && !document.hidden && !document.querySelector('.modal') && document.activeElement !== hook && document.activeElement !== sbIn) draw().catch(() => {}) }, 5000)
 }
 
 // Encoder control: see every encoder PC and its streams, start/stop/restart/retune them, and schedule starts and stops.

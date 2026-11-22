@@ -235,3 +235,48 @@ test('a decoder that set out to use two relays and has lost one is flagged; a si
   await s.step(); await s.step(30)
   assert.deepEqual(keys(s), [])
 })
+
+test('a backup directory that stops answering is a warning; clears when it is back or no longer set', async () => {
+  const r = rig({ standbySec: 30 })
+  r.snap.standby = { ok: true, ids: ['e1'], error: '' }
+  for (let i = 0; i < 4; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+  r.snap.standby = { ok: false, ids: [], error: 'connection refused' }
+  await r.step(); await r.step(20)
+  assert.deepEqual(keys(r), [])
+  await r.step(20)
+  assert.deepEqual(keys(r), ['directory.standby'])
+  assert.match(r.m.state().alerts[0].detail, /connection refused/)
+  assert.equal(r.m.state().standby.ok, false)
+  r.snap.standby = { ok: true, ids: ['e1'], error: '' }
+  await r.step()
+  assert.deepEqual(keys(r), [])
+  r.snap.standby = { ok: false, ids: [], error: 'x' }
+  await r.step(); await r.step(40)
+  assert.deepEqual(keys(r), ['directory.standby'])
+  r.snap.standby = null                                                // the setting was cleared
+  await r.step()
+  assert.deepEqual(keys(r), [])
+  assert.equal(r.m.state().standby, null)
+})
+
+test('streams the backup directory has not heard of are flagged, naming them', async () => {
+  const r = rig({ standbySec: 30 })
+  r.snap.standby = { ok: true, ids: [], error: '' }                   // the backup knows nothing yet
+  await r.step(); await r.step(30)
+  assert.deepEqual(keys(r), [])                                        // not long enough yet
+  await r.step(20)
+  assert.deepEqual(keys(r), ['directory.standby.sync'])
+  assert.match(r.m.state().alerts[0].detail, /ESPN 1/)
+  r.snap.standby = { ok: true, ids: ['e1'], error: '' }
+  await r.step()
+  assert.deepEqual(keys(r), [])
+})
+
+test('with the main directory down, the backup is not blamed for it', async () => {
+  const r = rig({ standbySec: 10 })
+  r.snap.directoryOk = false; r.snap.encoders = []
+  r.snap.standby = { ok: false, ids: [], error: 'down too' }
+  for (let i = 0; i < 6; i++) await r.step()
+  assert.deepEqual(keys(r), ['app.directory'])
+})

@@ -5,6 +5,7 @@ import * as path from 'node:path'
 import { spawn } from 'node:child_process'
 import { Offer, UpdateMode, Window, installDecision, worthTaking } from './update-core'
 import { checkOffer, downloadRelease, cleanOld } from './update-net'
+import { withDirectories, dirState } from './dirs'
 
 export interface UpdaterStatus {
   state: 'idle' | 'checking' | 'downloading' | 'ready' | 'installing' | 'error' | 'off'
@@ -48,8 +49,11 @@ export function startUpdater(env: UpdaterEnv) {
     busy = true
     try {
       set({ ...status, state: file ? 'ready' : 'checking' })
-      const o = await checkOffer({ directory: c.directory, key: c.key, app: env.app, host: env.host, version: env.version })
+      const o = await withDirectories(c.directory, u => checkOffer({ directory: u, key: c.key, app: env.app, host: env.host, version: env.version }), dirState)
       if (!worthTaking(o, env.version)) {
+        // "nothing to install" from the backup directory is not proof: it may simply not hold the release files. Only the main
+        // directory (first address) can withdraw an update that is already downloaded.
+        if (dirState.last !== 0 && file && offer) { set({ state: 'ready', pending: offer.version, checkedAt: Date.now(), waiting: installDecision(ctx()).waiting }); return }
         offer = null; file = null; cleanOld(env.dir, null)
         set({ state: 'idle', checkedAt: Date.now() }); failures = 0; return
       }
@@ -58,7 +62,7 @@ export function startUpdater(env: UpdaterEnv) {
         set({ state: 'downloading', pending: o.version, pct: 0, checkedAt: Date.now() })
         env.log(`[update] ${o.version} is offered, downloading`)
         let last = 0
-        file = await downloadRelease({ directory: c.directory, key: c.key, app: env.app, offer: o, dir: env.dir, onProgress: pct => { if (pct !== last && pct % 5 === 0) { last = pct; set({ state: 'downloading', pending: o.version, pct, checkedAt: Date.now() }) } } })
+        file = await withDirectories(c.directory, u => downloadRelease({ directory: u, key: c.key, app: env.app, offer: o, dir: env.dir, onProgress: pct => { if (pct !== last && pct % 5 === 0) { last = pct; set({ state: 'downloading', pending: o.version, pct, checkedAt: Date.now() }) } } }), dirState)
         cleanOld(env.dir, o.file)
         env.log(`[update] ${o.version} downloaded and checked`)
       }

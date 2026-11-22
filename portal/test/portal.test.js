@@ -1099,3 +1099,30 @@ test('software updates: owner only, upload is checked, releases start held back,
     assert.ok(['updates.upload', 'updates.rollout', 'updates.rollback', 'updates.delete'].every(a => act.includes(a)), act.join())
   } finally { await t.close() }
 })
+
+test('backup directory: set in the portal, watched, and reported on the monitor state', async () => {
+  const t = await setup()
+  let standbyUp = true, key401 = false
+  const sb = http.createServer((req, res) => {
+    if (!standbyUp) { req.socket.destroy(); return }
+    if (key401 || req.headers['x-arena-key'] !== 'k') { res.writeHead(401); return res.end('{}') }
+    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ encoders: [{ id: 'e1', name: 'ESPN 1' }] }))
+  })
+  const sp = await listen(sb)
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await t.monitor.tick()
+    assert.equal((await t.call('/portal/api/owner/monitor')).body.standby, null)                // none set
+    assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { directoryStandbyUrl: 'not a url' } } })).status, 400)
+    assert.equal((await t.call('/portal/api/owner/settings', { method: 'POST', body: { settings: { directoryStandbyUrl: `http://127.0.0.1:${sp}` } } })).status, 200)
+    await t.monitor.tick()
+    assert.deepEqual((await t.call('/portal/api/owner/monitor')).body.standby, { ok: true, error: '', count: 1 })
+    standbyUp = false
+    await t.monitor.tick()
+    const down = (await t.call('/portal/api/owner/monitor')).body.standby
+    assert.equal(down.ok, false); assert.ok(down.error)
+    standbyUp = true; key401 = true
+    await t.monitor.tick()
+    assert.match((await t.call('/portal/api/owner/monitor')).body.standby.error, /rejected the access key/)
+  } finally { sb.close(); await t.close() }
+})

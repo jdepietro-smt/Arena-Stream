@@ -25,6 +25,7 @@ const DEFAULTS = {
   cpuLoadPct: 90, cpuSec: 90,        // 1-minute load as a share of all cores
   memFreePct: 8, memSec: 90,
   diskWarnPct: 90, diskCritPct: 97,
+  standbySec: 30,                    // the backup directory unreachable, or missing streams, this long
   pathSec: 20,                       // a relay down (or a decoder path lost) this long is an alert
   lossyPct: 5, lossySec: 30,         // re-sends above this share of packets on the way to the relay
   forgetStreamHours: 24,   // a stream that has not been seen for this long stops being expected
@@ -107,6 +108,16 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
     if (!s.directoryOk) {
       if (sustained('dir', true, 10)) raise('app.directory', 'critical', 'Arena Link directory is not reachable', 'Streams and decoders cannot be listed. Check the arena-link-directory service.')
     } else { sustained('dir', false); clear('app.directory') }
+
+    // The backup directory (if one is set): it should answer, and know the same streams as the main one.
+    const sb = s.standby
+    if (sb && s.directoryOk) {
+      if (sustained('sbdown', !sb.ok, o.standbySec)) raise('directory.standby', 'warning', 'The backup directory is not reachable', `${sb.error || 'no answer'}. If the main directory fails now, PCs have nothing to fall back to.`)
+      else if (sb.ok) clear('directory.standby')
+      const missing = sb.ok ? (s.encoders || []).filter(e => !(sb.ids || []).includes(e.id)) : []
+      if (sustained('sbsync', missing.length > 0, o.standbySec + 10)) raise('directory.standby.sync', 'warning', `${missing.length} stream${missing.length > 1 ? 's' : ''} not announced to the backup directory`, `${missing.map(e => e.name).slice(0, 6).join(', ')}${missing.length > 6 ? ', ...' : ''}. These PCs need the backup address in the Link app's Settings (and the new app version); until then they would disappear if the main directory failed.`)
+      else if (!missing.length) clear('directory.standby.sync')
+    } else if (!sb) { since.delete('sbdown'); since.delete('sbsync'); clear('directory.standby'); clear('directory.standby.sync') }
 
     if (s.directoryOk) {
       // Streams
@@ -206,6 +217,7 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       decoders: Object.values(data.decoders).map(d => ({ ...d, paths: d.lastSeen === lastTick ? d.paths : null, live: d.lastSeen === lastTick })),
       events: data.events.slice(-100).reverse(),
       snapshot: lastSnap && { system: lastSnap.system, disks: lastSnap.disks },
+      standby: lastSnap && lastSnap.standby ? { ok: lastSnap.standby.ok, error: lastSnap.standby.error || '', count: (lastSnap.standby.ids || []).length } : null,
     }
   }
   return { tick, state, expectOff, external, flush: () => save(true), _active: active }

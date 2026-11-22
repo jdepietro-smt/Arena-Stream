@@ -2,6 +2,12 @@
 # Installs the Arena Link directory (live list of encoders) on TCP 8002.
 # Touches nothing else on the server: no mediamtx restart, no change to the SRT relay.
 #   cd /opt/arena-stream; git pull; bash link/directory/install.sh
+#
+# A BACKUP directory on a second server: same command, but give it the main server's access key and relay passphrase (both are in
+# /etc/arena-link.env on the main server) so apps can use either one:
+#   LINK_KEY='the-main-key' LINK_RELAY_SECRET='the-relay-passphrase' bash link/directory/install.sh
+# Then put both addresses in the Link app's Directory address, separated by a comma: http://main:8002,http://backup:8002
+# The directory only holds live announcements, so there is nothing to copy or keep in step.
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/directory.py"
@@ -18,9 +24,10 @@ install -m 644 "$SRC" /opt/arena-link/directory.py
 
 # The access key is created once and kept across updates. No look-alike characters (0/o, 1/l).
 if [ ! -f /etc/arena-link.env ]; then
-  KEY="$(tr -dc 'abcdefghjkmnpqrstuvwxyz23456789' </dev/urandom | head -c 12)"
+  KEY="${LINK_KEY:-$(tr -dc 'abcdefghjkmnpqrstuvwxyz23456789' </dev/urandom | head -c 12)}"
   umask 077
   printf 'LINK_PORT=8002\nLINK_TTL=4\nLINK_KEY=%s\n' "$KEY" > /etc/arena-link.env
+  [ -n "${LINK_RELAY_SECRET:-}" ] && printf 'LINK_RELAY_SECRET=%s\n' "$LINK_RELAY_SECRET" >> /etc/arena-link.env
 fi
 KEY="$(grep -m1 '^LINK_KEY=' /etc/arena-link.env | cut -d= -f2-)"
 

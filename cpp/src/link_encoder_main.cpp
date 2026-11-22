@@ -217,6 +217,20 @@ static std::string relay_safe_name(const std::string& n) {
 }
 
 // Every relay this encoder publishes to, for the announce: [{"host":..,"port":..,"name":..}, ...] (first = primary).
+// "http://A:8002,http://B:8002": a main directory and a backup. The announce goes to every one of them, so whichever is
+// up can tell decoders what is on air.
+static std::vector<std::string> split_commas(const std::string& s) {
+    std::vector<std::string> out;
+    std::istringstream is(s);
+    std::string item;
+    while (std::getline(is, item, ',')) {
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+        while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+        if (!item.empty()) out.push_back(item);
+    }
+    return out;
+}
+
 // Per-relay state for the stats line: [{"host":..,"port":..,"up":true,"rttMs":..,"sent":..,"retrans":..}, ...]
 static std::string relay_legs_json(const std::vector<sdi::TsFanout::LegHealth>& legs) {
     std::string o = "[";
@@ -403,7 +417,8 @@ int main(int argc, char** argv) {
         if (relay_latency <= 0) {
             relay_auto = true;
             sdi::net::Url pu;
-            if (!args.directory.empty() && sdi::net::parse_url(args.directory, pu))
+            const auto dl = split_commas(args.directory);
+            if (!dl.empty() && sdi::net::parse_url(dl[0], pu))
                 relay_probe_ms = sdi::net::tcp_rtt_ms(pu.host, pu.port);
             relay_latency = sdi::link::auto_relay_latency_ms(relay_probe_ms);
             std::cerr << "relay: encoder->relay leg " << relay_latency << " ms (auto, "
@@ -474,9 +489,12 @@ int main(int argc, char** argv) {
                                (mode.interlaced ? "i@" : "p@") + fmt_fps(mode.interlaced ? out_fps : src_fps);
     const std::string id = host_name() + "-" + args.device_id + "-" + args.connection;
     const std::string lan_ip = sdi::net::primary_lan_ip();
-    sdi::net::Url dir_url;
-    const bool announce = !args.directory.empty() && sdi::net::parse_url(args.directory, dir_url);
-    if (!args.directory.empty() && !announce) std::cerr << "warning: bad --directory, not announcing\n";
+    std::vector<sdi::net::Url> dir_urls;
+    for (const auto& d : split_commas(args.directory)) {
+        sdi::net::Url u;
+        if (sdi::net::parse_url(d, u)) dir_urls.push_back(u); else std::cerr << "warning: bad --directory entry '" << d << "', skipped\n";
+    }
+    const bool announce = !dir_urls.empty();
 
     std::cerr << "link_encoder: " << args.name << " | source " << source << " | sending " << format << " | "
               << enc.name() << " " << enc.current_bitrate_kbps() << " kbps (" << enc.quality() << " quality)"
@@ -510,11 +528,19 @@ int main(int argc, char** argv) {
                     "{\"host\":" + json_str(fc.relay_host) + ",\"port\":" + std::to_string(relay_port) + ",\"name\":" + json_str(relay_safe_name(args.name)) + "}")
               << ",\"relays\":" << relays_json(relay_list, relay_safe_name(args.name))
               << ",\"version\":\"link-1\"}";
-            const int st = sdi::net::http_request(dir_url, "POST", "/v1/announce", args.key, b.str());
-            g_dir_state = st == 200 ? 1 : 2;
-            if (st != 200 && fails++ % 10 == 0)
+            // To every directory (a main and a backup): the backup only helps if it already knows what is on air.
+            int accepted = 0, st = 200;
+            const std::string body = b.str();
+            for (const auto& du : dir_urls) {
+                const int r = sdi::net::http_request(du, "POST", "/v1/announce", args.key, body);
+                if (r == 200) ++accepted; else st = r;
+            }
+            g_dir_state = accepted > 0 ? 1 : 2;
+            if (accepted == 0 && fails++ % 10 == 0)
                 std::cerr << "directory: announce failed (" << (st < 0 ? "unreachable" : "HTTP " + std::to_string(st)) << ")\n";
-            if (st == 200) fails = 0;
+            else if (accepted > 0 && accepted < int(dir_urls.size()) && fails++ % 30 == 0)
+                std::cerr << "directory: " << (dir_urls.size() - accepted) << " of " << dir_urls.size() << " directories are not accepting the announce\n";
+            if (accepted == int(dir_urls.size())) fails = 0;
             for (int i = 0; i < 10 && !g_stop && !g_idle; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });

@@ -15,6 +15,7 @@ const SETTINGS = {
   thumbEverySec:        { type: 'int', min: 2, max: 30, def: 5 },
   defaultLinkExpiryMin: { type: 'int', min: 0, max: 525600, def: 1440 },
   requireLinkPassword:  { type: 'bool', def: false },
+  directoryStandbyUrl:  { type: 'url', def: '' },                      // a backup Link directory to watch, e.g. http://203.0.113.9:8002
   scheduleTz:           { type: 'tz', def: 'America/New_York' },       // time zone the schedules' times are written in
   alertsEnabled:        { type: 'bool', def: true },                   // send alerts to the webhook
   alertWebhook:         { type: 'webhook', def: '' },                  // where alerts are posted (Slack, Teams, a pager)

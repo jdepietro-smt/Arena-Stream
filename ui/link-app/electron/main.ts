@@ -9,6 +9,7 @@ import * as fs from 'fs'
 import * as http from 'http'
 import * as os from 'os'
 import { startUpdater } from './updater'
+import { withDirectories, splitDirs } from './dirs'
 import type { UpdateMode, Window as UpdateWindow } from './update-core'
 
 // One instance only: a second launch would fight the first over the capture card and ports.
@@ -225,7 +226,7 @@ function startDirectoryPoll() {
     polling = true
     const c = cfg()
     try {
-      const r = await getDirectory(c.directory, c.key)
+      const r = await withDirectories(c.directory, u => getDirectory(u, c.key), undefined, x => x.status === 200)   // main, then backup
       if (r.status === 401) send('directory', { ok: false, error: 'the directory rejected the access key', encoders: lanEncoders() })
       else if (r.status !== 200 || !r.body) send('directory', { ok: false, error: `directory answered HTTP ${r.status}`, encoders: lanEncoders() })
       else {
@@ -242,7 +243,7 @@ function startDirectoryPoll() {
         send('directory', { ok: true, yourIp: me, encoders })
         if (!directorySecret) {
           try {
-            const s = await getDirectory(c.directory, c.key, '/v1/config')
+            const s = await withDirectories(c.directory, u => getDirectory(u, c.key, '/v1/config'), undefined, x => x.status === 200)
             if (s.status === 200 && typeof s.body?.relaySecret === 'string') directorySecret = s.body.relaySecret
           } catch { /* retried next tick */ }
         }
@@ -256,12 +257,20 @@ function startDirectoryPoll() {
 }
 
 ipcMain.handle('test-directory', async (_, directory: string, key: string) => {
-  try {
-    const r = await getDirectory(directory, key)
-    if (r.status === 200) return { ok: true, message: `connected - ${r.body?.encoders?.length ?? 0} encoder(s) on air` }
-    if (r.status === 401) return { ok: false, message: 'reached the directory but the access key was rejected' }
-    return { ok: false, message: `the server answered HTTP ${r.status}` }
-  } catch (e) { return { ok: false, message: `cannot reach it (${(e as Error).message})` } }
+  const urls = splitDirs(directory)
+  if (!urls.length) return { ok: false, message: 'enter a directory address' }
+  const parts: string[] = []
+  let up = 0
+  for (const [i, u] of urls.entries()) {       // each address on its own: a main and a backup
+    const label = urls.length > 1 ? (i === 0 ? 'main: ' : 'backup: ') : ''
+    try {
+      const r = await getDirectory(u, key)
+      if (r.status === 200) { up++; parts.push(`${label}connected - ${r.body?.encoders?.length ?? 0} encoder(s) on air`) }
+      else if (r.status === 401) parts.push(`${label}reached it but the access key was rejected`)
+      else parts.push(`${label}the server answered HTTP ${r.status}`)
+    } catch (e) { parts.push(`${label}cannot reach it (${(e as Error).message})`) }
+  }
+  return { ok: up === urls.length, message: parts.join('; ') + (urls.length > 1 && up > 0 && up < urls.length ? ' (still works, but without its backup)' : '') }
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -723,11 +732,11 @@ function startDecoderBeat() {
       const running = decRuns.has(d.id)
       const ls = decLast.get(d.id) as { state?: string; encoder?: string } | undefined
       try {
-        const r = await postDirectory(c.directory, c.key, '/v1/decoder/heartbeat', {
+        const r = await withDirectories(c.directory, u => postDirectory(u, c.key, '/v1/decoder/heartbeat', {
           id: beatId(d.id), name: `${os.hostname()} decoder ${i + 1}`, host: os.hostname(), version: app.getVersion(), updater: updaterSummary(),
           state: running ? (ls?.state ?? 'connecting') : 'stopped', stream: running ? (ls?.encoder || d.selected) : '',
           ...(running && ls?.state === 'live' ? { paths: { via: (ls as { path?: string }).path, ...(decPaths.get(d.id) as object | undefined) } } : {}),
-        })
+        }), undefined, x => x !== null)
         const w = r?.want as { stream: string; seq: number } | null | undefined
         if (!w) continue
         const prev = beatSeq.get(d.id)
@@ -780,7 +789,7 @@ function startHostBeat() {
     })
     const results = hostResults.splice(0, hostResults.length)
     try {
-      const r = await postDirectory(c.directory, c.key, '/v1/host/heartbeat', { id: hostName(), name: hostName(), host: hostName(), version: app.getVersion(), updater: updaterSummary(), streams, ack: hostSeq, results })
+      const r = await withDirectories(c.directory, u => postDirectory(u, c.key, '/v1/host/heartbeat', { id: hostName(), name: hostName(), host: hostName(), version: app.getVersion(), updater: updaterSummary(), streams, ack: hostSeq, results }), undefined, x => x !== null)
       for (const cmd of (r?.commands ?? []) as { seq: number; stream: string; action: string; value?: number; ageMs: number }[]) {
         if (hostSeen.has(cmd.seq)) continue
         hostSeen.add(cmd.seq)

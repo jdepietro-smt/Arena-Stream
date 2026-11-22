@@ -425,6 +425,16 @@ function createPortal(cfg) {
     // Per-relay health is reported by the encoder PCs (through the directory's host list), matched to a stream by its name.
     const pathsByName = new Map()
     try { for (const host of (await dir('/v1/hosts')).hosts || []) for (const st of host.streams || []) if (st.paths && st.name) pathsByName.set(st.name, st.paths) } catch { /* older directory or none: no path data */ }
+    // A backup directory, if one is set: asked for its list so the monitor can check it is up and knows the same streams.
+    let standby = null
+    const sbUrl = S().directoryStandbyUrl
+    if (sbUrl) {
+      try {
+        const r = await fetch(sbUrl + '/v1/encoders', { headers: { 'X-Arena-Key': cfg.directoryKey }, signal: AbortSignal.timeout(3000) })
+        if (!r.ok) throw new Error(r.status === 401 ? 'it rejected the access key (is it the same as the main one?)' : 'it answered HTTP ' + r.status)
+        standby = { ok: true, ids: ((await r.json()).encoders || []).map(e => e.id) }
+      } catch (e) { standby = { ok: false, error: e.message, ids: [] } }
+    }
     let decoders = []
     try { decoders = (await dir('/v1/decoders')).decoders || [] } catch { /* directory down: the monitor says so */ }
     const rate = {}
@@ -440,7 +450,7 @@ function createPortal(cfg) {
       }
     } catch { /* media server API down: no measured rates, the service rule reports it */ }
     return {
-      directoryOk: h.app.directory,
+      directoryOk: h.app.directory, standby,
       encoders: list.map(e => { const m = rate[e.relay && e.relay.name] ?? rate[e.name]; return { id: e.id, name: e.name, kbps: e.kbps || 0, measuredKbps: m, paths: pathsByName.get(e.name) || null } }),
       decoders: decoders.map(d => ({ id: d.id, name: d.name, paths: d.paths || null })),
       services: h.services, system: h.system, disks: h.disks,

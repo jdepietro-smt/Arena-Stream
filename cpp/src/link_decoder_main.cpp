@@ -181,6 +181,15 @@ bool fetch(const sdi::net::Url& url, const std::string& key, std::vector<Encoder
     return sdi::link::parse_encoders(body, out, my_ip);
 }
 
+// Asks the directories in turn (a main and a backup), starting with the one that answered last, and keeps the first answer.
+bool fetch_any(const std::vector<sdi::net::Url>& dirs, size_t& prefer, const std::string& key, std::vector<EncoderInfo>& out, std::string& my_ip) {
+    for (size_t k = 0; k < dirs.size(); ++k) {
+        const size_t i = (prefer + k) % dirs.size();
+        if (fetch(dirs[i], key, out, my_ip)) { prefer = i; return true; }
+    }
+    return false;
+}
+
 // Folds the encoders heard by mDNS into the directory's list. An encoder seen both ways keeps the
 // directory's record (it knows the public address) and is marked local, so its LAN path is used even
 // when the two sides reach the internet from different addresses. One only mDNS knows (offline
@@ -251,8 +260,20 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    sdi::net::Url dir;
-    if (!sdi::net::parse_url(o.directory, dir)) { std::fprintf(stderr, "bad --directory\n"); return 2; }
+    std::vector<sdi::net::Url> dirs;       // "A,B": a main directory and a backup
+    {
+        std::istringstream is(o.directory);
+        std::string item;
+        while (std::getline(is, item, ',')) {
+            while (!item.empty() && std::isspace(static_cast<unsigned char>(item.front()))) item.erase(item.begin());
+            while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back()))) item.pop_back();
+            sdi::net::Url u;
+            if (!item.empty() && sdi::net::parse_url(item, u)) dirs.push_back(u);
+        }
+    }
+    if (dirs.empty()) { std::fprintf(stderr, "bad --directory\n"); return 2; }
+    const sdi::net::Url& dir = dirs[0];      // the main one: a relay with no host of its own is taken to live there
+    size_t dir_prefer = 0;                   // the directory that answered last
     sdi::link::PathPolicy policy;
     policy.directory_host = dir.host;
     policy.lan_latency_ms = o.lan_latency;
@@ -260,7 +281,7 @@ int main(int argc, char** argv) {
 
     if (o.list) {   // one-shot: what is out there and how we would reach it
         std::vector<EncoderInfo> list; std::string me;
-        const bool dir_ok = fetch(dir, o.key, list, me);
+        const bool dir_ok = fetch_any(dirs, dir_prefer, o.key, list, me);
         if (have_mdns) { std::this_thread::sleep_for(1200ms); merge_mdns(list, browser.snapshot()); }
         if (!dir_ok && list.empty()) { std::fprintf(stderr, "directory unreachable or rejected the key\n"); return 1; }
         std::printf("{\"yourIp\":%s,\"encoders\":[", jstr(me).c_str());
@@ -310,7 +331,7 @@ int main(int argc, char** argv) {
         { std::lock_guard<std::mutex> lk(g_sel_mtx); sel = g_select; }
 
         std::vector<EncoderInfo> list; std::string me;
-        const bool dir_ok = fetch(dir, o.key, list, me);
+        const bool dir_ok = fetch_any(dirs, dir_prefer, o.key, list, me);
         if (have_mdns) merge_mdns(list, browser.snapshot());
         if (!dir_ok && list.empty()) {
             if (last_waiting != "dir") state("waiting", "", "", "directory unreachable");
