@@ -4,7 +4,7 @@
 :root {
   --bg: #08090c; --text: #e4e7ec; --muted: #7d8592; --subtle: #4a505a;
   --ok: #34d058; --warn: #ffb020; --bad: #ff3b30;
-  --lcd: #ffb938; --lcd-rgb: 255, 185, 56;
+  --lcd: #6ebe48; --lcd-rgb: 110, 190, 72;
   --steel-hi: #1f2227; --steel-lo: #15171b; --edge: #30343b; --well: #0e1013;
   --field: #0b0d10; --field-edge: #2b2f36;
   --font: 'Inter', 'Segoe UI', system-ui, sans-serif;
@@ -27,7 +27,7 @@ button, input, select { font: inherit; color: inherit; }
 .brand { font-family: var(--label); letter-spacing: .18em; font-size: 13px; }
 .seg { display: flex; border: 1px solid var(--edge); border-radius: 5px; overflow: hidden; margin-left: 10px; }
 .seg button { background: var(--steel-lo); border: 0; padding: 6px 16px; font-family: var(--label); letter-spacing: .12em; font-size: 11px; color: var(--muted); cursor: pointer; }
-.seg button.on { background: var(--lcd); color: #1a1205; }
+.seg button.on { background: var(--lcd); color: #191919; }
 
 .led { width: 9px; height: 9px; border-radius: 50%; background: var(--subtle); display: inline-block; }
 .led.green { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
@@ -61,7 +61,7 @@ input:disabled, select:disabled { opacity: .55; }
 .btn:hover:not(:disabled) { border-color: var(--lcd); }
 .btn:disabled { opacity: .45; cursor: default; }
 .btn.small { padding: 5px 10px; font-size: 10px; }
-.btn.primary { background: var(--lcd); color: #1a1205; border-color: var(--lcd); }
+.btn.primary { background: var(--lcd); color: #191919; border-color: var(--lcd); }
 
 .golive { margin-top: 8px; padding: 16px; border: 1px solid #2d7a42; border-radius: 6px; background: linear-gradient(180deg, #2fbf59, #1f8a40); color: #04140a; font-family: var(--label); letter-spacing: .22em; font-size: 15px; font-weight: 700; cursor: pointer; }
 .golive.stop { background: linear-gradient(180deg, #ff5a4f, #c4261c); color: #fff; border-color: #8f1b14; }

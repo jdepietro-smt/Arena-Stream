@@ -1,6 +1,6 @@
 {
   "name": "arena-link",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Arena Link - SDI encoder and decoder, automatic discovery, low-latency SRT",
   "main": "dist-electron/main.js",
   "scripts": {

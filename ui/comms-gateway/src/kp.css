@@ -5,7 +5,7 @@
 :root {
   --label: 'Bahnschrift', 'Segoe UI Semibold', 'Arial Narrow', system-ui, sans-serif;
   --mono: Consolas, 'Lucida Console', monospace;
-  --lcd: #ffb938; --lcd-rgb: 255, 185, 56; --lcd-bright: 1;
+  --lcd: #6ebe48; --lcd-rgb: 110, 190, 72; --lcd-bright: 1;
   --steel-hi: #1f2227; --steel-lo: #15171b; --edge: #30343b; --well: #0e1013;
 }
 

@@ -6,6 +6,7 @@ import './App.css'
 
 /** LCD display colours: [css colour, "r, g, b" for glows]. */
 const LCD_COLORS = {
+  smt: ['#6ebe48', '110, 190, 72'],
   cyan: ['#5ef2ff', '94, 242, 255'],
   amber: ['#ffb938', '255, 185, 56'],
   green: ['#7dff9a', '125, 255, 154'],
@@ -62,7 +63,7 @@ function loadPrefs(): Prefs {
     backupUrl: '',
     username: '', name: '', group: '', pin: '',
     micId: '', spkId: '', echoCancel: true, muted: [], programUrl: '',
-    levels: {}, density: typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches ? 'comfortable' : 'compact', lcdColor: 'cyan', lcdBright: 1, night: false,
+    levels: {}, density: typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches ? 'comfortable' : 'compact', lcdColor: 'smt', lcdBright: 1, night: false,
     spatial: false, spread: 0.7, pans: {}, speakAlerts: true, alertTones: true, micRelease: true, musicSrcBy: {}, musicLinkBy: {}, hidden: [], order: [],
   }
   try {
@@ -124,7 +125,7 @@ export default function App() {
 
   // Panel look: LCD colour/brightness and night mode.
   useEffect(() => {
-    const [css, rgb] = LCD_COLORS[prefs.lcdColor] ?? LCD_COLORS.amber
+    const [css, rgb] = LCD_COLORS[prefs.lcdColor] ?? LCD_COLORS.smt
     const root = document.documentElement
     root.style.setProperty('--lcd', css)
     root.style.setProperty('--lcd-rgb', rgb)

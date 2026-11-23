@@ -419,5 +419,5 @@ html, body { overscroll-behavior: none; }
 @media (pointer: coarse) { .app .cap.talkkey { min-height: 72px; } .app .keymod .cap.sm { min-height: 40px; } }
 
 /* Software update badge (title bar) */
-.update-chip { display: inline-flex; align-items: center; gap: 8px; margin-right: 10px; padding: 3px 4px 3px 10px; border: 1px solid #ffb938; border-radius: 4px; color: #ffb938; font: 600 11px var(--font); letter-spacing: .04em; }
-.update-chip button { border: 0; border-radius: 3px; background: #ffb938; color: #1a1205; font: 700 11px var(--font); padding: 3px 8px; cursor: pointer; }
+.update-chip { display: inline-flex; align-items: center; gap: 8px; margin-right: 10px; padding: 3px 4px 3px 10px; border: 1px solid #6ebe48; border-radius: 4px; color: #6ebe48; font: 600 11px var(--font); letter-spacing: .04em; }
+.update-chip button { border: 0; border-radius: 3px; background: #6ebe48; color: #191919; font: 700 11px var(--font); padding: 3px 8px; cursor: pointer; }
