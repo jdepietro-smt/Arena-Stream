@@ -3,7 +3,8 @@
 # Touches nothing else on the server: no mediamtx restart, no change to the SRT relay.
 #   cd /opt/arena-stream; git pull; bash link/directory/install.sh
 #
-# A BACKUP directory on a second server: same command, but give it the main server's access key and relay passphrase (both are in
+# EASIEST for a second server: bash link/join.sh MAIN_SERVER_ADDRESS   (does this and the relay, fetching the values itself).
+# A BACKUP directory on a second server, by hand: same command, but give it the main server's access key and relay passphrase (both are in
 # /etc/arena-link.env on the main server) so apps can use either one:
 #   LINK_KEY='the-main-key' LINK_RELAY_SECRET='the-relay-passphrase' bash link/directory/install.sh
 # Then put both addresses in the Link app's Directory address, separated by a comma: http://main:8002,http://backup:8002
