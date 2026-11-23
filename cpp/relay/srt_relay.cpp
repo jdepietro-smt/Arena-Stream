@@ -11,6 +11,9 @@
 //
 // Environment: LL_PORT (8895)  LL_LATENCY_MS (40, floor: each peer's own latency setting wins when higher)
 //              LL_PUBLISH_SECRET (required to publish)
+//              LL_MIRROR (optional "host:port", normally 127.0.0.1:8890): also push a copy of every published stream into mediamtx as
+//              publish:NAME, so the Arena Hub (which only reads mediamtx) lists, previews and records it. The copy uses LL_PUBLISH_SECRET
+//              as the SRT passphrase, the same one mediamtx asks publishers for. It is best effort and never delays or stalls the relay.
 #include <srt/srt.h>
 
 #include "../include/fec_profile.h"
@@ -46,6 +49,52 @@ std::mutex                               g_mtx;
 std::map<std::string, std::vector<SRTSOCKET>> g_readers;   // name -> reader sockets
 std::map<std::string, SRTSOCKET>         g_publishers;     // name -> publisher socket
 std::string                              g_secret;
+std::string                              g_mirror_host;   // empty = no mirror
+int                                      g_mirror_port = 0;
+
+// A best-effort copy of one stream into mediamtx. Non-blocking: if mediamtx is down or slow the copy is dropped, the relay is unaffected.
+struct Mirror {
+    SRTSOCKET sock = SRT_INVALID_SOCK;
+    std::chrono::steady_clock::time_point next_try{};
+    bool logged_up = false;
+
+    void close() { if (sock != SRT_INVALID_SOCK) { srt_close(sock); sock = SRT_INVALID_SOCK; } logged_up = false; }
+
+    void connect_now(const std::string& name) {
+        sock = srt_create_socket();
+        const int off = 0, yes = 1, payload = 1316, lat = 120;
+        srt_setsockflag(sock, SRTO_SNDSYN, &off, sizeof(off));
+        srt_setsockflag(sock, SRTO_RCVSYN, &off, sizeof(off));
+        srt_setsockflag(sock, SRTO_TSBPDMODE, &yes, sizeof(yes));
+        srt_setsockflag(sock, SRTO_PAYLOADSIZE, &payload, sizeof(payload));
+        srt_setsockflag(sock, SRTO_PEERLATENCY, &lat, sizeof(lat));
+        srt_setsockflag(sock, SRTO_RCVLATENCY, &lat, sizeof(lat));
+        const std::string sid = "publish:" + name;
+        srt_setsockflag(sock, SRTO_STREAMID, sid.data(), int(sid.size()));
+        if (g_secret.size() >= 10) srt_setsockflag(sock, SRTO_PASSPHRASE, g_secret.data(), int(g_secret.size()));
+        sockaddr_in a{};
+        a.sin_family = AF_INET; a.sin_port = htons(uint16_t(g_mirror_port));
+        inet_pton(AF_INET, g_mirror_host.c_str(), &a.sin_addr);
+        if (srt_connect(sock, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == SRT_ERROR) close();
+    }
+
+    void send(const std::string& name, const char* data, int n) {
+        const auto now = std::chrono::steady_clock::now();
+        if (sock == SRT_INVALID_SOCK) {
+            if (now < next_try) return;
+            next_try = now + std::chrono::seconds(2);
+            connect_now(name);
+            if (sock == SRT_INVALID_SOCK) return;
+        }
+        const SRT_SOCKSTATUS st = srt_getsockstate(sock);
+        if (st == SRTS_CONNECTING) return;
+        if (st != SRTS_CONNECTED) { close(); return; }
+        if (!logged_up) { logged_up = true; std::fprintf(stderr, "relay: mirror to mediamtx up: %s\n", name.c_str()); }
+        if (srt_sendmsg(sock, data, n, -1, 0) == SRT_ERROR) {
+            if (srt_getlasterror(nullptr) != SRT_EASYNCSND) close();
+        }
+    }
+};
 
 struct Id { std::string role, name, secret; };
 
@@ -108,11 +157,13 @@ void publisher_loop(std::string name, SRTSOCKET pub) {
     std::fprintf(stderr, "relay: publisher up: %s\n", name.c_str());
     std::vector<char> buf(1500);
     uint64_t pkts = 0;
+    Mirror mirror;
     while (!g_stop) {
         const int n = srt_recvmsg(pub, buf.data(), int(buf.size()));
         if (n == SRT_ERROR) break;
         if (n == 0) continue;
         ++pkts;
+        if (!g_mirror_host.empty()) mirror.send(name, buf.data(), n);   // outside the lock: it may take a moment, readers must not wait on it
         std::lock_guard<std::mutex> lk(g_mtx);
         auto it = g_readers.find(name);
         if (it == g_readers.end()) continue;
@@ -131,6 +182,7 @@ void publisher_loop(std::string name, SRTSOCKET pub) {
         if (it != g_publishers.end() && it->second == pub) g_publishers.erase(it);
         // Readers stay connected; they resume when the publisher reconnects.
     }
+    mirror.close();
     srt_close(pub);
     std::fprintf(stderr, "relay: publisher gone: %s (%llu packets)\n", name.c_str(), (unsigned long long)pkts);
 }
@@ -143,6 +195,13 @@ int main() {
     const int port    = (e = std::getenv("LL_PORT"))        ? std::atoi(e) : 8895;
     const int latency = (e = std::getenv("LL_LATENCY_MS"))  ? std::atoi(e) : 40;
     g_secret          = (e = std::getenv("LL_PUBLISH_SECRET")) ? e : "";
+    if ((e = std::getenv("LL_MIRROR")) && *e) {
+        const std::string m = e;
+        const auto c = m.rfind(':');
+        if (c != std::string::npos) { g_mirror_host = m.substr(0, c); g_mirror_port = std::atoi(m.c_str() + c + 1); }
+        if (g_mirror_host.empty() || g_mirror_port <= 0) { g_mirror_host.clear(); std::fprintf(stderr, "relay: LL_MIRROR '%s' ignored (want host:port)\n", m.c_str()); }
+        else std::fprintf(stderr, "relay: mirroring every stream to mediamtx at %s:%d\n", g_mirror_host.c_str(), g_mirror_port);
+    }
     if (g_secret.empty())
         std::fprintf(stderr, "relay: WARNING LL_PUBLISH_SECRET unset - anyone can publish\n");
 

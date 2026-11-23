@@ -31,6 +31,8 @@ printf 'LL_PORT=8895
 LL_LATENCY_MS=40
 LL_PUBLISH_SECRET=%s
 ' "$SECRET" > /etc/arena-lowlat.env
+# Where the Arena Hub runs (mediamtx on this machine), also copy every stream into it so the hub lists, previews and records Link streams.
+if [ -d /opt/arena ] || [ -n "$MIRROR" ]; then echo "LL_MIRROR=${MIRROR:-127.0.0.1:8890}" >> /etc/arena-lowlat.env; echo "hub mirror on: ${MIRROR:-127.0.0.1:8890}"; fi
 
 cat > /etc/systemd/system/arena-lowlat.service <<'UNIT'
 [Unit]
