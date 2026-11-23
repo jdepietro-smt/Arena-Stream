@@ -1,11 +1,13 @@
-import { app, BrowserWindow, desktopCapturer, session } from 'electron'
+import { app, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron'
 import * as path from 'path'
+import { setupAutoUpdate } from './autoupdate'
 
 app.setName('Arena Comms')
 app.setAppUserModelId('com.smt.arenacomms')
 
 const hasSingleLock = app.requestSingleInstanceLock()
 let win: BrowserWindow | null = null
+let inSession = false
 
 if (!hasSingleLock) {
   app.quit()
@@ -60,6 +62,14 @@ if (hasSingleLock) {
       )
     })
     createWindow()
+    // Software updates: see autoupdate.ts. The window tells us when this PC is in a live session; an update never installs over that unless asked.
+    ipcMain.on('comms-live', (_e, live: boolean) => { inSession = !!live })
+    setupAutoUpdate({
+      app: 'comms',
+      isLive: () => inSession,
+      prepareToQuit: async () => { win?.webContents.send('comms-quitting'); await new Promise(r => setTimeout(r, 1500)) },
+      send: (ch, ...args) => { if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(ch, ...args) },
+    })
   })
 
   // A server reached by bare IP address cannot have a public CA certificate, so it runs a

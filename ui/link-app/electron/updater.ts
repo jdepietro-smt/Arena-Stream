@@ -17,7 +17,7 @@ export interface UpdaterStatus {
 }
 
 export interface UpdaterEnv {
-  app: 'link'
+  app: 'link' | 'decoder' | 'comms'
   version: string
   host: string
   dir: string                                   // where installers are kept

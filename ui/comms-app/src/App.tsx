@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { CommsEngine, type ConnectionTestResult, type MusicSource, Channel, PeerInfo, httpBase } from './lib/comms'
 import './kp.css'
+import UpdateChip from './UpdateChip'
 import './App.css'
 
 /** LCD display colours: [css colour, "r, g, b" for glows]. */
@@ -169,6 +170,8 @@ export default function App() {
   }
 
   const inSession = engine.status === 'connected' || engine.status === 'reconnecting'
+  // Tell the desktop app whether this PC is in a live session, so a software update never installs in the middle of one.
+  useEffect(() => { (window as unknown as { comms?: { setLive?: (b: boolean) => void } }).comms?.setLive?.(inSession) }, [inSession])
 
   // Keep a phone's screen on while it is on the intercom (a sleeping phone drops the audio). Taken again when the page comes back to the front.
   useEffect(() => {
@@ -218,7 +221,7 @@ export default function App() {
     <div className="app" data-density={prefs.density}>
       <div className="titlebar">
         <div className="brand"><img src="logo.png" alt="" /><span>ARENA</span><b>COMMS</b></div>
-        <div className="title-right">{!inSession && <StatusPill engine={engine} />}</div>
+        <div className="title-right"><UpdateChip />{!inSession && <StatusPill engine={engine} />}</div>
       </div>
       {inSession && engine.audioBlocked && <button className="audio-banner" onClick={() => engine.resumeAudio()}>Click here to turn on audio</button>}
       {!inSession && engine.status !== 'connecting'

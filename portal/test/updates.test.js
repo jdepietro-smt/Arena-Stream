@@ -19,6 +19,7 @@ async function put(u, version, buf = exe(), app = 'link', label = 'Link') {
 test('the version is read from the installer file name, and anything else is refused', () => {
   assert.deepEqual(parseName('Arena-Link-Setup-0.2.0.exe'), { app: 'link', version: '0.2.0', file: 'Arena-Link-Setup-0.2.0.exe' })
   assert.equal(parseName('Arena-Decoder-Setup-1.10.3.exe').app, 'decoder')
+  assert.equal(parseName('Arena-Comms-Setup-0.2.0.exe').app, 'comms')
   for (const bad of ['setup.exe', 'Arena-Link-Setup-0.2.exe', 'Arena-Link-Setup-0.2.0.exe.zip', '../Arena-Link-Setup-0.2.0.txt', '', null]) assert.equal(parseName(bad), null, String(bad))
   assert.equal(parseName('../../Arena-Link-Setup-0.2.0.exe').file, 'Arena-Link-Setup-0.2.0.exe')   // only the base name is kept
 })

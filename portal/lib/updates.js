@@ -13,7 +13,8 @@ const crypto = require('node:crypto')
 
 const APPS = {
   link:    { label: 'Arena Link',    pattern: /^Arena-Link-Setup-(\d+\.\d+\.\d+)\.exe$/, selfUpdates: true },
-  decoder: { label: 'Arena Decoder', pattern: /^Arena-Decoder-Setup-(\d+\.\d+\.\d+)\.exe$/, selfUpdates: false },   // the standalone Decoder app cannot update itself yet
+  decoder: { label: 'Arena Decoder', pattern: /^Arena-Decoder-Setup-(\d+\.\d+\.\d+)\.exe$/, selfUpdates: true },
+  comms:   { label: 'Arena Comms',   pattern: /^Arena-Comms-Setup-(\d+\.\d+\.\d+)\.exe$/, selfUpdates: true },
 }
 const KEEP = 5                          // releases kept per app
 const MAX_BYTES = 500 * 1024 * 1024

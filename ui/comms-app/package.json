@@ -1,6 +1,6 @@
 {
   "name": "arena-comms",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SMT Arena Comms — network-based broadcast intercom",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -42,7 +42,16 @@
       "package.json"
     ],
     "win": {
-      "target": "portable"
-    }
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Arena Comms"
+    },
+    "artifactName": "Arena-Comms-Setup-${version}.${ext}"
   }
 }
