@@ -41,12 +41,14 @@ interface EncStats {
   viewers: number; relayUp: boolean; relaysUp?: number; relaysTotal?: number; relayRttMs: number; capDrops: number; directory: 'ok' | 'failed' | 'off'
   lossPct?: number; targetKbps?: number; adapt?: boolean; warn?: string
   relayLatencyMs?: number; relayAuto?: boolean; relayProbeMs?: number
+  relays?: { host: string; port: number; up: boolean; rttMs?: number; latencyMs?: number; probeMs?: number }[]
 }
 interface DecState { state: string; encoder?: string; path?: string; note?: string; latencyMs?: number; probeMs?: number }
 interface DecStats {
   rttMs: number; bitrateKbps: number; pktLoss: number; pktDrop: number; decodedFps: number
   rxMs: number; g2gMs: number; g2gMaxMs: number; decodeMs: number; outMs: number; skipped: number
   decoder?: string; format: string
+  paths?: number; pathUp?: boolean[]; pathRttMs?: number[]; pathLatencyMs?: number[]; pathProbeMs?: number[]; pathHost?: string[]
 }
 
 const TEST_PATTERNS = [
@@ -432,9 +434,9 @@ function StreamPanel({ stream: e, index, all, cards, scanning, onScan, canRemove
           <p className="muted small">Decoders on this network connect directly. Remote decoders connect through the relay.</p>
           <label className="check"><input type="checkbox" checked={e.remote} disabled={live} onChange={ev => set({ remote: ev.target.checked })} /> Allow remote decoders (internet)</label>
           {e.remote && (
-            <label>Upload buffer <span className="hint">{live && stats?.relayLatencyMs ? `using ${stats.relayLatencyMs} ms${stats.relayAuto && (stats.relayProbeMs ?? 0) > 0 ? ` (${stats.relayProbeMs} ms to the server)` : ''}` : 'this PC to the server - more = fewer glitches, more delay'}</span>
+            <label>Upload buffer <span className="hint">{live && stats?.relayLatencyMs ? (stats.relayAuto ? `each relay sized from its own distance: ${(stats.relays ?? []).filter(r => r.up).map(r => `${r.host} ${r.probeMs && r.probeMs > 0 ? r.probeMs + ' ms away, ' : ''}${r.latencyMs ?? '?'} ms buffer`).join('; ') || `using ${stats.relayLatencyMs} ms`}` : `using ${stats.relayLatencyMs} ms`) : 'this PC to each relay - more = fewer glitches, more delay'}</span>
               <select value={e.relayLatency} disabled={live} onChange={ev => set({ relayLatency: Number(ev.target.value) })}>
-                <option value={0}>Auto (from this PC's ping to the server)</option>
+                <option value={0}>Auto (from this PC's distance to each relay)</option>
                 {[60, 80, 100, 120, 160, 200, 300].map(v => <option key={v} value={v}>{v} ms</option>)}
               </select>
             </label>
@@ -686,9 +688,9 @@ function DecoderPanel({ dec: d, index, all, outputs, outputNote, scanning, onSca
                 {[20, 40, 60, 100].map(v => <option key={v} value={v}>{v} ms</option>)}
               </select>
             </label>
-            <label>Download buffer <span className="hint">{live && state.path === 'relay' && state.latencyMs ? `using ${state.latencyMs} ms${(state.probeMs ?? 0) > 0 ? ` (${state.probeMs} ms to the server)` : ''}` : 'server to this PC'}</span>
+            <label>Download buffer <span className="hint">{live && state.path === 'relay' && stats?.pathLatencyMs?.some(v => v > 0) ? (stats.pathLatencyMs ?? []).slice(0, stats.paths === 2 ? 2 : 1).map((v, i) => `${stats.pathHost?.[i] ?? 'relay'}: ${(stats.pathProbeMs?.[i] ?? -1) > 0 ? stats.pathProbeMs![i] + ' ms away, ' : ''}${v} ms buffer`).join('; ') : live && state.path === 'relay' && state.latencyMs ? `using ${state.latencyMs} ms` : 'relay to this PC'}</span>
               <select value={d.relayLatency} onChange={ev => restartWith({ relayLatency: Number(ev.target.value) })}>
-                <option value={0}>Auto (from this PC's ping to the server)</option>
+                <option value={0}>Auto (from this PC's distance to each relay)</option>
                 {[60, 80, 100, 120, 160, 200, 300].map(v => <option key={v} value={v}>{v} ms</option>)}
               </select>
             </label>

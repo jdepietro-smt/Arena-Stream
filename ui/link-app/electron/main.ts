@@ -664,7 +664,7 @@ function startDecoder(id: string, select: string): { ok: boolean; error?: string
         const j = JSON.parse(l)
         if (j.type === 'link_state') { decLast.set(id, j); send('decoder-state', id, j); return }
         if (j.type === 'decoder_stats') {
-          decPaths.set(id, { paths: j.paths, up: j.pathsUp, pathUp: j.pathUp, rttMs: j.pathRttMs, wins: j.pathWins, dups: j.dupDropped, late: j.lateDropped, lost: j.pktLoss, dropped: j.pktDrop, kbps: j.bitrateKbps, g2gMs: j.g2gMs })
+          decPaths.set(id, { paths: j.paths, up: j.pathsUp, pathUp: j.pathUp, rttMs: j.pathRttMs, wins: j.pathWins, dups: j.dupDropped, late: j.lateDropped, lost: j.pktLoss, dropped: j.pktDrop, kbps: j.bitrateKbps, g2gMs: j.g2gMs, latencyMs: j.pathLatencyMs, probeMs: j.pathProbeMs, hosts: j.pathHost })
           send('decoder-stats', id, j); return
         }
       } catch { /* fall through to log */ }

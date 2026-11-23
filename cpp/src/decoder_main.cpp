@@ -20,6 +20,8 @@
 #include "playout_device.h"
 #include "frame_queue.h"
 #include "fec_profile.h"
+#include "relay_latency.h"
+#include "relay_probe.h"
 #include "path_dedupe.h"
 
 #include <algorithm>
@@ -289,6 +291,9 @@ static int srt_read_cb(void* opaque, uint8_t* buf, int sz) {
 
 // One connected SRT source with its MPEG-TS demuxer.
 struct Source {
+    int              latency_ms = 0;          // the buffer this connection is using
+    double           probe_ms = -1;           // its measured round trip (-1 = not measured)
+    std::string      host;
     SRTSOCKET        sock = SRT_INVALID_SOCK;
     AVIOContext*     avio = nullptr;
     AVFormatContext* fmt  = nullptr;
@@ -328,8 +333,17 @@ static bool open_source(const std::string& url, int latency_ms, const std::strin
         }
     }
 
-    s.sock = srt_create_socket();
+    // latency_ms of 0 means "size it for this relay": measure its round trip and use the usual rule (see relay_latency.h), so a relay
+    // close to this PC gets a small buffer and a far one a larger one. Only for relay connections (those have a stream id): a direct
+    // connection to an encoder is never probed, because that would show up as a viewer there.
     int lat = latency_ms;
+    s.host = host;
+    if (lat <= 0) {
+        if (!streamid.empty()) { s.probe_ms = sdi::link::srt_rtt_ms(host, port); lat = sdi::link::auto_relay_latency_ms(s.probe_ms); }
+        else lat = 40;
+    }
+    s.latency_ms = lat;
+    s.sock = srt_create_socket();
     srt_setsockopt(s.sock, 0, SRTO_RCVLATENCY, &lat, sizeof(lat));
     if (!streamid.empty()) {
         const std::string cfg = streamid.rfind("read:", 0) == 0 ? sdi::fec::config(fec_profile) : std::string();
@@ -342,7 +356,8 @@ static bool open_source(const std::string& url, int latency_ms, const std::strin
     sockaddr_in sa{};
     sa.sin_family = AF_INET; sa.sin_port = htons(uint16_t(port));
     inet_pton(AF_INET, host.c_str(), &sa.sin_addr);
-    std::cerr << "sdi_decoder: connecting to " << host << ":" << port << "\n";
+    std::cerr << "sdi_decoder: connecting to " << host << ":" << port << " (buffer " << lat << " ms"
+              << (s.probe_ms > 0 ? ", round trip " + std::to_string(int(s.probe_ms)) + " ms" : std::string()) << ")\n";
     if (srt_connect(s.sock, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) < 0) {
         why = std::string("connect failed: ") + srt_getlasterror_str();
         close_source(s);
@@ -382,6 +397,9 @@ struct Stats {
     uint64_t wins[2]     = {0, 0};   // packets each path delivered first (two paths only)
     uint64_t dups        = 0;    // second copies dropped
     uint64_t late        = 0;    // copies that came too late to use
+    int     path_lat[2]  = {0, 0};             // the buffer each path uses, ms
+    int     path_probe[2] = {-1, -1};          // and the round trip measured to its relay, ms
+    std::string path_host[2];
     bool    path_ok[2]   = {true, false};      // each path connected right now
     double  path_rtt[2]  = {-1, -1};           // and its round trip, ms (-1 = unknown)
     std::string format;
@@ -408,6 +426,9 @@ static void emit_stats(const Stats& s) {
               << ",\"lateDropped\":" << s.late
               << ",\"pathUp\":["     << (s.path_ok[0] ? "true" : "false") << "," << (s.path_ok[1] ? "true" : "false") << "]"
               << ",\"pathRttMs\":["  << s.path_rtt[0] << "," << s.path_rtt[1] << "]"
+              << ",\"pathLatencyMs\":[" << s.path_lat[0] << "," << s.path_lat[1] << "]"
+              << ",\"pathProbeMs\":[" << s.path_probe[0] << "," << s.path_probe[1] << "]"
+              << ",\"pathHost\":[\"" << s.path_host[0] << "\",\"" << s.path_host[1] << "\"]"
               << ",\"decoder\":\""   << s.decoder << "\""
               << ",\"format\":\""    << s.format << "\""
               << "}\n";
@@ -707,6 +728,8 @@ int main(int argc, char** argv) {
     std::atomic<bool> readers_stop{false};
     std::atomic<SRTSOCKET> path_sock[2] = {SRT_INVALID_SOCK, SRT_INVALID_SOCK};
     std::atomic<bool> path_up[2] = {false, false};
+    std::atomic<int> path_lat[2] = {0, 0}, path_probe[2] = {-1, -1};
+    std::string path_host[2];            // set under merged.m
     std::jthread readers[2];
     auto steady_us = [] { return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
     auto reader = [&](int idx, Source* initial, std::string url) {
@@ -726,6 +749,8 @@ int main(int argc, char** argv) {
                 std::cerr << "sdi_decoder: path " << idx + 1 << " connected\n";
             }
             path_sock[idx] = cur->sock; path_up[idx] = true;
+            path_lat[idx] = cur->latency_ms; path_probe[idx] = int(cur->probe_ms);
+            { std::lock_guard<std::mutex> lk(merged.m); path_host[idx] = cur->host; }
             while (!readers_stop && av_read_frame(cur->fmt, p) >= 0) {
                 if (p->stream_index >= 0 && unsigned(p->stream_index) < cur->fmt->nb_streams) {
                     const int64_t ts = p->dts != AV_NOPTS_VALUE ? p->dts : p->pts;
@@ -1168,12 +1193,13 @@ int main(int argc, char** argv) {
                 stats.paths = 2; stats.paths_up = int(path_up[0].load()) + int(path_up[1].load());
                 stats.wins[0] = merged.first[0]; stats.wins[1] = merged.first[1]; stats.dups = merged.dup; stats.late = merged.late;
                 for (int pi = 0; pi < 2; ++pi) {
+                    stats.path_lat[pi] = path_lat[pi].load(); stats.path_probe[pi] = path_probe[pi].load(); stats.path_host[pi] = path_host[pi];
                     stats.path_ok[pi] = path_up[pi].load();
                     const SRTSOCKET ps = path_sock[pi].load();
                     SRT_TRACEBSTATS pt{};
                     stats.path_rtt[pi] = (ps != SRT_INVALID_SOCK && srt_bistats(ps, &pt, 0, 1) == 0) ? double(pt.msRTT) : -1;
                 }
-            } else stats.paths_up = 1;
+            } else { stats.paths_up = 1; stats.path_lat[0] = src1->latency_ms; stats.path_probe[0] = int(src1->probe_ms); stats.path_host[0] = src1->host; }
             if (sk != SRT_INVALID_SOCK && srt_bistats(sk, &s, 1, 1) == 0) {
                 stats.rtt_ms   = s.msRTT;
                 if (!dual) stats.path_rtt[0] = s.msRTT;

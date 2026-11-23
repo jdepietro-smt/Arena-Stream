@@ -67,3 +67,13 @@ Two independent protections for the internet path, used together or alone:
   (encoder to relay: `--relay-fec`; relay to decoder: `--fec`). The setting rides in the SRT stream id (`read:NAME~fec=light`), so
   programs that do not send it get no FEC and keep working; the relay must be the new build to accept it.
   The encoder's send-rate cap is raised to leave room for the parity packets, otherwise the queue backs up (measured +900 ms).
+
+## Relays in different places (nearest relay)
+
+With relays in more than one region (for example Ashburn and Hillsboro), each SRT leg is sized from its own distance instead of one
+number for everything. Each leg measures the round trip to its relay when it connects, from how long a deliberately refused
+connection (`probe:rtt`, see `relay_probe.h`) takes: two handshake round trips, nothing registered on the relay. The buffer is then
+1.25 x RTT + 5 ms (60 ms at least, 200 ms at most). The encoder does this per relay it publishes to; the decoder does it per path it
+reads. A decoder reading two relays takes whichever copy of each packet arrives first, so the picture follows the nearer relay
+(measured with a stand-in for a 70 ms relay: about 165 ms behind over the near relay versus about 315 ms over the far one, with a
+hitless switch to the far one if the near one dies). A fixed buffer set in the app still applies to every leg, as before.

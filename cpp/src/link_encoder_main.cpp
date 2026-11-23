@@ -236,7 +236,7 @@ static std::string relay_legs_json(const std::vector<sdi::TsFanout::LegHealth>& 
     std::string o = "[";
     char b[96];
     for (size_t i = 0; i < legs.size(); ++i) {
-        std::snprintf(b, sizeof b, ",\"rttMs\":%.1f,\"sent\":%lld,\"retrans\":%lld}", legs[i].rtt_ms, (long long)legs[i].sent, (long long)legs[i].retrans);
+        std::snprintf(b, sizeof b, ",\"rttMs\":%.1f,\"sent\":%lld,\"retrans\":%lld,\"latencyMs\":%d,\"probeMs\":%.0f}", legs[i].rtt_ms, (long long)legs[i].sent, (long long)legs[i].retrans, legs[i].latency_ms, legs[i].probe_ms);
         o += std::string(i ? "," : "") + "{\"host\":" + json_str(legs[i].host) + ",\"port\":" + std::to_string(legs[i].port) + ",\"up\":" + (legs[i].up ? "true" : "false") + b;
     }
     return o + "]";
@@ -412,19 +412,14 @@ int main(int argc, char** argv) {
         fc.relay_port       = relay_port;
         fc.relay_name       = relay_safe_name(args.name);
         fc.relay_secret     = args.relay_secret;
-        // This leg (encoder -> relay) is sized from this PC's own RTT to the server.
+        // Each leg (encoder -> relay) is sized from this PC's round trip to THAT relay, measured when it connects (see ts_fanout.h).
         relay_latency = args.relay_latency_ms;
         if (relay_latency <= 0) {
             relay_auto = true;
-            sdi::net::Url pu;
-            const auto dl = split_commas(args.directory);
-            if (!dl.empty() && sdi::net::parse_url(dl[0], pu))
-                relay_probe_ms = sdi::net::tcp_rtt_ms(pu.host, pu.port);
-            relay_latency = sdi::link::auto_relay_latency_ms(relay_probe_ms);
-            std::cerr << "relay: encoder->relay leg " << relay_latency << " ms (auto, "
-                      << (relay_probe_ms > 0 ? std::to_string(int(relay_probe_ms)) + " ms RTT to the server" : std::string("RTT not measurable, default")) << ")\n";
-        }
-        fc.relay_latency_ms = relay_latency;
+            relay_latency = sdi::link::kRelayLatencyDefaultMs;     // until the first leg has connected and measured itself
+            std::cerr << "relay: each relay's buffer will be sized from its own measured round trip\n";
+            fc.relay_latency_ms = 0;
+        } else fc.relay_latency_ms = relay_latency;
         fc.relay_fec        = (args.relay_fec == "off" ? std::string() : args.relay_fec);
     }
     // SRT pacing: video + audio + TS/SRT overhead, times headroom for bursts and retransmits.
@@ -567,10 +562,23 @@ int main(int argc, char** argv) {
                       << adapter.target() << ")\n";
         }
         std::string warn;
+        // With the buffer sized per relay, what is in use is the largest of the connected legs, and the distance shown is the nearest.
+        int eff_latency = relay_latency;
+        double eff_probe = relay_probe_ms;
+        if (relay_auto) {
+            int worst = 0; double nearest = -1;
+            for (const auto& g : fanout->relay_legs()) {
+                if (!g.up) continue;
+                worst = std::max(worst, g.latency_ms);
+                if (g.probe_ms > 0) nearest = nearest < 0 ? g.probe_ms : std::min(nearest, g.probe_ms);
+            }
+            if (worst) eff_latency = worst;
+            eff_probe = nearest;
+        }
         // A lost packet needs a full round trip to be re-sent, so while packets are being lost the
         // leg needs ~2 RTT + jitter; the auto size (1.25 RTT) is for a mostly clean path.
-        if (rh.conns && rh.rtt_ms > 0 && adapter.loss_avg() > 0.5 && relay_latency < 2 * rh.rtt_ms + 40)
-            warn = "Internet buffer " + std::to_string(relay_latency) + " ms is short for a " +
+        if (rh.conns && rh.rtt_ms > 0 && adapter.loss_avg() > 0.5 && eff_latency < 2 * rh.rtt_ms + 40)
+            warn = "Internet buffer " + std::to_string(eff_latency) + " ms is short for a " +
                    std::to_string(int(rh.rtt_ms)) + " ms round trip while packets are being lost. Raise it to " +
                    std::to_string(int(std::ceil((2 * rh.rtt_ms + 40) / 20.0)) * 20) + " ms (adds that much delay).";
         else if (adapter.drops_recent())
@@ -593,7 +601,7 @@ int main(int argc, char** argv) {
                     (unsigned long long)vq.dropped(),
                     g_dir_state == 1 ? "ok" : g_dir_state == 2 ? "failed" : "off",
                     adapter.loss_avg(), adapter.current(), adapter.enabled() ? "true" : "false", json_str(warn).c_str(),
-                    args.relay.empty() ? 0 : relay_latency, relay_auto ? "true" : "false", relay_probe_ms,
+                    args.relay.empty() ? 0 : eff_latency, relay_auto ? "true" : "false", eff_probe,
                     fanout->relays_up(), fanout->relays_total(), fc.relay_fec.c_str(), relay_legs_json(fanout->relay_legs()).c_str());
         std::fflush(stdout);
         last_v = v; last_bytes = by;

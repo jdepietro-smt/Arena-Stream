@@ -323,6 +323,12 @@ target_include_directories(fec_profile_test PRIVATE include)
 sdi_target_warnings(fec_profile_test)
 add_test(NAME fec_profile COMMAND fec_profile_test)
 
+add_executable(relay_probe_test tests/relay_probe_test.cpp)
+target_include_directories(relay_probe_test PRIVATE include)
+target_link_libraries(relay_probe_test PRIVATE sdi_core)
+sdi_target_warnings(relay_probe_test)
+add_test(NAME relay_probe COMMAND relay_probe_test)
+
 add_executable(latency_stamp_test tests/latency_stamp_test.cpp)
 target_include_directories(latency_stamp_test PRIVATE include)
 sdi_target_warnings(latency_stamp_test)

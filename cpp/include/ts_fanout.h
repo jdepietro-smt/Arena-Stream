@@ -23,6 +23,8 @@
 #include <atomic>
 #include <chrono>
 #include "fec_profile.h"
+#include "relay_latency.h"
+#include "relay_probe.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -45,7 +47,7 @@ struct FanoutConfig {
     std::vector<std::pair<std::string, int>> extra_relays;
     std::string relay_name;
     std::string relay_secret;
-    int         relay_latency_ms   = 100;
+    int         relay_latency_ms   = 100;                // 0 = size each relay's buffer from that relay's own measured round trip
     std::string relay_fec;                   // "", "light" or "standard": forward error correction to the relay (see fec_profile.h)
     int64_t     pace_bytes_per_sec = 0;      // SRT send-rate cap (SRTO_MAXBW); 0 = SRT default (unpaced)
 };
@@ -123,12 +125,12 @@ public:
         return h;
     }
     // Each relay on its own: is it connected, how far away, how much has had to be re-sent (for monitoring).
-    struct LegHealth { std::string host; int port = 0; bool up = false; double rtt_ms = -1; int64_t sent = 0, retrans = 0; };
+    struct LegHealth { std::string host; int port = 0; bool up = false; double rtt_ms = -1; int64_t sent = 0, retrans = 0; int latency_ms = 0; double probe_ms = -1; };
     std::vector<LegHealth> relay_legs() const {
         std::lock_guard<std::mutex> lk(mtx_);
         std::vector<LegHealth> out;
         for (auto& l : legs_) {
-            LegHealth h; h.host = l->host; h.port = l->port;
+            LegHealth h; h.host = l->host; h.port = l->port; h.latency_ms = l->latency_ms; h.probe_ms = l->probe_ms;
             if (l->sock != SRT_INVALID_SOCK) {
                 SRT_TRACEBSTATS st{};
                 if (srt_bistats(l->sock, &st, 0, 1) == 0) { h.up = true; h.rtt_ms = st.msRTT; h.sent = st.pktSentTotal; h.retrans = st.pktRetransTotal; }
@@ -228,6 +230,8 @@ private:
         std::string host;
         int         port;
         SRTSOCKET   sock = SRT_INVALID_SOCK;
+        int         latency_ms = 0;        // the buffer this leg is using
+        double      probe_ms = -1;         // its measured round trip (-1 = not measured / no answer)
         std::jthread th;
     };
 
@@ -235,8 +239,18 @@ private:
         const std::string sid = sdi::fec::tag_streamid("publish:" + cfg_.relay_name + ":" + cfg_.relay_secret, cfg_.relay_fec);
         const std::string fec = sdi::fec::config(cfg_.relay_fec);
         while (!stop_) {
+            // Auto: this relay's buffer follows this relay's own distance, so a nearby relay gets a small buffer and a far one a larger
+            // one, instead of everything being sized from the distance to one server. A relay that did not answer last time is
+            // checked quickly, so reconnecting is not held up.
+            int lat = cfg_.relay_latency_ms;
+            if (lat <= 0) {
+                const double rtt = leg.probe_ms < 0 ? sdi::link::srt_rtt_ms(leg.host, leg.port, 1, 700) : sdi::link::srt_rtt_ms(leg.host, leg.port);
+                leg.probe_ms = rtt;
+                lat = sdi::link::auto_relay_latency_ms(rtt);
+            }
+            leg.latency_ms = lat;
             SRTSOCKET s = srt_create_socket();
-            common_opts(s, cfg_.relay_latency_ms);
+            common_opts(s, lat);
             if (!fec.empty()) srt_setsockflag(s, SRTO_PACKETFILTER, fec.data(), int(fec.size()));
             srt_setsockflag(s, SRTO_STREAMID, sid.data(), int(sid.size()));
             const int tmo = 2000;
@@ -256,7 +270,8 @@ private:
                 continue;
             }
             { std::lock_guard<std::mutex> lk(mtx_); leg.sock = s; }
-            std::fprintf(stderr, "fanout: relay publish up (%s:%d)\n", leg.host.c_str(), leg.port);
+            std::fprintf(stderr, "fanout: relay publish up (%s:%d), buffer %d ms%s\n", leg.host.c_str(), leg.port, leg.latency_ms,
+                         leg.probe_ms > 0 ? (std::string(", round trip ") + std::to_string(int(leg.probe_ms)) + " ms").c_str() : "");
             while (!stop_) {   // send() clears leg.sock on failure; also watch the socket state
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 std::lock_guard<std::mutex> lk(mtx_);

@@ -138,6 +138,7 @@ void publisher_loop(std::string name, SRTSOCKET pub) {
 } // namespace
 
 int main() {
+    srt_setloglevel(3);   // errors only: clients that probe the round trip are refused on purpose, and libsrt would log each one as a warning
     const char* e;
     const int port    = (e = std::getenv("LL_PORT"))        ? std::atoi(e) : 8895;
     const int latency = (e = std::getenv("LL_LATENCY_MS"))  ? std::atoi(e) : 40;

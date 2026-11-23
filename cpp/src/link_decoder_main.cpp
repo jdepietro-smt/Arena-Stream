@@ -377,11 +377,9 @@ int main(int argc, char** argv) {
             double probe_ms = -1;
             // This leg (relay -> decoder) is sized from this PC's own RTT to the relay, which lives on the
             // directory's host unless the encoder said otherwise.
-            if (p.kind == "relay" && o.relay_latency <= 0) {
-                const bool relay_is_dir = p.url.find("srt://" + dir.host + ":") == 0;
-                if (relay_is_dir) probe_ms = sdi::net::tcp_rtt_ms(dir.host, dir.port);
-                p.latency_ms = sdi::link::auto_relay_latency_ms(probe_ms);
-            }
+            // Auto: 0 tells the engine to measure each relay itself and size that connection's buffer from it (with two relays, each
+            // path gets its own), so the buffer follows the distance to the relay actually used rather than to the directory's server.
+            if (p.kind == "relay" && o.relay_latency <= 0) p.latency_ms = 0;
             state("connecting", enc->name, p.kind, shown, p.kind == "relay" ? p.latency_ms : o.lan_latency, probe_ms);
             std::vector<std::string> args{"--src", p.url, "--latency", std::to_string(p.latency_ms)};
             if (!at.second.empty()) { args.push_back("--src2"); args.push_back(at.second); }

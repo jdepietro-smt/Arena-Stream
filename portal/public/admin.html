@@ -475,7 +475,7 @@ function bar(used, total) {
 function relayChips(p) {
   if (!p || !Array.isArray(p.relays) || !p.relays.length) return el('span', { class: 'hint' }, 'no data')
   return el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, p.relays.map((r, i) => el('span', { class: 'chip ' + (r.up ? 'ok' : 'bad'), title: r.host + ':' + r.port + (r.up ? '' : ' is not connected') + (r.retrans && r.sent ? ', ' + (r.retrans / r.sent * 100).toFixed(1) + '% re-sent' : '') },
-    (i === 0 ? 'primary' : 'backup') + (r.up ? (r.rttMs > 0 ? ' ' + Math.round(r.rttMs) + ' ms' : '') : ' down'))),
+    (i === 0 ? 'primary' : 'backup') + (r.up ? (r.rttMs > 0 ? ' ' + Math.round(r.rttMs) + ' ms' : '') + (r.latencyMs ? ', buffer ' + r.latencyMs : '') : ' down'))),
     p.fec && p.fec !== 'off' ? el('span', { class: 'hint' }, 'FEC ' + p.fec) : null, typeof p.lossPct === 'number' && p.lossPct >= 0.5 ? el('span', { class: 'hint' }, p.lossPct.toFixed(1) + '% re-sent') : null)
 }
 function decoderPaths(p) {
@@ -483,7 +483,7 @@ function decoderPaths(p) {
   if (p.via === 'lan') return el('span', { class: 'hint' }, 'direct on the LAN' + (p.rttMs && p.rttMs[0] > 0 ? ', ' + Math.round(p.rttMs[0]) + ' ms' : ''))
   const pu = Array.isArray(p.pathUp) ? p.pathUp : []
   const n = p.paths === 2 ? 2 : 1
-  return el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, Array.from({ length: n }, (_, i) => el('span', { class: 'chip ' + (pu[i] === false ? 'bad' : 'ok') }, 'path ' + (i + 1) + (pu[i] === false ? ' down' : p.rttMs && p.rttMs[i] > 0 ? ' ' + Math.round(p.rttMs[i]) + ' ms' : ''))),
+  return el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, Array.from({ length: n }, (_, i) => el('span', { class: 'chip ' + (pu[i] === false ? 'bad' : 'ok'), title: p.hosts && p.hosts[i] ? 'relay ' + p.hosts[i] : '' }, 'path ' + (i + 1) + (pu[i] === false ? ' down' : p.rttMs && p.rttMs[i] > 0 ? ' ' + Math.round(p.rttMs[i]) + ' ms' : '') + (pu[i] !== false && p.latencyMs && p.latencyMs[i] ? ', buffer ' + p.latencyMs[i] : ''))),
     n === 2 && Array.isArray(p.wins) ? el('span', { class: 'hint', title: 'Packets each path delivered first, and second copies dropped' }, 'first: ' + p.wins[0] + ' / ' + p.wins[1] + ', dup ' + (p.dups || 0)) : null,
     p.lost ? el('span', { class: 'hint' }, p.lost + ' lost') : null)
 }
