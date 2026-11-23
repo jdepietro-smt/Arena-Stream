@@ -12,7 +12,7 @@ const auth = require('../lib/auth')
 
 const listen = srv => new Promise(r => srv.listen(0, '127.0.0.1', () => r(srv.address().port)))
 
-async function setup() {
+async function setup(opts = {}) {
   const calls = { want: [], mtx: [], whep: [], ffmpeg: [], killed: 0, cmds: [] }
   let hostsList = []
   let ffmpegWrites = true
@@ -54,7 +54,31 @@ async function setup() {
       res.writeHead(204); res.end()
     })
   })
+  // A stand-in for the recorder service (only started when a test asks for it).
+  const recCalls = []
+  const CLIP = { id: '0123456789abcdef', stream: 'ESPN 1', name: 'Goal', kind: 'saved', inMs: 1700000000000, outMs: 1700000020000, durationSec: 20, size: 2000, createdAt: 1 }
+  const recSrv = http.createServer((req, res) => {
+    let b = ''; req.on('data', c => b += c); req.on('end', () => {
+      recCalls.push({ m: req.method, u: req.url, token: req.headers['x-rec-token'], range: req.headers.range, body: b ? JSON.parse(b) : null })
+      const j = (code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)) }
+      if (req.headers['x-rec-token'] !== 'rtok') return j(401, { error: 'bad token' })
+      if (req.url === '/status') return j(200, { ok: true, keepDays: 7, minFreePct: 10, disk: { total: 1000, free: 800 }, trimmed: null, streams: [{ name: 'ESPN 1', selected: true, live: true, state: 'recording' }, { name: 'Cam HEVC', selected: false, live: true, state: 'not recording' }] })
+      if (req.method === 'PUT' && req.url === '/config') return j(200, { ok: true, keepDays: 7, streams: (JSON.parse(b).streams || []).map(n => ({ name: n, selected: true })) })
+      if (req.url.startsWith('/coverage')) return j(200, { ranges: [{ start: 1700000000000, end: 1700000060000 }] })
+      if (req.method === 'POST' && req.url === '/clip') { const q = JSON.parse(b); return q.out > q.in ? j(200, { clip: { ...CLIP, kind: q.kind || 'preview', name: q.name || '' } }) : j(400, { error: 'the end must be after the start' }) }
+      if (req.method === 'POST' && req.url.endsWith('/keep')) return j(200, { clip: { ...CLIP, name: JSON.parse(b).name } })
+      if (req.method === 'DELETE' && req.url.startsWith('/clip/')) return j(200, { ok: true })
+      if (req.method === 'DELETE' && req.url.startsWith('/recording')) return j(200, { ok: true })
+      if (req.url.startsWith('/clip/0123456789abcdef')) {
+        const data = Buffer.from('0123456789'.repeat(20))
+        if (req.headers.range) { res.writeHead(206, { 'Content-Type': 'video/mp4', 'Content-Range': 'bytes 10-19/200', 'Content-Length': 10, 'Accept-Ranges': 'bytes' }); return res.end(data.subarray(10, 20)) }
+        res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': data.length, 'Accept-Ranges': 'bytes', ...(req.url.includes('download=1') ? { 'Content-Disposition': 'attachment; filename="Goal.mp4"' } : {}) }); return res.end(data)
+      }
+      j(404, { error: 'not found' })
+    })
+  })
   const [dp, mp, wp] = await Promise.all([listen(dirSrv), listen(mtxSrv), listen(whepSrv)])
+  const rp = opts.recorder ? await listen(recSrv) : 0
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-'))
   // A stand-in for ffmpeg: records how it was started and writes a picture where it was told to.
   const fakeSpawn = (bin, args) => {
@@ -79,7 +103,7 @@ async function setup() {
     ownerInit: 'ownerpass1234', execFile: fakeExec, ctlDir,
     spawn: fakeSpawn, ffmpeg: 'ffmpeg-test', thumbDir: path.join(dataDir, 'thumbs'),
     port: 0, adminPassword: 'adminpw', secret: 'a'.repeat(32), directoryUrl: `http://127.0.0.1:${dp}`, directoryKey: 'k',
-    mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir, updatesDir: path.join(dataDir, 'updates'),
+    mediamtxApi: `http://127.0.0.1:${mp}`, mediamtxWebrtc: `http://127.0.0.1:${wp}`, relaySrt: '127.0.0.1:8895', relayLatencyMs: 150, dataDir, updatesDir: path.join(dataDir, 'updates'), recorderUrl: `http://127.0.0.1:${rp || 1}`, recorderToken: opts.recorder ? 'rtok' : '',
   })
   const port = await listen(server)
   const base = `http://127.0.0.1:${port}`
@@ -98,8 +122,8 @@ async function setup() {
     const ct = r.headers.get('content-type') || ''
     return { status: r.status, headers: r.headers, body: ct.includes('json') ? await r.json() : await r.text() }
   }
-  const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv]) s.close() }
-  return { call, calls, close, thumbs, admin, monitor, schedules, scheduleTick, setHosts: h => { hostsList = h }, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
+  const close = async () => { store.flush(); for (const s of [server, dirSrv, mtxSrv, whepSrv, ...(opts.recorder ? [recSrv] : [])]) s.close() }
+  return { call, calls, recCalls, close, thumbs, admin, monitor, schedules, scheduleTick, setHosts: h => { hostsList = h }, ctlDir, secret: 'a'.repeat(32), setEncoders: e => { encoders = e }, pathName, store, resetCookie: () => { jar = {} }, jar: () => jar, base, dataDir }
 }
 
 test('admin api needs a login; wrong password is refused', async () => {
@@ -1125,4 +1149,59 @@ test('backup directory: set in the portal, watched, and reported on the monitor 
     await t.monitor.tick()
     assert.match((await t.call('/portal/api/owner/monitor')).body.standby.error, /rejected the access key/)
   } finally { sb.close(); await t.close() }
+})
+
+test('recordings: not installed answers plainly; installed, it needs a login, passes the token, and writes down what changes', async () => {
+  const none = await setup()
+  try {
+    await adminLogin(none)
+    const r = await none.call('/portal/api/rec/status')
+    assert.equal(r.status, 404); assert.match(r.body.error, /not installed/)
+  } finally { await none.close() }
+
+  const t = await setup({ recorder: true })
+  try {
+    assert.equal((await t.call('/portal/api/rec/status')).status, 401)                       // not signed in
+    await adminLogin(t)
+    const st = (await t.call('/portal/api/rec/status')).body
+    assert.deepEqual(st.streams.map(x => [x.name, x.selected]), [['ESPN 1', true], ['Cam HEVC', false]])
+    assert.equal(t.recCalls[0].token, 'rtok')                                                // the portal holds the token, the browser never sees it
+
+    assert.equal((await t.call('/portal/api/rec/config', { method: 'PUT', body: { streams: ['ESPN 1'], keepDays: 7 } })).status, 200)
+    assert.deepEqual(t.recCalls.find(c => c.m === 'PUT').body, { streams: ['ESPN 1'], keepDays: 7 })
+    assert.equal((await t.call('/portal/api/rec/coverage?stream=ESPN%201&from=1&to=2')).body.ranges.length, 1)
+    assert.match(t.recCalls[t.recCalls.length - 1].u, /^\/coverage\?stream=ESPN%201/)
+
+    const pv = await t.call('/portal/api/rec/clip', { method: 'POST', body: { stream: 'ESPN 1', in: 1, out: 2 } })
+    assert.equal(pv.body.clip.kind, 'preview')
+    assert.equal((await t.call('/portal/api/rec/clip', { method: 'POST', body: { stream: 'ESPN 1', in: 5, out: 2 } })).status, 400)
+    const saved = await t.call('/portal/api/rec/clip', { method: 'POST', body: { stream: 'ESPN 1', in: 1, out: 2, kind: 'saved', name: 'Goal' } })
+    assert.equal(saved.body.clip.name, 'Goal')
+
+    // video passes through with ranges, and a download is recorded
+    const whole = await t.call('/portal/api/rec/clip/0123456789abcdef')
+    assert.equal(whole.status, 200); assert.equal(whole.headers.get('content-type'), 'video/mp4'); assert.equal(whole.body.length, 200)
+    const part = await t.call('/portal/api/rec/clip/0123456789abcdef', { headers: { Range: 'bytes=10-19' } })
+    assert.equal(part.status, 206); assert.equal(part.headers.get('content-range'), 'bytes 10-19/200'); assert.equal(part.body.length, 10)
+    const dl = await t.call('/portal/api/rec/clip/0123456789abcdef?download=1')
+    assert.match(dl.headers.get('content-disposition'), /attachment/)
+    assert.equal((await t.call('/portal/api/rec/clip/not-an-id')).status, 404)               // only real clip ids are passed on
+
+    assert.equal((await t.call('/portal/api/rec/clip/0123456789abcdef', { method: 'DELETE' })).status, 200)
+    assert.equal((await t.call('/portal/api/rec/recording?stream=Old', { method: 'DELETE' })).status, 200)
+
+    await ownerLogin(t)
+    const acts = (await t.call('/portal/api/owner/activity?action=recording')).body.entries.map(e => e.action)
+    for (const a of ['recording.config', 'recording.clip', 'recording.download', 'recording.clip.delete', 'recording.delete']) assert.ok(acts.includes(a), a + ' in ' + acts.join())
+    assert.ok(!acts.includes('recording.status'))                                             // looking is not logged, changes and downloads are
+  } finally { await t.close() }
+})
+
+test('the portal monitor sees the recorder: a stream it is meant to record shows up in the snapshot', async () => {
+  const t = await setup({ recorder: true })
+  try {
+    await adminLogin(t); await ownerLogin(t)
+    await t.monitor.tick()
+    assert.equal((await t.call('/portal/api/owner/monitor')).body.running, true)             // collection works with a recorder attached
+  } finally { await t.close() }
 })

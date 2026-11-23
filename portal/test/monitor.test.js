@@ -280,3 +280,47 @@ test('with the main directory down, the backup is not blamed for it', async () =
   for (let i = 0; i < 6; i++) await r.step()
   assert.deepEqual(keys(r), ['app.directory'])
 })
+
+const recSnap = (o = {}) => ({ ok: true, freePct: 60, minFreePct: 10, trimmedAt: 0, trimmedBytes: 0, streams: [{ name: 'ESPN 1', selected: true, live: true, state: 'recording' }], ...o })
+
+test('a chosen stream that is on air but not being recorded is flagged after a minute, and clears when recording resumes', async () => {
+  const r = rig({ recSec: 60 })
+  r.snap.recorder = recSnap()
+  for (let i = 0; i < 4; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+  r.snap.recorder = recSnap({ streams: [{ name: 'ESPN 1', selected: true, live: true, state: 'stalled' }] })
+  await r.step(); await r.step(40)
+  assert.deepEqual(keys(r), [])
+  await r.step(30)
+  assert.deepEqual(keys(r), ['recording.stalled:ESPN 1'])
+  assert.match(r.m.state().alerts[0].detail, /stalled/)
+  r.snap.recorder = recSnap()
+  await r.step()
+  assert.deepEqual(keys(r), [])
+})
+
+test('streams that are not chosen, or not on air, are never reported as missing a recording', async () => {
+  const r = rig({ recSec: 10 })
+  r.snap.recorder = recSnap({ streams: [{ name: 'A', selected: false, live: true, state: 'not recording' }, { name: 'B', selected: true, live: false, state: 'waiting' }] })
+  for (let i = 0; i < 6; i++) await r.step()
+  assert.deepEqual(keys(r), [])
+})
+
+test('the recorder not answering, a nearly full disk, and an early delete are each flagged; none if recording is not installed', async () => {
+  const r = rig({ standbySec: 30 })
+  r.snap.recorder = { ok: false, error: 'connection refused', streams: [] }
+  await r.step(); await r.step(40)
+  assert.deepEqual(keys(r), ['recorder.down'])
+  r.snap.recorder = recSnap({ freePct: 11 })
+  await r.step()
+  assert.deepEqual(keys(r), ['recording.disk'])                                    // within 2 points of the 10% line
+  r.snap.recorder = recSnap({ freePct: 11, trimmedAt: 1_000_000 + 1000, trimmedBytes: 5e9 })
+  await r.step()
+  assert.deepEqual(keys(r).sort(), ['recording.disk', 'recording.trimmed'])
+  r.snap.recorder = recSnap()
+  await r.step()
+  assert.deepEqual(keys(r), [])
+  r.snap.recorder = null
+  await r.step()
+  assert.deepEqual(keys(r), [])
+})

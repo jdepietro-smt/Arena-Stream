@@ -49,6 +49,8 @@ function loadConfig(env = process.env) {
     dataDir: env.PORTAL_DATA_DIR || '/var/lib/arena-portal',
     publicBase: (env.PORTAL_PUBLIC_BASE || '').replace(/\/$/, ''),   // what share links start with, e.g. http://5.78.236.254
     ownerInit: env.PORTAL_OWNER_PASSWORD_INIT || '',                // first owner password; stored hashed, then removed from the env file
+    recorderUrl: (env.REC_URL || 'http://127.0.0.1:8920').replace(/\/$/, ''),   // the recorder service (recorder/), localhost only
+    recorderToken: env.REC_TOKEN || '',                                           // set by the recorder installer; empty = recording is not installed
     updatesDir: env.PORTAL_UPDATES_DIR || '/var/lib/arena-updates',   // app releases; the Link directory serves them to the apps
     scheduleEverySec: parseInt(env.PORTAL_SCHEDULE_SEC || '10', 10),   // how often schedules are checked (0 = off)
     monitorEverySec: parseInt(env.PORTAL_MONITOR_SEC || '5', 10),   // how often the system is checked for alerts (0 = off)
@@ -339,6 +341,50 @@ function createPortal(cfg) {
       if (m === 'GET') return send(res, 200, { link: publicLink(l), recent: store.views(l.id).slice(-50).reverse() })
     }
 
+    // ── Recordings (the recorder service does the work; this checks who is asking and writes it down) ──────────
+    if (p.startsWith('/portal/api/rec/')) {
+      if (!cfg.recorderToken) return send(res, 404, { error: 'recording is not installed on this server (see recorder/deploy/install.sh)' })
+      const sub2 = p.slice('/portal/api/rec/'.length), qs = new URL(req.url, 'http://x').search
+      const who = 'admin'
+      let rm
+      try {
+        if (sub2 === 'status' && m === 'GET') return send(res, 200, await recGet('/status'))
+        if (sub2 === 'config' && m === 'PUT') {
+          const b = await readJson(req) || {}
+          const r = await recCall('PUT', '/config', b)
+          admin.audit(who, 'recording.config', `record: ${(r.body.streams || []).filter(s => s.selected).map(s => s.name).join(', ') || 'nothing'}; keep ${r.body.keepDays} days`, clientIp(req))
+          return send(res, r.status, r.body)
+        }
+        if (sub2 === 'coverage' && m === 'GET') return send(res, 200, await recGet('/coverage' + qs))
+        if (sub2 === 'clips' && m === 'GET') return send(res, 200, await recGet('/clips'))
+        if (sub2 === 'clip' && m === 'POST') {
+          const b = await readJson(req) || {}
+          const r = await recCall('POST', '/clip', { stream: b.stream, in: b.in, out: b.out, name: b.name, kind: b.kind })
+          if (r.status === 200 && r.body.clip.kind === 'saved') admin.audit(who, 'recording.clip', `${r.body.clip.stream} ${new Date(r.body.clip.inMs).toISOString()} (${r.body.clip.durationSec} s) "${r.body.clip.name}"`, clientIp(req))
+          return send(res, r.status, r.body)
+        }
+        if ((rm = sub2.match(/^clip\/([0-9a-f]{16})\/keep$/)) && m === 'POST') {
+          const b = await readJson(req) || {}
+          const r = await recCall('POST', `/clip/${rm[1]}/keep`, { name: b.name })
+          if (r.status === 200) admin.audit(who, 'recording.clip', `saved "${r.body.clip.name}" (${r.body.clip.stream}, ${r.body.clip.durationSec} s)`, clientIp(req))
+          return send(res, r.status, r.body)
+        }
+        if ((rm = sub2.match(/^clip\/([0-9a-f]{16})$/))) {
+          if (m === 'DELETE') { const r = await recCall('DELETE', `/clip/${rm[1]}`); admin.audit(who, 'recording.clip.delete', rm[1], clientIp(req)); return send(res, r.status, r.body) }
+          if (m === 'GET') {
+            if (qs.includes('download=1')) admin.audit(who, 'recording.download', rm[1], clientIp(req))
+            return recStream(req, res, `/clip/${rm[1]}${qs}`)
+          }
+        }
+        if (sub2 === 'recording' && m === 'DELETE') {
+          const r = await recCall('DELETE', '/recording' + qs)
+          if (r.status === 200) admin.audit(who, 'recording.delete', new URL(req.url, 'http://x').searchParams.get('stream') || '', clientIp(req))
+          return send(res, r.status, r.body)
+        }
+      } catch (e) { return send(res, 502, { error: 'the recorder is not answering: ' + e.message + '. Is the arena-recorder service running?' }) }
+      return send(res, 404, { error: 'not found' })
+    }
+
     // The multiview wall: every stream that is on air, plus streams seen in the last day that are not (shown as off air),
     // each with the state the monitor has given it.
     if (p === '/portal/api/wall' && m === 'GET') {
@@ -416,6 +462,32 @@ function createPortal(cfg) {
     }
   }
 
+  // ── The recorder service (localhost HTTP) ──────────────────────────────────────────────────────────────
+  const recCall = (method, urlPath, body) => new Promise((resolve, reject) => {
+    const u = new URL(cfg.recorderUrl + urlPath)
+    const data = body === undefined ? null : Buffer.from(JSON.stringify(body))
+    const r = http.request({ method, hostname: u.hostname, port: u.port, path: u.pathname + u.search, agent: false, timeout: 20 * 60 * 1000,
+      headers: { 'X-Rec-Token': cfg.recorderToken, ...(data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}) } }, resp => {
+      let t = ''
+      resp.setEncoding('utf8'); resp.on('data', c => { t += c }); resp.on('end', () => { try { resolve({ status: resp.statusCode, body: JSON.parse(t || '{}') }) } catch { reject(new Error('bad answer')) } })
+    })
+    r.on('timeout', () => r.destroy(new Error('timed out'))); r.on('error', reject)
+    r.end(data)
+  })
+  const recGet = async urlPath => { const r = await recCall('GET', urlPath); if (r.status !== 200) throw new Error(r.body.error || 'HTTP ' + r.status); return r.body }
+  // Passes a clip (video) through with its range headers, so the browser can seek and download.
+  const recStream = (req, res, urlPath) => new Promise(resolve => {
+    const u = new URL(cfg.recorderUrl + urlPath)
+    const r = http.request({ method: 'GET', hostname: u.hostname, port: u.port, path: u.pathname + u.search, agent: false, headers: { 'X-Rec-Token': cfg.recorderToken, ...(req.headers.range ? { Range: req.headers.range } : {}) } }, resp => {
+      const h = {}
+      for (const k of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition', 'cache-control']) if (resp.headers[k]) h[k] = resp.headers[k]
+      res.writeHead(resp.statusCode, h)
+      resp.pipe(res); resp.on('end', resolve); res.on('close', () => { resp.destroy(); resolve() })
+    })
+    r.on('error', e => { if (!res.headersSent) send(res, 502, { error: 'the recorder is not answering: ' + e.message }); else res.end(); resolve() })
+    r.end()
+  })
+
   // ── Monitoring and alerts: see lib/monitor.js ───────────────────────────────────────────────────────────
   // What the monitor looks at every few seconds. The measured rate of a stream is what the media server actually receives
   // from it (not what the encoder says it sends), so a struggling link shows up even while the encoder still announces itself.
@@ -435,6 +507,12 @@ function createPortal(cfg) {
         standby = { ok: true, ids: ((await r.json()).encoders || []).map(e => e.id) }
       } catch (e) { standby = { ok: false, error: e.message, ids: [] } }
     }
+    // The recorder service, if installed: is it up, is every chosen stream that is on air actually being recorded, is the disk all right.
+    let recorder = null
+    if (cfg.recorderToken) {
+      try { const st = await recGet('/status'); recorder = { ok: true, streams: st.streams.map(s => ({ name: s.name, selected: s.selected, live: s.live, state: s.state })), freePct: st.disk.total ? st.disk.free / st.disk.total * 100 : 100, minFreePct: st.minFreePct, trimmedAt: st.trimmed ? st.trimmed.at : 0, trimmedBytes: st.trimmed ? st.trimmed.bytes : 0 } }
+      catch (e) { recorder = { ok: false, error: e.message, streams: [] } }
+    }
     let decoders = []
     try { decoders = (await dir('/v1/decoders')).decoders || [] } catch { /* directory down: the monitor says so */ }
     const rate = {}
@@ -450,7 +528,7 @@ function createPortal(cfg) {
       }
     } catch { /* media server API down: no measured rates, the service rule reports it */ }
     return {
-      directoryOk: h.app.directory, standby,
+      directoryOk: h.app.directory, standby, recorder,
       encoders: list.map(e => { const m = rate[e.relay && e.relay.name] ?? rate[e.name]; return { id: e.id, name: e.name, kbps: e.kbps || 0, measuredKbps: m, paths: pathsByName.get(e.name) || null } }),
       decoders: decoders.map(d => ({ id: d.id, name: d.name, paths: d.paths || null })),
       services: h.services, system: h.system, disks: h.disks,

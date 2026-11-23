@@ -25,6 +25,7 @@ const DEFAULTS = {
   cpuLoadPct: 90, cpuSec: 90,        // 1-minute load as a share of all cores
   memFreePct: 8, memSec: 90,
   diskWarnPct: 90, diskCritPct: 97,
+  recSec: 60,                        // a chosen stream is on air but not being recorded this long
   standbySec: 30,                    // the backup directory unreachable, or missing streams, this long
   pathSec: 20,                       // a relay down (or a decoder path lost) this long is an alert
   lossyPct: 5, lossySec: 30,         // re-sends above this share of packets on the way to the relay
@@ -118,6 +119,30 @@ function openMonitor({ dir, collect, notify, now = Date.now, opts = {} }) {
       if (sustained('sbsync', missing.length > 0, o.standbySec + 10)) raise('directory.standby.sync', 'warning', `${missing.length} stream${missing.length > 1 ? 's' : ''} not announced to the backup directory`, `${missing.map(e => e.name).slice(0, 6).join(', ')}${missing.length > 6 ? ', ...' : ''}. These PCs need the backup address in the Link app's Settings (and the new app version); until then they would disappear if the main directory failed.`)
       else if (!missing.length) clear('directory.standby.sync')
     } else if (!sb) { since.delete('sbdown'); since.delete('sbsync'); clear('directory.standby'); clear('directory.standby.sync') }
+
+    // Recording: the service is up, everything chosen that is on air is really being recorded, and the disk has room.
+    const rc = s.recorder
+    if (rc) {
+      if (sustained('recdown', !rc.ok, o.standbySec)) raise('recorder.down', 'warning', 'The recording service is not answering', `${rc.error || 'no answer'}. Nothing new is being recorded until it is back (check the arena-recorder service).`)
+      else if (rc.ok) clear('recorder.down')
+      const names = new Set()
+      for (const r of rc.streams || []) {
+        if (!r.selected || !r.live) continue
+        names.add(r.name)
+        const bad = r.state !== 'recording'
+        if (sustained('rec:' + r.name, bad, o.recSec)) raise('recording.stalled:' + r.name, 'warning', `${r.name} is on air but not being recorded`, `The recorder reports it as "${r.state}". Check the stream's relay connection and the recorder log.`)
+        else if (!bad) clear('recording.stalled:' + r.name)
+      }
+      for (const k of [...active.keys()]) if (k.startsWith('recording.stalled:') && !names.has(k.slice(18))) clear(k)
+      const low = rc.ok && typeof rc.freePct === 'number' && rc.freePct < (rc.minFreePct || 10) + 2
+      if (low) raise('recording.disk', 'warning', 'The recording disk is nearly full', `${rc.freePct.toFixed(1)}% is free. The recorder deletes the oldest recordings when it falls below ${rc.minFreePct || 10}%, so fewer than the chosen days will be kept. Record fewer streams, or give it more space.`)
+      else if (rc.ok) clear('recording.disk')
+      const recentTrim = rc.ok && rc.trimmedAt && t - rc.trimmedAt < 3600 * 1000
+      if (recentTrim) raise('recording.trimmed', 'warning', 'The disk filled up: the oldest recordings were deleted early', `About ${Math.round((rc.trimmedBytes || 0) / 1048576)} MB of the oldest recordings were removed to make room, so older footage than expected is gone.`)
+      else clear('recording.trimmed')
+    } else {
+      for (const k of [...active.keys()]) if (k === 'recorder.down' || k === 'recording.disk' || k === 'recording.trimmed' || k.startsWith('recording.stalled:')) clear(k)
+    }
 
     if (s.directoryOk) {
       // Streams

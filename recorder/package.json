@@ -1,0 +1,7 @@
+{
+  "name": "arena-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Records chosen Arena Link streams, keeps them for a set number of days, and cuts clips. Standard library only.",
+  "scripts": { "test": "node --test" }
+}

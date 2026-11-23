@@ -78,6 +78,10 @@ table.grid tbody tr:hover td{background:#1a1f27}
 .wtile .woff{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--bad);font-weight:700;letter-spacing:.14em;font-size:15px;pointer-events:none;text-shadow:0 1px 4px #000}
 .wtile .woff small{color:#e6e9ee;font-weight:400;letter-spacing:0;font-size:12px;margin-top:4px}
 .wall:fullscreen{padding:14px;overflow:auto}
+.tl{position:relative;height:50px;background:#10141a;border:1px solid var(--edge);border-radius:6px;cursor:crosshair;touch-action:none;user-select:none;overflow:hidden}
+.tl .cov{position:absolute;top:6px;bottom:20px;background:#1f8a3a;border-radius:2px;min-width:2px}.tl .sel{position:absolute;top:0;bottom:0;background:rgba(255,185,56,.28);border-left:2px solid var(--acc);border-right:2px solid var(--acc)}
+.tl .tick{position:absolute;bottom:3px;font-size:10px;color:var(--mut);transform:translateX(-50%);pointer-events:none}.tl .gridl{position:absolute;top:0;bottom:16px;width:1px;background:#232a34}
+video.recvid{width:100%;max-height:420px;background:#000;border-radius:8px}
 .err{color:var(--bad);font-size:13px;min-height:1.2em}.hint{color:var(--mut);font-size:12px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.1em;color:var(--mut);text-transform:uppercase;font-weight:600}
 </style></head><body>
 <div id="app"></div>
@@ -124,7 +128,7 @@ function showLogin() {
 }
 
 // Four sections. Video holds Streams, Web links and Decoders as a second row; the others are one page each.
-const VIDEO_TABS = [['streams', 'Streams'], ['wall', 'Wall'], ['links', 'Web links'], ['decoders', 'Decoders']]
+const VIDEO_TABS = [['streams', 'Streams'], ['wall', 'Wall'], ['recordings', 'Recordings'], ['links', 'Web links'], ['decoders', 'Decoders']]
 const isVideo = t => VIDEO_TABS.some(v => v[0] === t)
 let lastVideoTab = 'streams'
 function stopSectionTimers() { clearInterval(ownerTimer); clearInterval(healthTimer); clearInterval(capTimer); clearInterval(commsTimer) }
@@ -727,7 +731,7 @@ async function healthSection(box) {
 let actFilter = ''
 async function activitySection(box) {
   const [act, ls] = await Promise.all([oapi('/activity?limit=200' + (actFilter ? '&action=' + actFilter : '')), oapi('/links')])
-  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['updates', 'Software updates'], ['encoder', 'Encoder control'], ['schedule', 'Schedules'], ['alert', 'Alerts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
+  const sel = el('select', { onchange: () => { actFilter = sel.value; adminRender() } }, [['', 'Everything'], ['login', 'Sign-ins'], ['owner', 'Owner'], ['link', 'Links'], ['decoder', 'Decoder control'], ['settings', 'Settings'], ['service', 'Restarts'], ['recording', 'Recordings'], ['updates', 'Software updates'], ['encoder', 'Encoder control'], ['schedule', 'Schedules'], ['alert', 'Alerts'], ['account', 'Account']].map(([v, t]) => el('option', { value: v, selected: v === actFilter }, t)))
   box.replaceChildren(
     el('h2', {}, 'All links'),
     ls.links.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Link', 'Stream', 'Status', 'Created', 'Views', 'Viewers (IPs)', 'Last viewed'].map(h => el('th', {}, h)))),
@@ -1109,11 +1113,188 @@ async function wallRefresh() {
   fetchThumbs().then(wallDraw).catch(() => {})
 }
 
+// ── Recordings: choose what is recorded, find a moment on the timeline, play it, cut it, export it ──────────────
+let recEls = null, recSig = ''
+const REC = { stream: '', dayStart: 0, ranges: [], selIn: 0, selOut: 0, st: null }
+const DAYMS = 86400000
+const recSize = n => n >= 1e12 ? (n / 1e12).toFixed(2) + ' TB' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : (n / 1e6).toFixed(0) + ' MB'
+const recClock = ms => new Date(ms).toLocaleTimeString([], { hour12: false })
+const recDayStart = ms => { const d = new Date(ms); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() }
+const recDayEnd = ds => { const d = new Date(ds); return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime() }
+const toInput = ms => recClock(ms)
+const fromInput = (v, ds) => { const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(v || ''); if (!m) return null; const d = new Date(ds); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), +m[1], +m[2], +(m[3] || 0)).getTime() }
+
+function recBuild() {
+  const statusBox = el('div'), clipsBox = el('div')
+  const msg = el('div', { class: 'err', style: 'min-height:1.4em' })
+  const streamSel = el('select', { onchange: () => { REC.stream = streamSel.value; REC.selIn = REC.selOut = 0; recLoadDay() } })
+  const days = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' })
+  const tl = el('div', { class: 'tl' })
+  const inIn = el('input', { type: 'time', step: 1, style: 'width:120px', onchange: () => recFromInputs() })
+  const outIn = el('input', { type: 'time', step: 1, style: 'width:120px', onchange: () => recFromInputs() })
+  const len = el('span', { class: 'hint' })
+  const name = el('input', { type: 'text', placeholder: 'Name for the saved clip', style: 'flex:1;min-width:180px' })
+  const video = el('video', { class: 'recvid', controls: true, style: 'display:none' })
+  const player = el('div', { class: 'card', style: 'max-width:none;margin:0 0 16px;gap:10px' },
+    el('h2', {}, 'Play and cut'),
+    el('div', { class: 'row', style: 'flex-wrap:wrap' }, el('label', { style: 'flex-direction:row;align-items:center;gap:8px' }, 'Stream', streamSel), days),
+    tl,
+    el('div', { class: 'hint' }, 'Green is what was recorded. Click for a minute from that point, or drag to choose the part you want. Times are in your local time.'),
+    el('div', { class: 'row', style: 'flex-wrap:wrap' }, el('label', { style: 'flex-direction:row;align-items:center;gap:6px' }, 'From', inIn), el('label', { style: 'flex-direction:row;align-items:center;gap:6px' }, 'To', outIn), len,
+      el('button', { class: 'b', onclick: () => recQuick(30) }, 'Last 30 s'), el('button', { class: 'b', onclick: () => recQuick(300) }, 'Last 5 min')),
+    el('div', { class: 'row', style: 'flex-wrap:wrap' }, el('button', { class: 'b pri', onclick: () => recPlay() }, 'Play selection'), name, el('button', { class: 'b', onclick: () => recSave() }, 'Save as clip')),
+    msg, video)
+  const root = el('div', {}, statusBox, player, clipsBox)
+  recEls = { root, statusBox, clipsBox, msg, streamSel, days, tl, inIn, outIn, len, name, video }
+  tl.addEventListener('pointerdown', e => recDrag(e))
+  return root
+}
+
+const recMsg = (t, good) => { if (recEls) { recEls.msg.textContent = t; recEls.msg.style.color = good ? 'var(--ok)' : 'var(--bad)' } }
+
+async function recRefresh() {
+  let st
+  try { st = await api('/rec/status') } catch (e) { if (e.message === 'signed out') return; st = { error: e.message } }
+  if (document.querySelector('.modal')) return
+  const fresh = !recEls || !document.body.contains(recEls.root)
+  if (fresh) { $app.replaceChildren(...shell(recBuild())); recSig = '' }
+  REC.st = st
+  const sig = JSON.stringify(st.error ? st : { ...st, now: 0, streams: st.streams.map(x => ({ ...x, lastPieceAgeMs: 0, since: 0 })) })
+  const typing = recEls.statusBox.contains(document.activeElement) && document.activeElement.tagName === 'INPUT'
+  if (sig !== recSig && !typing) { recSig = sig; recPaintStatus() }
+  if (!st.error) {
+    const have = st.streams.filter(x => x.pieces > 0)
+    const opts = [...recEls.streamSel.options].map(o => o.value).join('|')
+    if (opts !== have.map(x => x.name).join('|')) {
+      recEls.streamSel.replaceChildren(...have.map(x => el('option', { value: x.name, selected: x.name === REC.stream }, x.name)))
+      if (!have.some(x => x.name === REC.stream)) REC.stream = have[0] ? have[0].name : ''
+      recEls.streamSel.value = REC.stream
+    }
+    if (fresh || !REC.dayStart) { REC.dayStart = recDayStart(Date.now()); recLoadDay() }
+    else if (REC.dayStart === recDayStart(Date.now())) recLoadDay(true)       // today: the green grows while it records
+    if (fresh) recClips()
+  }
+}
+
+function recPaintStatus() {
+  const st = REC.st, box = recEls.statusBox
+  if (st.error) { box.replaceChildren(el('div', { class: 'card', style: 'max-width:none;margin:0 0 16px' }, el('h2', {}, 'Recordings'), el('div', { class: 'err' }, st.error))); return }
+  const rows = st.streams
+  const chosenKbps = rows.filter(x => x.selected).reduce((n, x) => n + (x.kbps || 0), 0)
+  const perHour = st.estimate.bytesPerHour
+  const keepHours = st.keepDays * 24
+  const fits = st.estimate.hoursFit
+  const keepIn = el('input', { type: 'number', min: 1, max: 30, value: st.keepDays, style: 'width:70px' })
+  const verdict = !perHour ? 'Tick the streams you want recorded below.' :
+    fits >= keepHours ? `The streams you chose need about ${recSize(perHour)} an hour, so ${st.keepDays} days of them running all day would need ${recSize(perHour * keepHours)}. This disk has room for about ${fits >= 48 ? Math.floor(fits / 24) + ' days' : fits + ' hours'} of that: it fits.`
+      : `The streams you chose need about ${recSize(perHour)} an hour. This disk has room for about ${fits >= 48 ? Math.floor(fits / 24) + ' days' : fits + ' hours'} of that if they run all day, which is less than the ${st.keepDays} days you keep, so the oldest recordings will be deleted early. (Streams only record while they are on air.)`
+  box.replaceChildren(
+    el('div', { class: 'card', style: 'max-width:none;margin:0 0 16px;gap:10px' },
+      el('div', { class: 'row', style: 'flex-wrap:wrap' }, el('h2', { style: 'margin:0' }, 'What is recorded'),
+        el('span', { class: 'hint' }, 'Disk: ' + recSize(st.disk.free) + ' free of ' + recSize(st.disk.total) + '. Recordings use ' + recSize(st.recordingsBytes) + '.'),
+        el('div', { class: 'sp' }), el('label', { style: 'flex-direction:row;align-items:center;gap:6px' }, 'Keep for', keepIn, 'days'),
+        el('button', { class: 'b', onclick: async () => { try { await api('/rec/config', 'PUT', { keepDays: Number(keepIn.value) }); recMsg('Saved.', true); recSig = ''; recRefresh() } catch (e) { recMsg(e.message) } } }, 'Save')),
+      el('div', { class: st.estimate.hoursFit < keepHours && perHour ? 'err' : 'hint', style: 'margin:0' }, verdict),
+      st.trimmed ? el('div', { class: 'err' }, 'The disk filled up on ' + new Date(st.trimmed.at).toLocaleString() + ': ' + recSize(st.trimmed.bytes) + ' of the oldest recordings were deleted early.') : null,
+      rows.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Record', 'Stream', 'On air', 'Status', 'Recorded', ''].map(h => el('th', {}, h)))),
+        el('tbody', {}, rows.map(x => el('tr', {},
+          el('td', {}, el('input', { type: 'checkbox', checked: x.selected, onchange: async ev => { const set = new Set(REC.st.streams.filter(y => y.selected).map(y => y.name)); ev.target.checked ? set.add(x.name) : set.delete(x.name); try { await api('/rec/config', 'PUT', { streams: [...set] }); recSig = ''; recRefresh() } catch (e) { ev.target.checked = !ev.target.checked; recMsg(e.message) } } })),
+          el('td', {}, x.name), el('td', {}, el('span', { class: 'chip ' + (x.live ? 'ok' : '') }, x.live ? 'on air' : 'off')),
+          el('td', {}, el('span', { class: 'chip ' + (x.state === 'recording' ? 'ok' : x.state === 'stalled' ? 'bad' : x.selected ? 'warn' : '') }, x.selected ? (x.state === 'waiting' ? 'waiting for the stream' : x.state) : 'not recording')),
+          el('td', {}, x.pieces ? recSize(x.bytes) + ', ' + new Date(x.first).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) + ' to ' + new Date(x.last).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : el('span', { class: 'hint' }, 'nothing yet')),
+          el('td', {}, x.pieces && !x.selected ? el('button', { class: 'b', onclick: async () => { if (!confirm('Delete every recording of ' + x.name + '? This cannot be undone.')) return; try { await api('/rec/recording?stream=' + encodeURIComponent(x.name), 'DELETE'); recSig = ''; recRefresh() } catch (e) { recMsg(e.message) } } }, 'Delete recordings') : null))))) : el('div', { class: 'empty' }, 'No streams are on air yet. When one is, it appears here to tick.')))
+}
+
+async function recLoadDay(quiet) {
+  if (!REC.stream) { REC.ranges = []; recDraw(); recDays(); return }
+  const ds = REC.dayStart, de = recDayEnd(ds)
+  try { REC.ranges = (await api('/rec/coverage?stream=' + encodeURIComponent(REC.stream) + '&from=' + ds + '&to=' + de)).ranges } catch (e) { if (!quiet) recMsg(e.message) }
+  recDraw(); recDays()
+}
+function recDays() {
+  const st = REC.st; if (!st || st.error) return
+  const out = []
+  for (let i = st.keepDays - 1; i >= 0; i--) {
+    const d = new Date(); d.setDate(d.getDate() - i)
+    const ds = recDayStart(d.getTime())
+    out.push(el('button', { class: 'b' + (ds === REC.dayStart ? ' pri' : ''), onclick: () => { REC.dayStart = ds; REC.selIn = REC.selOut = 0; recLoadDay() } }, i === 0 ? 'Today' : d.toLocaleDateString([], { weekday: 'short', day: 'numeric' })))
+  }
+  recEls.days.replaceChildren(...out)
+}
+function recDraw() {
+  if (!recEls) return
+  const ds = REC.dayStart, span = recDayEnd(ds) - ds, pct = ms => ((ms - ds) / span * 100)
+  const kids = []
+  for (let h = 0; h <= 24; h += 3) { kids.push(el('div', { class: 'gridl', style: 'left:' + (h / 24 * 100) + '%' })); kids.push(el('div', { class: 'tick', style: 'left:' + Math.min(97, Math.max(3, h / 24 * 100)) + '%' }, String(h).padStart(2, '0') + ':00')) }
+  for (const r of REC.ranges) kids.push(el('div', { class: 'cov', style: 'left:' + pct(r.start) + '%;width:' + Math.max(0.12, pct(r.end) - pct(r.start)) + '%', title: recClock(r.start) + ' to ' + recClock(r.end) }))
+  if (REC.selOut > REC.selIn) kids.push(el('div', { class: 'sel', style: 'left:' + pct(REC.selIn) + '%;width:' + Math.max(0.1, pct(REC.selOut) - pct(REC.selIn)) + '%' }))
+  recEls.tl.replaceChildren(...kids)
+  recEls.inIn.value = REC.selOut > REC.selIn ? toInput(REC.selIn) : ''
+  recEls.outIn.value = REC.selOut > REC.selIn ? toInput(REC.selOut) : ''
+  const secs = Math.round((REC.selOut - REC.selIn) / 1000)
+  recEls.len.textContent = REC.selOut > REC.selIn ? (secs >= 60 ? Math.floor(secs / 60) + ' min ' + (secs % 60) + ' s' : secs + ' s') : 'nothing selected'
+}
+function recDrag(e) {
+  const rect = recEls.tl.getBoundingClientRect(), ds = REC.dayStart, span = recDayEnd(ds) - ds
+  const at = x => Math.round((ds + Math.min(1, Math.max(0, (x - rect.left) / rect.width)) * span) / 1000) * 1000
+  const x0 = e.clientX, a = at(x0)
+  recEls.tl.setPointerCapture(e.pointerId)
+  const move = ev => { const b = at(ev.clientX); REC.selIn = Math.min(a, b); REC.selOut = Math.max(a, b); recDraw() }
+  const up = ev => {
+    recEls.tl.removeEventListener('pointermove', move); recEls.tl.removeEventListener('pointerup', up)
+    if (Math.abs(ev.clientX - x0) < 4) { REC.selIn = a; REC.selOut = Math.min(a + 60000, recDayEnd(ds)); recDraw() }       // a click: a minute from there
+  }
+  recEls.tl.addEventListener('pointermove', move); recEls.tl.addEventListener('pointerup', up)
+}
+function recFromInputs() {
+  const a = fromInput(recEls.inIn.value, REC.dayStart), b = fromInput(recEls.outIn.value, REC.dayStart)
+  if (a != null && b != null && b > a) { REC.selIn = a; REC.selOut = b; recDraw() } else recMsg('The end must be after the start.')
+}
+function recQuick(sec) {
+  const last = REC.ranges[REC.ranges.length - 1]
+  if (!last) return recMsg('Nothing is recorded on this day.')
+  REC.selOut = last.end; REC.selIn = Math.max(last.start, last.end - sec * 1000); recDraw(); recMsg('')
+}
+async function recClip(kind, nm) {
+  if (!REC.stream) throw new Error('Choose a stream first.')
+  if (!(REC.selOut > REC.selIn)) throw new Error('Select a part of the timeline first.')
+  return (await api('/rec/clip', 'POST', { stream: REC.stream, in: REC.selIn, out: REC.selOut, kind, name: nm })).clip
+}
+async function recPlay() {
+  recMsg('Preparing...', true)
+  try { const c = await recClip('preview'); recPlayClip(c); recMsg('', true) } catch (e) { recMsg(e.message) }
+}
+function recPlayClip(c) {
+  const v = recEls.video
+  v.style.display = ''; v.src = '/portal/api/rec/clip/' + c.id; v.load(); v.play().catch(() => { /* the user can press play */ })
+  v.scrollIntoView({ block: 'nearest' })
+}
+async function recSave() {
+  recMsg('Cutting...', true)
+  try {
+    const c = await recClip('saved', recEls.name.value.trim() || REC.stream + ' ' + new Date(REC.selIn).toLocaleString())
+    recMsg('Saved. ', true)
+    recEls.msg.append(el('a', { href: '/portal/api/rec/clip/' + c.id + '?download=1', style: 'color:var(--acc)' }, 'Download ' + recSize(c.size)))
+    recClips()
+  } catch (e) { recMsg(e.message) }
+}
+async function recClips() {
+  let list = []
+  try { list = (await api('/rec/clips')).clips.filter(c => c.kind === 'saved') } catch { return }
+  recEls.clipsBox.replaceChildren(el('div', { class: 'card', style: 'max-width:none;margin:0 0 16px;gap:10px' }, el('h2', {}, 'Saved clips'),
+    list.length ? el('table', {}, el('thead', {}, el('tr', {}, ['Clip', 'Stream', 'Taken from', 'Length', 'Size', ''].map(h => el('th', {}, h)))),
+      el('tbody', {}, list.map(c => el('tr', {}, el('td', {}, c.name || '(no name)'), el('td', {}, c.stream), el('td', {}, new Date(c.inMs).toLocaleString()), el('td', {}, c.durationSec + ' s'), el('td', {}, recSize(c.size)),
+        el('td', {}, el('div', { class: 'row' }, el('button', { class: 'b', onclick: () => recPlayClip(c) }, 'Play'), el('a', { class: 'b', href: '/portal/api/rec/clip/' + c.id + '?download=1', style: 'text-decoration:none;color:inherit;padding:6px 10px' }, 'Download'),
+          el('button', { class: 'b', onclick: async () => { if (!confirm('Delete this clip?')) return; try { await api('/rec/clip/' + c.id, 'DELETE'); recClips() } catch (e) { recMsg(e.message) } } }, 'Delete'))))))) : el('div', { class: 'empty' }, 'No saved clips yet. Select a part of a recording above and press Save as clip.'),
+    el('div', { class: 'hint' }, 'Saved clips are kept for 30 days. Recordings themselves are kept for the number of days set above.')))
+}
+
 async function refresh() {
   if (tab === 'admin') { $app.replaceChildren(...shell(el('div'))); return adminRender() }
   if (tab === 'comms') return commsPage()
   if (tab === 'remote') return remotePage()
   if (tab === 'wall') return wallRefresh()
+  if (tab === 'recordings') return recRefresh()
   try {
     const [s, l, d] = await Promise.all([api('/streams'), api('/links'), tab === 'decoders' ? api('/decoders').catch(() => ({ decoders: [] })) : Promise.resolve({ decoders })])
     streams = s.streams; links = l.links; decoders = d.decoders
