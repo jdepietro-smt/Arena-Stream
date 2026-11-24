@@ -1,27 +1,31 @@
 {
   "name": "arena-remote",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SMT Arena Remote — secure, low-latency 60fps remote desktop",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test",
     "service": "dotnet publish ../service/ArenaRemoteService.csproj -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o build/service",
-    "dist": "npm run service && electron-builder --win nsis --x64"
+    "updater": "tsc -p tsconfig.updater.json",
+    "dist": "npm run updater && npm run service && electron-builder --win nsis --x64"
   },
   "dependencies": {
     "koffi": "^2.9.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
     "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.4.5"
   },
   "author": "SMT",
   "build": {
     "appId": "com.smt.arenaremote",
     "productName": "Arena Remote",
     "executableName": "Arena Remote",
+    "artifactName": "Arena-Remote-Setup-${version}.${ext}",
     "directories": {
       "output": "dist-installer",
       "buildResources": "build"
@@ -33,6 +37,7 @@
       "input.js",
       "secure.js",
       "direct.js",
+      "updater/**",
       "ui/**",
       "package.json",
       "!node_modules/koffi/src/**",
@@ -69,13 +74,15 @@
     ],
     "win": {
       "target": "nsis",
-      "signAndEditExecutable": false
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": true
     },
     "nsis": {
       "oneClick": false,
       "perMachine": true,
       "allowElevation": true,
       "allowToChangeInstallationDirectory": false,
+      "shortcutName": "Arena Remote",
       "include": "build/installer.nsh"
     }
   }

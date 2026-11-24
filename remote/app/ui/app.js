@@ -225,6 +225,7 @@ function openStage(h, direct) {
   show($('stage'), true); show($('app'), false)
   $('stageName').textContent = h.name
   $('stageMsg').textContent = 'Waiting for the other computer to accept…'
+  arena.setViewerLive(true)
   const v = view = { h, pc: null, conn: null, sessionId: null, ctl: null, fast: null, closed: false, statsTimer: null, locked: false, pendingMove: null, ready: false }
 
   const onMsg = async m => {
@@ -312,6 +313,7 @@ function leave(v, msg) {
   $('video').srcObject = null
   show($('stage'), false); show($('app'), true)
   view = null
+  arena.setViewerLive(false)
   $('viewerMsg').textContent = msg ?? ''
 }
 

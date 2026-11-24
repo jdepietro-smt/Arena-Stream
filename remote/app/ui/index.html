@@ -8,6 +8,7 @@
 </head>
 <body>
 <main id="login" class="card narrow">
+  <img class="logo" src="logo.png" alt="SMT" height="64">
   <h1>Arena Remote</h1>
   <p class="muted">Sign in with your Arena Remote account.</p>
   <label>Server<input id="server" value="http://localhost:8950" spellcheck="false"></label>
@@ -22,8 +23,9 @@
 
 <div id="app" hidden>
   <header>
-    <strong>Arena Remote</strong>
+    <img class="logo" src="logo.png" alt="SMT" height="30"><strong>Arena <span class="acc">Remote</span></strong>
     <nav><button id="tabViewer" class="tab on">Connect to a computer</button><button id="tabHost" class="tab">Share this computer</button></nav>
+    <span id="updateChip" class="update-chip" hidden></span>
     <span class="muted" id="who"></span>
   </header>
 
@@ -94,5 +96,6 @@
 
 <div id="modal" hidden><div class="card"><p id="modalText"></p><input id="modalInput" type="password" hidden><div id="modalBtns"></div></div></div>
 <script src="app.js"></script>
+<script src="updatechip.js"></script>
 </body>
 </html>

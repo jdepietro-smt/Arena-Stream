@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('arena', {
   },
   direct: { start: call('direct:start'), send: call('direct:send'), stop: call('direct:stop'), onMessage: cb => ipcRenderer.on('direct:msg', (_e, m) => cb(m)) },
   helperStatus: call('helper:status'),
+  setViewerLive: on => ipcRenderer.send('viewer:live', !!on),
+  update: { status: call('updater-status'), installNow: call('updater-install-now'), checkNow: call('updater-check-now'), onStatus: cb => ipcRenderer.on('updater-status', (_e, s) => cb(s)) },
   onDesktop: cb => ipcRenderer.on('desktop', (_e, name) => cb(name)),
   onFrame: cb => ipcRenderer.on('frame', (_e, data) => cb(data)),
   onKill: cb => ipcRenderer.on('kill', () => cb()),

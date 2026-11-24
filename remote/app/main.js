@@ -7,6 +7,7 @@ const identity = require('./identity')
 const { SecureHelper } = require('./secure')
 const { startDirect } = require('./direct')
 const os = require('node:os')
+const { setupAutoUpdate } = require('./updater/autoupdate')
 
 const helper = new SecureHelper()
 
@@ -22,6 +23,7 @@ app.commandLine.appendSwitch('force-fieldtrials', 'WebRTC-ForcePlayoutDelay/min_
 if (!process.env.ARENA_MULTI && !app.requestSingleInstanceLock()) app.quit()
 
 let win = null
+let viewerLive = false   // this window is connected to another computer (reported by the window)
 const host = { armed: false, sourceId: null, bounds: null, session: null, control: false }
 const bucket = { tokens: 2000, last: Date.now() } // input rate limit: 2000 events/s
 
@@ -125,7 +127,7 @@ ipcMain.on('host:input', (e, ev) => {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1280, height: 800, minWidth: 900, minHeight: 600, backgroundColor: '#0b0f14', title: 'Arena Remote', autoHideMenuBar: true,
+    width: 1280, height: 800, minWidth: 900, minHeight: 600, backgroundColor: '#0b0f14', title: 'Arena Remote', autoHideMenuBar: true, icon: path.join(__dirname, 'ui', 'logo.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, backgroundThrottling: false },
   })
   win.loadFile(path.join(__dirname, 'ui', 'index.html'))
@@ -147,6 +149,14 @@ app.whenReady().then(() => {
   helper.on('desktop', name => win?.webContents.send('desktop', name))
   helper.on('frame', f => win?.webContents.send('frame', f))
   createWindow()
+  // Software updates: see updater/autoupdate.js. Live = sharing this computer or controlling another one; nothing installs over that unless asked.
+  ipcMain.on('viewer:live', (e, on) => { if (sender(e)) viewerLive = !!on })
+  setupAutoUpdate({
+    app: 'remote',
+    isLive: () => !!host.session || viewerLive,
+    prepareToQuit: async () => { endHostSession(); direct?.stop(); win?.webContents.send('kill'); await new Promise(r => setTimeout(r, 1000)) },
+    send: (ch, ...a) => win?.webContents.send(ch, ...a),
+  })
   // Kill switch on the host machine: ends any remote session no matter what the viewer does.
   globalShortcut.register('Control+Alt+Shift+End', () => { endHostSession(); win?.webContents.send('kill') })
 })
